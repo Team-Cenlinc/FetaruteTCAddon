@@ -659,6 +659,7 @@ public final class TimetableBuilder {
       warnings.add("route " + route.routeCode() + " 排除：" + route.reason());
     }
     warnings.addAll(TimetableBuildReportText.describeDropped(chosen.dropped()));
+    warnings.addAll(chosen.couplingNotes());
     List<VehicleDuty> duties = chosen.timetable().duties();
     VehicleDutyPlanner.Result finalDuties =
         new VehicleDutyPlanner.Result(duties, List.of(), duties.size(), List.of());
@@ -1280,7 +1281,13 @@ public final class TimetableBuilder {
       throw new BuildFailure("所有运营 route 的 weight 都不是正数，无法分配服务比例");
     }
     // 加解编：支线交路由主干派生，不上网格；写法有问题（切不开、读不到编组）编表直接报错
-    CouplingPlanner.Analysis couplings = couplingsOf(input, plans);
+    CouplingPlanner.Analysis couplings =
+        couplingsOf(
+            input,
+            plans,
+            operations.stream()
+                .map(op -> op.route().routeId())
+                .collect(java.util.stream.Collectors.toSet()));
     if (!couplings.errors().isEmpty()) {
       throw new BuildFailure("加解编写法有误：" + String.join("；", couplings.errors()));
     }
@@ -1313,7 +1320,7 @@ public final class TimetableBuilder {
 
   /** 推出加解编结构（基础时分）。 */
   private static CouplingPlanner.Analysis couplingsOf(
-      BuildInput input, List<TimetableRoutePlan> plans) {
+      BuildInput input, List<TimetableRoutePlan> plans, Set<UUID> gridRoutes) {
     if (input.couplings() == CouplingInputs.NONE
         && input.routes().stream()
             .flatMap(route -> route.stops().stream())
@@ -1352,6 +1359,8 @@ public final class TimetableBuilder {
         byRoute,
         input.couplings(),
         planned,
+        gridRoutes,
+        input::poolOf,
         org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.coupleSeconds());
   }
 
@@ -1947,6 +1956,7 @@ public final class TimetableBuilder {
     // 加解编：按每一班主干派生支线班次（不上网格、与主干同频），连同拆挂计划交给派车。主干被取消，派生的一并取消。
     VehicleDutyPlanner.Couplings couplingPlan = VehicleDutyPlanner.Couplings.none();
     Map<UUID, UUID> derivedParent = new HashMap<>();
+    List<String> couplingNotes = List.of();
     if (!prepared.couplings().isEmpty()) {
       Map<UUID, TimetableRoutePlan> planById = new HashMap<>();
       Map<UUID, boolean[]> flags = new HashMap<>();
@@ -1982,6 +1992,7 @@ public final class TimetableBuilder {
       }
       couplingPlan = derived.couplings();
       derivedParent.putAll(derived.parentOf());
+      couplingNotes = derived.notes();
     }
 
     // 各起点上的名义发车时刻：派车器用它回答"这辆车在终点还要等多久才有下一班"，
@@ -2035,10 +2046,10 @@ public final class TimetableBuilder {
     }
     if (!stranded.isEmpty()) {
       throw new BuildFailure(
-          "解编（IDLE/RETURN）切下的车回不了库：解编站没有回库线路，也没有班次接它（"
+          "解编切下的车回不了库：解编站没有回库线路，也没有班次接它（就地待命、回库，或 GOTO 的支线班次排不上）（"
               + String.join("、", stranded.stream().limit(5).toList())
               + (stranded.size() > 5 ? " 等 " + stranded.size() + " 班" : "")
-              + "）；请给解编站配回库线路，或改用 GOTO");
+              + "）；请给解编站配一条回库线路（首站是解编站）");
     }
     Map<UUID, UUID> dutyByProvisional = new HashMap<>();
     Map<UUID, Optional<String>> consistByDuty = new HashMap<>();
@@ -2347,7 +2358,8 @@ public final class TimetableBuilder {
                 inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs())),
             phases,
             unabsorbableByDirection(residuals, timetable, prepared, gridGroups),
-            Map.copyOf(slotByCode)),
+            Map.copyOf(slotByCode),
+            couplingNotes),
         brokenTrunks,
         brokenBranches);
   }
@@ -3779,6 +3791,7 @@ public final class TimetableBuilder {
    * @param droppedAt 各取消班次的名义发车（相对秒），与 {@code dropped} 一一对应：相位候选按它剔除截短窗口末端的取消
    * @param unabsorbableByDirection 方向键 → 它的班次卷进了几处不可吸收残余
    * @param slotByCode 运营班次的车次号 → 名义格子（严格模式取消用）；出入库走行与带客回库班不在里面
+   * @param couplingNotes 加解编没能派生的主干班次（进编表报告）
    */
   private record Attempt(
       int headwaySeconds,
@@ -3799,7 +3812,8 @@ public final class TimetableBuilder {
       List<PhasePlanner.Residue> residues,
       PhasePlanner.Phases phases,
       Map<String, Integer> unabsorbableByDirection,
-      Map<String, CancelSlot> slotByCode) {
+      Map<String, CancelSlot> slotByCode,
+      List<String> couplingNotes) {
 
     /** 完整窗口上的评分：取消全算。 */
     ResourcePhasePlanner.CompletionScore completionScore() {
@@ -3855,7 +3869,8 @@ public final class TimetableBuilder {
           residues,
           selected,
           unabsorbableByDirection,
-          slotByCode);
+          slotByCode,
+          couplingNotes);
     }
 
     /** 成功判据：只看运行时让不掉的那些。可吸收残余照常发布，运行时会在让车点等一会儿。 */

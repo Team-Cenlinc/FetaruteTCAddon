@@ -9,8 +9,10 @@ import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnLocat
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnMode;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -34,12 +36,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlock
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -173,12 +177,14 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
           "自动发车失败: 缺少 spawn pattern route=" + route.code() + " depot=" + depotId.value());
       return Optional.empty();
     }
-    String pattern = patternOpt.get();
-
     TrainCarts trainCarts = TrainCarts.plugin;
     if (trainCarts == null) {
       return Optional.empty();
     }
+    String pattern =
+        choice.kind() == ConsistArbiter.SpawnChoice.Kind.LEGACY
+            ? beforeJoin(provider, route, patternOpt.get(), trainCarts)
+            : patternOpt.get();
     Optional<CompositeSpawnPattern.Parsed> parsed =
         CompositeSpawnPattern.parse(trainCarts, pattern);
     if (parsed.isEmpty()) {
@@ -338,6 +344,64 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
                     now,
                     choice.tags(),
                     entry.index())));
+  }
+
+  /**
+   * 写了联挂（COPL）的主干按旧规则出车时只出联挂之前的那一段：route 上写的是联挂之后的完整写法（编表的要求），按表时票上已经是编表推好的那一段。 推法与编表相同（{@link
+   * CouplingPlanner#beforeJoin}）；没写联挂或推不出时照原写法。
+   */
+  private String beforeJoin(
+      StorageProvider provider, Route route, String pattern, TrainCarts trainCarts) {
+    try {
+      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      if (stops.stream().noneMatch(stop -> RouteCouplingDirectives.couple(stop).isPresent())) {
+        return pattern;
+      }
+      Map<String, Route> byCode = new HashMap<>();
+      Map<String, List<RouteStop>> stopsByCode = new HashMap<>();
+      List<RouteCouplingDirectives.RouteRef> lineRoutes = new ArrayList<>();
+      for (Route other : provider.routes().listByLine(route.lineId())) {
+        String code = other.code().toLowerCase(Locale.ROOT);
+        List<RouteStop> otherStops =
+            other.id().equals(route.id()) ? stops : provider.routeStops().listByRoute(other.id());
+        byCode.putIfAbsent(code, other);
+        stopsByCode.putIfAbsent(code, otherStops);
+        lineRoutes.add(
+            new RouteCouplingDirectives.RouteRef(
+                other.code(), RouteCouplingDirectives.groupOf(other.metadata()), otherStops));
+      }
+      Optional<String> kept =
+          CouplingPlanner.beforeJoin(
+              new RouteCouplingDirectives.RouteRef(
+                  route.code(), RouteCouplingDirectives.groupOf(route.metadata()), stops),
+              pattern,
+              lineRoutes,
+              code -> {
+                String key = code.toLowerCase(Locale.ROOT);
+                Route other = byCode.get(key);
+                List<RouteStop> otherStops = stopsByCode.getOrDefault(key, List.of());
+                return Optional.ofNullable(other)
+                    .flatMap(DepotSpawnPattern::fromRoute)
+                    .or(
+                        () ->
+                            otherStops.isEmpty()
+                                ? Optional.empty()
+                                : SpawnDirectiveParser.findDirectiveTarget(
+                                        otherStops.get(0), "CRET")
+                                    .flatMap(this::depotSignPattern));
+              },
+              composite ->
+                  CompositeSpawnPattern.parse(trainCarts, composite)
+                      .map(CompositeSpawnPattern.Parsed::partSizes));
+      kept.ifPresent(
+          value ->
+              debugLogger.accept(
+                  "出车按联挂之前的编组 route=" + route.code() + " pattern=" + pattern + " -> " + value));
+      return kept.orElse(pattern);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("推联挂之前的编组失败 route=" + route.code() + " error=" + ex);
+      return pattern;
+    }
   }
 
   /** 交路收尾 DSTY 那个车库牌子第 4 行的编组（回库交路首站不是车库，借它回的那个车库的）；没有 DSTY 或读不到时为空。 */

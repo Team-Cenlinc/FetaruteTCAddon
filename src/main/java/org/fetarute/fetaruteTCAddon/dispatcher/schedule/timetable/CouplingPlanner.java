@@ -11,6 +11,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
@@ -26,7 +27,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
  *   <li>编组键：写解编的主干出车是完整的组合写法（{@code A+B}），切出留下与切下两段；写联挂的主干按完整写法，出发时少了回程支线带来的那一段。
  * </ul>
  *
- * <p>约束（不满足时编表报错，见 {@link Analysis#errors()}）：一条交路至多一条 DECP 或一条 COPL，不同时写；写了加解编的主干要读得到组合写法的出车编组，
+ * <p>约束（不满足时编表报错，见 {@link Analysis#errors()}）：一条交路至多一条 DECP 或一条
+ * COPL，不同时写；写加解编的主干要上发车网格（运营交路或带客的出库交路，回库交路只是收尾走行段）；写了加解编的主干要读得到组合写法的出车编组，
  * 切点要落在组合写法的分界上（指定那头切不开、另一头正好是同样节数时改切另一头，与运行时同一条回退）；绑了编组方案的交路不支持加解编。
  */
 public final class CouplingPlanner {
@@ -126,6 +128,8 @@ public final class CouplingPlanner {
    * @param plans 交路 → 时分（基础 route 的）
    * @param inputs 出车编组与组合写法各段节数
    * @param consistPlanRoutes 绑了编组方案的交路
+   * @param gridRoutes 上发车网格的交路（运营交路、带客的出库交路）：拆挂只从它们的班次派生
+   * @param poolOf 交路 → 车池
    * @param coupleSeconds 联挂加时（回程支线提前到站的秒数）
    */
   public static Analysis analyze(
@@ -133,6 +137,8 @@ public final class CouplingPlanner {
       Map<UUID, TimetableRoutePlan> plans,
       CouplingInputs inputs,
       Set<UUID> consistPlanRoutes,
+      Set<UUID> gridRoutes,
+      Function<UUID, String> poolOf,
       int coupleSeconds) {
     Map<String, TimetableBuilder.RouteInput> byCode = new LinkedHashMap<>();
     for (TimetableBuilder.RouteInput route : routes) {
@@ -158,6 +164,11 @@ public final class CouplingPlanner {
       }
       if (consistPlanRoutes.contains(route.routeId())) {
         errors.add(code + "：绑了编组方案的交路不支持加解编");
+        continue;
+      }
+      if (!gridRoutes.contains(route.routeId())) {
+        // 回库交路、不载客的出库交路是派车时在交路两头补上的走行段，没有自己的班次，拆挂无从派生
+        errors.add(code + "：加解编要写在运营交路（或带客的出库交路）上，回库与不载客的出库交路排不出拆挂；请把它改成运营交路");
         continue;
       }
       TimetableRoutePlan plan = plans.get(route.routeId());
@@ -206,13 +217,17 @@ public final class CouplingPlanner {
             continue;
           }
           target = Optional.of(goTo.routeId());
-          branches.add(goTo.routeId());
-          consistByRoute.put(goTo.routeId(), cut.get().detached());
         }
         Optional<TimetableStop> timing = stopAt(plan, stop.sequence());
         if (timing.isEmpty()) {
+          errors.add(code + "：DECP 所在的第 " + stop.sequence() + " 站在时分里找不到");
           continue;
         }
+        target.ifPresent(
+            id -> {
+              branches.add(id);
+              consistByRoute.put(id, cut.get().detached());
+            });
         splits.put(
             route.routeId(),
             new TrunkSplit(
@@ -237,6 +252,7 @@ public final class CouplingPlanner {
       }
       Optional<TimetableStop> timing = stopAt(plan, stop.sequence());
       if (timing.isEmpty()) {
+        errors.add(code + "：COPL 所在的第 " + stop.sequence() + " 站在时分里找不到");
         continue;
       }
       branches.add(from.routeId());
@@ -276,9 +292,13 @@ public final class CouplingPlanner {
     }
     // 牵涉到的车池里，其余读得到编组的交路按自己的编组派车：完整编组的车才接它们，短编组不接
     if (!splits.isEmpty() || !joins.isEmpty()) {
+      Set<String> pools = new LinkedHashSet<>();
+      splits.keySet().forEach(id -> pools.add(poolOf.apply(id)));
+      joins.keySet().forEach(id -> pools.add(poolOf.apply(id)));
       for (TimetableBuilder.RouteInput route : routes) {
         if (consistByRoute.containsKey(route.routeId())
-            || consistPlanRoutes.contains(route.routeId())) {
+            || consistPlanRoutes.contains(route.routeId())
+            || !pools.contains(poolOf.apply(route.routeId()))) {
           continue;
         }
         inputs.pattern(route.routeId()).ifPresent(key -> consistByRoute.put(route.routeId(), key));
@@ -382,6 +402,61 @@ public final class CouplingPlanner {
     return Optional.empty();
   }
 
+  /**
+   * 写了联挂（COPL）的主干联挂之前的编组：完整写法去掉回程支线带来的那一段。与编表推出的同一条规则：回程支线读得到自己的编组就用它，否则取同组解编切下的那一段。
+   * 不按表运行时出车用（按表时由编表推好、写在票上）。纯计算。
+   *
+   * @param trunk 主干交路
+   * @param trunkPattern 主干的出车编组（联挂之后的完整写法）
+   * @param lineRoutes 同一条线上的交路
+   * @param patternOf 交路码 → 出车编组写法
+   * @param sizesOf 编组写法 → 各段节数（车头到车尾）
+   * @return 联挂之前的编组；主干没写联挂或推不出时为空
+   */
+  public static Optional<String> beforeJoin(
+      RouteCouplingDirectives.RouteRef trunk,
+      String trunkPattern,
+      List<RouteCouplingDirectives.RouteRef> lineRoutes,
+      Function<String, Optional<String>> patternOf,
+      Function<String, Optional<List<Integer>>> sizesOf) {
+    Optional<RouteCouplingDirectives.Couple> couple =
+        trunk.stops().stream()
+            .map(RouteCouplingDirectives::couple)
+            .flatMap(Optional::stream)
+            .findFirst();
+    if (couple.isEmpty() || trunkPattern == null) {
+      return Optional.empty();
+    }
+    Optional<String> branch = patternOf.apply(couple.get().from());
+    for (RouteCouplingDirectives.RouteRef route : lineRoutes) {
+      if (branch.isPresent()) {
+        break;
+      }
+      if (!route.group().equals(trunk.group())) {
+        continue;
+      }
+      Optional<RouteCouplingDirectives.Decouple> decouple =
+          route.stops().stream()
+              .map(RouteCouplingDirectives::decouple)
+              .flatMap(Optional::stream)
+              .findFirst();
+      Optional<String> pattern = decouple.flatMap(found -> patternOf.apply(route.code()));
+      if (pattern.isEmpty()) {
+        continue;
+      }
+      List<String> parts = CompositeSpawnPattern.parts(pattern.get());
+      branch =
+          sizesOf
+              .apply(pattern.get())
+              .filter(sizes -> sizes.size() == parts.size())
+              .flatMap(sizes -> cut(parts, sizes, decouple.get().end(), decouple.get().cars()))
+              .map(Cut::detached);
+    }
+    return branch.flatMap(
+        key ->
+            without(CompositeSpawnPattern.parts(trunkPattern), CompositeSpawnPattern.parts(key)));
+  }
+
   /** 组合写法去掉首段或末段的 {@code branch}；都不是时为空。纯计算。 */
   static Optional<String> without(List<String> parts, List<String> branch) {
     if (branch.isEmpty() || branch.size() >= parts.size()) {
@@ -418,11 +493,13 @@ public final class CouplingPlanner {
    * @param trips 派生出的支线班次
    * @param couplings 交给派车的加解编计划
    * @param parentOf 派生班次 → 它的主干班次
+   * @param notes 没能派生的主干班次（进编表报告）
    */
   public record Derived(
       List<VehicleDutyPlanner.PlannedTrip> trips,
       VehicleDutyPlanner.Couplings couplings,
-      Map<UUID, UUID> parentOf) {}
+      Map<UUID, UUID> parentOf,
+      List<String> notes) {}
 
   /**
    * 按每一班主干班次派生支线班次。
@@ -446,6 +523,9 @@ public final class CouplingPlanner {
     Map<UUID, VehicleDutyPlanner.Join> joins = new LinkedHashMap<>();
     Map<UUID, UUID> feeders = new LinkedHashMap<>();
     Map<UUID, UUID> parentOf = new LinkedHashMap<>();
+    // 交路码 → 没能派生的班数
+    Map<String, Integer> unjoined = new LinkedHashMap<>();
+    Map<String, Integer> unsplit = new LinkedHashMap<>();
     for (VehicleDutyPlanner.PlannedTrip trip : trunkTrips) {
       TrunkSplit split = analysis.splits().get(trip.routeId());
       if (split != null) {
@@ -466,6 +546,8 @@ public final class CouplingPlanner {
             derived.add(branch);
             pinned.put(branch.tripId(), trip.tripId());
             parentOf.put(branch.tripId(), trip.tripId());
+          } else {
+            unsplit.merge(routeCodeOf(trip), 1, Integer::sum);
           }
         }
       }
@@ -485,15 +567,40 @@ public final class CouplingPlanner {
             joins.put(
                 trip.tripId(),
                 new VehicleDutyPlanner.Join(join.stationNodeId(), Optional.of(join.merged())));
+          } else {
+            unjoined.merge(routeCodeOf(trip), 1, Integer::sum);
           }
+        } else {
+          unjoined.merge(routeCodeOf(trip), 1, Integer::sum);
         }
       }
     }
+    List<String> notes = new ArrayList<>();
+    unjoined.forEach(
+        (code, trips) ->
+            notes.add(
+                "联挂：主干 "
+                    + code
+                    + " 有 "
+                    + trips
+                    + " 班派不出回程支线（回程支线要在服务日开始之前发车，或读不到它的时分与编组），这几班不挂车，按联挂之前的编组跑完全程"));
+    unsplit.forEach(
+        (code, trips) ->
+            notes.add(
+                "解编：主干 " + code + " 有 " + trips + " 班派不出 GOTO 的支线班次（读不到支线的时分），这几班解下的那一段没有支线班次可跑"));
     return new Derived(
         List.copyOf(derived),
         new VehicleDutyPlanner.Couplings(
             splits, pinned, joins, feeders, analysis.consists(), analysis.partial()),
-        Map.copyOf(parentOf));
+        Map.copyOf(parentOf),
+        List.copyOf(notes));
+  }
+
+  /** 班次的交路码（车次写法 {@code 交路码@发车秒}）。 */
+  private static String routeCodeOf(VehicleDutyPlanner.PlannedTrip trip) {
+    String code = trip.tripCode();
+    int at = code.lastIndexOf('@');
+    return at < 0 ? code : code.substring(0, at);
   }
 
   private static VehicleDutyPlanner.PlannedTrip derivedTrip(

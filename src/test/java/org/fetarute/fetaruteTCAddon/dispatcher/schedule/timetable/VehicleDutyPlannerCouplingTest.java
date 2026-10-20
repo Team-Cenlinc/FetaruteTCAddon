@@ -172,6 +172,38 @@ class VehicleDutyPlannerCouplingTest {
     assertTrue(result.duties().stream().noneMatch(duty -> duty.coupling().startsBySplit()));
   }
 
+  /** 支线终点回不了库、后面也没有班次接（末班前后）：支线班次退掉，解下的车按解编站与解编时刻回库，不报回不了库。 */
+  @Test
+  void aBranchTrimmedAwayLeavesTheDetachedPartToReturnFromTheSplitStation() {
+    VehicleDutyPlanner.Result result =
+        plan(
+            List.of(trip("R@0", P, Z, 0, 900, FULL), trip("B@360", S, T, 360, 300, BRANCH)),
+            legs(true),
+            couplings(RouteCouplingDirectives.Action.GOTO, true, false));
+
+    assertTrue(
+        result.unassigned().stream()
+            .noneMatch(
+                trip -> trip.reason() == VehicleDutyPlanner.UnassignedReason.DECOUPLE_STRANDED),
+        () -> "解编站有回库线路：" + result.unassigned());
+    assertTrue(
+        result.unassigned().stream()
+            .anyMatch(
+                trip ->
+                    trip.tripId().equals(id("B@360"))
+                        && trip.reason() == VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS),
+        "支线终点 T 回不了库：支线班次退掉");
+    VehicleDuty child =
+        result.duties().stream()
+            .filter(duty -> duty.coupling().startsBySplit())
+            .findFirst()
+            .orElseThrow();
+    assertTrue(child.tripIds().isEmpty());
+    assertEquals(Optional.of(id("RET-S")), child.returnRouteId());
+    assertEquals(330, child.plannedStartSecondOfDay());
+    assertEquals(330 + 200, child.plannedEndSecondOfDay(), "从解编时刻起回库，不是跑完支线之后");
+  }
+
   @Test
   void aJoinWhoseTrunkHasNoVehicleIsDroppedAndTheBranchEndsNormally() {
     // 回程主干从 Z 发车时没车（去程在 Z 收尾回库的时刻晚于回程发车），联挂对不上

@@ -163,6 +163,17 @@ class TimetableConsistRuntimeTest {
         logs.stream().anyMatch(line -> line.contains("reason=consist-mismatch")), logs::toString);
   }
 
+  /** 表上的车型由编表从交路编组推出时保留大小写，车上的车型标签是归一后的小写：按归一后的键比，同一车型照样接。 */
+  @Test
+  void consistsDifferingOnlyInCaseAreTheSameConsist() {
+    Timetable table = mixed("M6", List.of("M6", "m8"));
+    start(table);
+
+    assertTrue(service.acceptsVehicle(firstTrip(table), "six"), logs::toString);
+    assertTrue(service.scheduledDepartureAt(event("six", 0, T0)).isPresent());
+    assertTrue(service.dutyBindingOf("six").isPresent());
+  }
+
   @Test
   void gateMatchingSkipsDutiesOfAnotherConsist() {
     start(mixed("m6", List.of("m6", "m8")));

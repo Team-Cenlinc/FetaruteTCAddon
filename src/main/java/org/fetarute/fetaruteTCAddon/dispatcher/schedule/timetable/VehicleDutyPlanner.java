@@ -844,6 +844,9 @@ public final class VehicleDutyPlanner {
     /** 解编生出它的那一班主干（没有班次的子交路收尾时报原因用）。 */
     private PlannedTrip parentTrip;
 
+    /** 解编生出它的那一站；普通交路为空串。子交路的班次全退掉时车还在这里。 */
+    private String splitStation = "";
+
     /** 在这一班主干上联挂并入；普通交路为空。 */
     private Optional<UUID> joins = Optional.empty();
 
@@ -887,6 +890,7 @@ public final class VehicleDutyPlanner {
           new OpenDuty(sequence, preferredDepot, Optional.empty(), atSeconds, pool, consist);
       child.splitFrom = Optional.of(parent.tripId());
       child.parentTrip = parent;
+      child.splitStation = station;
       child.lastTerminal = station;
       return child;
     }
@@ -905,6 +909,11 @@ public final class VehicleDutyPlanner {
         PlannedTrip last = lastTrip();
         lastTerminal = last.terminalNodeId();
         endSeconds = last.departureSeconds() + lastDuration();
+      } else if (splitFrom.isPresent()) {
+        // 子交路的班次全退掉了：车没离开解编站，解编完就就绪，从那里收尾回库
+        lastTerminal = splitStation;
+        endSeconds = startSeconds;
+        readyAtSeconds = startSeconds;
       }
       return removed;
     }

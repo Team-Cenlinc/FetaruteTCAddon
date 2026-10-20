@@ -196,6 +196,37 @@ class ConsistDispatchArbiterTest {
     assertEquals(SpawnChoice.Kind.BLOCKED, unknown.kind(), "方案里已经没有这个车型：不出车");
   }
 
+  /** 编表从交路组合写法推出的车型保留大小写：按归一后的键到方案里找，找到就按方案出车。 */
+  @Test
+  void designatedConsistIsMatchedRegardlessOfCase() {
+    SpawnChoice choice =
+        arbiter.chooseSpawn(ticket(freeRoute, true).withConsist(Optional.of("Sh_A8")));
+
+    assertEquals(Optional.of("SH_A8"), choice.pattern());
+    assertEquals(Map.of("FTA_TRAIN_TYPE", "EMU"), choice.tags());
+  }
+
+  /** 写了加解编的交路不能绑方案，车型由编表推出：哪份方案里都没有时照票上的写法出车（保留大小写），到了出车上限照旧不出；绑了方案的交路方案里没有就不出。 */
+  @Test
+  void unboundRoutesSpawnADesignatedConsistMissingFromEveryPlan() {
+    SpawnTicket single = ticket(freeRoute, true).withConsist(Optional.of(" Kiha110S200m_Single "));
+
+    SpawnChoice choice = arbiter.chooseSpawn(single);
+    assertEquals(SpawnChoice.Kind.CHOSEN, choice.kind());
+    assertEquals(Optional.of("Kiha110S200m_Single"), choice.pattern());
+    assertEquals(Map.of(), choice.tags(), "没有方案的覆盖项");
+
+    overLimit.add("Kiha110S200m_Single");
+    assertEquals(SpawnChoice.Kind.BLOCKED, arbiter.chooseSpawn(single).kind(), "到了出车上限");
+
+    assertEquals(
+        SpawnChoice.Kind.BLOCKED,
+        arbiter
+            .chooseSpawn(ticket(boundRoute, true).withConsist(Optional.of("Kiha110S200m_Single")))
+            .kind(),
+        "绑了方案的交路：方案里没有就不出");
+  }
+
   @Test
   void withoutConsistPlansADesignatedTicketCannotSpawn() {
     SpawnTicket eight = ticket(freeRoute, true).withConsist(Optional.of("sh_a8"));

@@ -54,6 +54,7 @@ RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 - 语法：`DECP FRONT|REAR:<节数>:GOTO:<交路>` / `DECP …:IDLE` / `DECP …:RETURN`；`COPL FROM:<交路>[:WAIT:<秒>]`。写在所属停靠点之后的动作行，在该站停车时执行。
 - 解编：按运行方向从车头（FRONT）或车尾（REAR）切下这么多节；没被指定的部分继续本交路。GOTO 的交路须与本交路同一条线、同一交路组（`spawn_group`），首站是本站；IDLE 就地成待命车；RETURN 回库。
 - 联挂：与同组里终到本站的 FROM 交路的车挂成一列，沿用写 COPL 一方的身份。先到的车在站台等（WAIT 不写取 `coupler.couple-wait-seconds`），后到的车开进同一条股道挂上；等不到各走各的。
+- 按表运行时写加解编的交路须是运营交路（或带客的出库交路），写在回库交路上编表报错；解编站最好配一条首站是它的回库线路，支线班次排不上时解下的车从那里回库。
 - 那一站多停 `coupler.decouple-seconds` / `couple-seconds`（缺省 30 秒），编表、到站预测与现场停站同一口径。运行时见 `coupler.md`，编表见 `timetable.md`。
 - 编组写法可写组合 `A+B`：各段交给 TrainCarts 解析后按顺序拼成一列出车，每段车厢打上各自的来源编组（`FTA_CAR_CONSIST`），解编只在来源编组分界上切。
 

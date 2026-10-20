@@ -17,6 +17,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -57,21 +58,34 @@ class TimetableBuilderCouplingTest {
   }
 
   private static TimetableBuildResult build() {
+    return build(RouteOperationType.OPERATION);
+  }
+
+  /**
+   * @param trunkType 写解编的主干 R 的交路类型
+   */
+  private static TimetableBuildResult build(RouteOperationType trunkType) {
     UUID r = TimetableTestFixtures.routeId("R");
     UUID rr = TimetableTestFixtures.routeId("RR");
     UUID br = TimetableTestFixtures.routeId("BR");
     UUID bb = TimetableTestFixtures.routeId("BB");
     UUID crt = TimetableTestFixtures.routeId("CRT");
     UUID ret = TimetableTestFixtures.routeId("RET");
+    List<RouteStop> trunkStops =
+        List.of(
+            stop(r, 0, RouteStopPassType.STOP, null),
+            stop(r, 1, RouteStopPassType.STOP, "DECP REAR:1:GOTO:BR"),
+            stop(r, 2, RouteStopPassType.TERMINATE, null));
     List<TimetableBuilder.RouteInput> routes =
         List.of(
-            operation(
+            new TimetableBuilder.RouteInput(
+                r,
                 "R",
-                List.of(P, S, Z),
-                List.of(
-                    stop(r, 0, RouteStopPassType.STOP, null),
-                    stop(r, 1, RouteStopPassType.STOP, "DECP REAR:1:GOTO:BR"),
-                    stop(r, 2, RouteStopPassType.TERMINATE, null))),
+                trunkType,
+                1,
+                TimetableTestFixtures.route("R", List.of(P, S, Z)),
+                trunkStops,
+                Optional.empty()),
             operation(
                 "RR",
                 List.of(Z, S, P),
@@ -199,5 +213,69 @@ class TimetableBuilderCouplingTest {
             .anyMatch(duty -> duty.returnRouteId().isPresent()),
         "以联挂结束的交路没有回库走行");
     assertTrue(tripsOf(timetable, "BB") > 0);
+  }
+
+  /** 解编写在回库交路上：回库交路只在交路收尾补上，没有自己的班次，拆挂无从派生——编表报错，不悄悄跳过。 */
+  @Test
+  void couplingOnAReturnRouteIsRejected() {
+    TimetableBuildResult result = build(RouteOperationType.RETURN);
+
+    assertFalse(result.success());
+    assertTrue(
+        result.warnings().stream().anyMatch(text -> text.contains("R：加解编要写在运营交路")),
+        () -> result.warnings().toString());
+  }
+
+  /** 不按表运行时，写联挂的主干出车少回程支线带来的那一段：回程支线自己的编组，没有时取同组解编切下的那一段。 */
+  @Test
+  void trunkLeavesWithoutTheBranchPartBeforeJoining() {
+    UUID r = TimetableTestFixtures.routeId("R");
+    UUID rr = TimetableTestFixtures.routeId("RR");
+    RouteCouplingDirectives.RouteRef trunk =
+        new RouteCouplingDirectives.RouteRef(
+            "RR",
+            null,
+            List.of(
+                stop(rr, 0, RouteStopPassType.STOP, null),
+                stop(rr, 1, RouteStopPassType.STOP, "COPL FROM:BB"),
+                stop(rr, 2, RouteStopPassType.TERMINATE, null)));
+    RouteCouplingDirectives.RouteRef split =
+        new RouteCouplingDirectives.RouteRef(
+            "R",
+            null,
+            List.of(
+                stop(r, 0, RouteStopPassType.STOP, null),
+                stop(r, 1, RouteStopPassType.STOP, "DECP REAR:1:GOTO:BR"),
+                stop(r, 2, RouteStopPassType.TERMINATE, null)));
+    List<RouteCouplingDirectives.RouteRef> line = List.of(trunk, split);
+    Map<String, List<Integer>> sizes = Map.of("A+B", List.of(1, 1));
+
+    assertEquals(
+        Optional.of("A"),
+        CouplingPlanner.beforeJoin(
+            trunk,
+            "A+B",
+            line,
+            code -> code.equals("BB") ? Optional.of("B") : Optional.empty(),
+            pattern -> Optional.ofNullable(sizes.get(pattern))),
+        "回程支线写了编组");
+    assertEquals(
+        Optional.of("A"),
+        CouplingPlanner.beforeJoin(
+            trunk,
+            "A+B",
+            line,
+            code -> code.equals("R") ? Optional.of("A+B") : Optional.empty(),
+            pattern -> Optional.ofNullable(sizes.get(pattern))),
+        "回程支线没写编组：取同组解编切下的车尾一段");
+    assertEquals(
+        Optional.empty(),
+        CouplingPlanner.beforeJoin(
+            split,
+            "A+B",
+            line,
+            code -> Optional.of("B"),
+            pattern -> Optional.ofNullable(sizes.get(pattern))),
+        "没写联挂");
   }
 }

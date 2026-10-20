@@ -6389,7 +6389,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (crewBonus && !forfeited && !paid.empty()) {
       player.sendMessage(
           locale.component(
-              "drive.reward.crew-bonus",
+              "drive.task.reward.crew-bonus",
               Map.of("percent", DriveRewards.formatAmount(config.rewards().crewBonus() * 100.0))));
     }
   }

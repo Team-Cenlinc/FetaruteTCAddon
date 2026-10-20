@@ -210,7 +210,10 @@ public final class TimetableService implements ScheduledDeparturePlan {
         || token.assignedTrips() > duty.get().tripCount()
         || duty.get()
             .consist()
-            .filter(consist -> !Optional.of(consist).equals(consistOfTrain.apply(name)))
+            .filter(
+                consist ->
+                    !org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey.same(
+                        Optional.of(consist), consistOfTrain.apply(name)))
             .isPresent()) {
       return;
     }
@@ -1704,6 +1707,20 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
   }
 
+  /** 交路首班（没取消）；查不到表、交路，交路没有班次或首班已取消时为空。 */
+  public Optional<DueTrip> firstTripOf(DutyKey duty) {
+    Timetable timetable = duty == null ? null : snapshot.byId().get(duty.timetableId());
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    return timetable
+        .duty(duty.dutyId())
+        .filter(found -> !found.tripIds().isEmpty())
+        .flatMap(found -> timetable.trip(found.tripIds().get(0)))
+        .map(trip -> dueTrip(timetable, trip, duty))
+        .filter(this::notCancelled);
+  }
+
   /** 交路首班的线路；查不到表、交路，或交路没有班次时为空。 */
   public Optional<UUID> firstRouteOf(DutyKey duty) {
     if (duty == null) {
@@ -1875,7 +1892,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return true;
     }
     Optional<String> actual = consistOfVehicle(trainName);
-    if (required.equals(actual)) {
+    if (org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey.same(required, actual)) {
       return true;
     }
     debugLogger.accept(
@@ -2148,7 +2165,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
     Optional<DutyProgress> progress = ledger.progressOf(key);
     if (progress.isEmpty()) {
-      return Optional.empty();
+      // 刚解下、等着接子交路首班的车：还没绑上交路，下一趟就是钉给它的那一班
+      return splitVehicles.pinnedDutyOf(key).flatMap(this::firstTripOf);
     }
     Optional<BoundDuty> bound = boundDuty(key, progress.get());
     if (bound.isEmpty()) {

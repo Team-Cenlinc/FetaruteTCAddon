@@ -146,8 +146,8 @@ command:
   common:
     confirm-required: "<prefix> <red>危险操作需要确认：</red><gray>追加参数</gray> <white>--confirm</white>"
     invalid-boolean: "<prefix> <red>无效布尔值：</red><white><value></white> <gray>（仅支持 true/false）</gray>"
-    yes: "是"
-    no: "否"
+    "yes": "是"
+    "no": "否"
   error:
     invalid-syntax: "<prefix> <red>命令语法不正确</red> <gray>正确用法：</gray> <white><syntax></white>"
   help:
@@ -1195,6 +1195,15 @@ command:
         empty: "<gray>（暂无车站组）</gray>"
         entry: "<white><company></white><gray>:</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua><gray>（成员数：<white><count></white>）</gray>"
         all: "全部"
+    link:
+      siding:
+        empty-nodes: "<prefix> <red>请至少指定一个存车线节点</red>"
+        success: "<prefix> <dark_aqua>站点</dark_aqua> <white><station></white> <dark_aqua>已关联存车线池</dark_aqua> <white><pool></white> <gray>（节点 <white><count></white> 个，容量 <white><capacity></white>）</gray>"
+    siding:
+      list:
+        empty: "<prefix> <gray>站点</gray> <white><station></white> <gray>未关联存车线池</gray>"
+        header: "<prefix> <dark_aqua>站点</dark_aqua> <white><station></white> <dark_aqua>的存车线池</dark_aqua>"
+        entry: "<white><pool></white> <gray>-</gray> <dark_aqua><nodes></dark_aqua>"
   pids:
     help:
       header: "<prefix> <dark_aqua>站台屏</dark_aqua> <gray>挂满空展示框后用安装纸安装，再用配置棍调整</gray>"

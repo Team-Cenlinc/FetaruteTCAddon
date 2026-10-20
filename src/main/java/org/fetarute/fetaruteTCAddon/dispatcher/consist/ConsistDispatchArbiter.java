@@ -120,15 +120,26 @@ public final class ConsistDispatchArbiter implements ConsistArbiter {
 
   /**
    * 票上指定了车型：只能出这个车型。档案不可用、方案里已经没有它、或到了出车上限，都不改出别的车型—— 时刻表按这个车型排的时分，换车型就对不上表了。票留着重试，到期由时刻表按出不了车处理。
+   *
+   * <p>票上的车型按 {@link ConsistKey#of} 归一后到方案里找（方案的车型键是小写，编表从交路编组推出的车型保留原来的大小写）。交路没绑方案、哪份方案里也没有这个车型时
+   * （例如写了加解编的交路，不能绑方案，车型由编表从交路的组合写法推出），照票上的写法出车。
    */
-  private SpawnChoice designated(UUID routeId, String key) {
-    Optional<ResolvedConsistPlan.Member> member = plans.member(routeId, key);
+  private SpawnChoice designated(UUID routeId, String designated) {
+    Optional<String> key = ConsistKey.of(designated);
+    Optional<ResolvedConsistPlan.Member> member =
+        key.flatMap(found -> plans.member(routeId, found));
     if (member.isEmpty()) {
-      return SpawnChoice.blocked("consist=" + key + ":not-in-any-plan");
+      Optional<String> pattern = ConsistKey.tidy(designated);
+      if (pattern.isPresent() && plans.planForRoute(routeId).isEmpty()) {
+        return inspector.exceedsSpawnLimit(pattern.get())
+            ? SpawnChoice.blocked("consist=" + designated + ":spawn-limit")
+            : SpawnChoice.chosen(pattern.get(), Map.of());
+      }
+      return SpawnChoice.blocked("consist=" + designated + ":not-in-any-plan");
     }
     ConsistProfile profile = member.get().profile().orElseThrow();
     if (inspector.exceedsSpawnLimit(profile.pattern())) {
-      return SpawnChoice.blocked("consist=" + key + ":spawn-limit");
+      return SpawnChoice.blocked("consist=" + designated + ":spawn-limit");
     }
     return SpawnChoice.chosen(profile.pattern(), member.get().spawnTags());
   }

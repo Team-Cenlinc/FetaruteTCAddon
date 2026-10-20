@@ -143,7 +143,9 @@ final class TripMatcher {
         }
         if (boundDuty.isEmpty()) {
           Optional<String> tripConsist = timetable.consistOf(trip);
-          if (tripConsist.isPresent() && !tripConsist.equals(vehicleConsist)) {
+          if (tripConsist.isPresent()
+              && !org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey.same(
+                  tripConsist, vehicleConsist)) {
             otherConsist++;
             continue;
           }

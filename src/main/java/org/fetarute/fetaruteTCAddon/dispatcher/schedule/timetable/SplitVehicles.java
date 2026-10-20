@@ -50,6 +50,11 @@ final class SplitVehicles {
     return byDuty.containsKey(duty);
   }
 
+  /** 这辆解下的车正等着接的子交路；没有时为空。 */
+  java.util.Optional<TimetableService.DutyKey> pinnedDutyOf(String vehicleKey) {
+    return java.util.Optional.ofNullable(byVehicle.get(vehicleKey));
+  }
+
   /** 子交路落空。 */
   boolean failed(TimetableService.DutyKey duty) {
     return failed.contains(duty);
