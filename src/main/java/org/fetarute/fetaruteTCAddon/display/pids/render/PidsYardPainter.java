@@ -2,9 +2,11 @@ package org.fetarute.fetaruteTCAddon.display.pids.render;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
@@ -120,25 +122,43 @@ final class PidsYardPainter {
 
   /**
    * 股道号写在站台块里、靠左：岛式站台上面那条股道写在块的上沿、下面那条写在下沿；块太薄放不下两行时并排写在一行，侧式站台竖向居中。
-   * 一张图里有几个车站时，站名写在第一个股道号前面（写在块外会压到股道线）。
+   * 一张图里有几个车站时，站名写在第一个股道号前面（写在块外会压到股道线）；块窄放不下时依次改写“站码 1 道”“站码 1”，股道号也只写数字， 都放不下才截断。
+   * 同一车站只要有一块站台写不下站名，这个车站的站台就都改写站码，免得一站两种写法。
    *
    * @return 写下的文字所占的矩形 {左, 上, 右, 下}，去向标签据此避让
    */
   private List<int[]> drawPlatformLabels(PidsLayout.Yard yard, YardGeometry geometry, Names track) {
     int size = yard.labelSize();
     int muted = p.theme().muted();
+    Set<String> coded = new HashSet<>();
+    for (YardGeometry.Platform platform : geometry.platforms()) {
+      if (platform.station().isPresent() && platform.code().isPresent()) {
+        String full = track.primary().replace(TRACK_PLACEHOLDER, platform.tracks().get(0));
+        if (p.width(platform.station().get() + " " + full, size) > textRoom(platform, size)) {
+          coded.add(platform.station().get());
+        }
+      }
+    }
     List<int[]> drawn = new ArrayList<>();
     for (YardGeometry.Platform platform : geometry.platforms()) {
-      List<String> texts = new ArrayList<>();
+      List<List<String>> texts = new ArrayList<>();
       for (String number : platform.tracks()) {
-        String text = track.primary().replace(TRACK_PLACEHOLDER, number);
-        texts.add(
-            texts.isEmpty() && platform.station().isPresent()
-                ? platform.station().get() + " " + text
-                : text);
+        String full = track.primary().replace(TRACK_PLACEHOLDER, number);
+        List<String> candidates = new ArrayList<>();
+        if (texts.isEmpty() && platform.station().isPresent()) {
+          if (!coded.contains(platform.station().get())) {
+            candidates.add(platform.station().get() + " " + full);
+          }
+          platform.code().ifPresent(code -> candidates.add(code + " " + full));
+          platform.code().ifPresent(code -> candidates.add(code + " " + number));
+        } else {
+          candidates.add(full);
+          candidates.add(number);
+        }
+        texts.add(candidates);
       }
       int left = platform.left() + 4;
-      int room = Math.max(size, platform.right() - left - 2);
+      int room = textRoom(platform, size);
       int height = platform.bottom() - platform.top();
       if (texts.size() == 2 && height >= 2 * size + 4) {
         drawn.add(platformText(texts.get(0), size, left, platform.top() + 2, room, muted));
@@ -148,8 +168,8 @@ final class PidsYardPainter {
       }
       int top = platform.top() + (height - size) / 2;
       int x = left;
-      for (String text : texts) {
-        int[] box = platformText(text, size, x, top, Math.max(size, left + room - x), muted);
+      for (List<String> candidates : texts) {
+        int[] box = platformText(candidates, size, x, top, Math.max(size, left + room - x), muted);
         drawn.add(box);
         x = box[2] + 8;
       }
@@ -157,39 +177,79 @@ final class PidsYardPainter {
     return drawn;
   }
 
-  private int[] platformText(String text, int size, int x, int top, int room, int rgb) {
-    String shown = p.ellipsize(text, size, room);
+  /** 站台块里能写字的宽度（左边留 4 像素、右边留 2 像素）。 */
+  private static int textRoom(YardGeometry.Platform platform, int size) {
+    return Math.max(size, platform.right() - platform.left() - 6);
+  }
+
+  /** 依次试写法，写第一个放得下的；都放不下时截断最后一个。 */
+  private int[] platformText(List<String> candidates, int size, int x, int top, int room, int rgb) {
+    String shown =
+        candidates.stream()
+            .filter(text -> p.width(text, size) <= room)
+            .findFirst()
+            .orElseGet(() -> p.ellipsize(candidates.get(candidates.size() - 1), size, room));
     int width = p.text(shown, size, x, top, rgb);
     return new int[] {x, top, x + width, top + size};
   }
 
   /**
-   * 去向写在出口末端下方，放不下（碰到下边缘、压到股道号或别的去向）时改写在上方；上下都压到股道号或别的去向时不写。 文字下铺底色，轨道穿过时也看得清。
+   * 去向写在出口末端下方，放不下（碰到下边缘、压到股道线、股道号或别的去向）时改写在上方；站名上下都放不下时改写站码，仍放不下就不写。
    *
    * @param taken 已写下的文字所占的矩形
    */
   private void drawLabels(PidsLayout.Yard yard, YardGeometry geometry, List<int[]> taken) {
     int size = yard.labelSize();
     List<int[]> occupied = new ArrayList<>(taken);
+    List<YardGeometry.Segment> lines =
+        geometry.paths().stream().flatMap(path -> path.segments().stream()).toList();
     for (YardGeometry.Label exit : geometry.exits()) {
-      String text = p.ellipsize(exit.text(), size, yard.trackWidth() / 3);
+      List<String> texts = new ArrayList<>();
+      texts.add(p.ellipsize(exit.text(), size, yard.trackWidth() / 3));
+      exit.code().filter(code -> !code.equals(exit.text())).ifPresent(texts::add);
+      placeLabel(yard, exit, texts, size, occupied, lines);
+    }
+  }
+
+  /** 按写法的先后、先下后上找第一个不压字的位置写下。 */
+  private void placeLabel(
+      PidsLayout.Yard yard,
+      YardGeometry.Label exit,
+      List<String> texts,
+      int size,
+      List<int[]> occupied,
+      List<YardGeometry.Segment> lines) {
+    int bottomEdge = yard.y() + yard.height() - 2;
+    for (String text : texts) {
       int width = p.width(text, size);
       int x = exit.alignRight() ? exit.at().x() - width : exit.at().x();
       x = Math.max(yard.x() + 2, Math.min(x, yard.x() + yard.width() - 2 - width));
-      int bottomEdge = yard.y() + yard.height() - 2;
-      int below = exit.at().y() + 4;
-      int above = exit.at().y() - size - 4;
-      for (int top : List.of(below, above)) {
+      for (int top : List.of(exit.at().y() + 4, exit.at().y() - size - 4)) {
         int[] box = {x - 1, top - 1, x + width + 1, top + size + 1};
         if (top >= yard.y() + 1
             && top + size <= bottomEdge
-            && occupied.stream().noneMatch(other -> intersects(box, other))) {
+            && occupied.stream().noneMatch(other -> intersects(box, other))
+            && lines.stream().noneMatch(line -> crosses(box, line))) {
           label(text, size, x, top);
           occupied.add(box);
-          break;
+          return;
         }
       }
     }
+  }
+
+  /** 线段穿过矩形 {左, 上, 右, 下}（取线上逐点判断，线都很短）。 */
+  private static boolean crosses(int[] box, YardGeometry.Segment line) {
+    int steps = Math.max(Math.abs(line.x1() - line.x0()), Math.abs(line.y1() - line.y0()));
+    for (int i = 0; i <= steps; i++) {
+      double t = steps == 0 ? 0.0 : (double) i / steps;
+      double x = line.x0() + t * (line.x1() - line.x0());
+      double y = line.y0() + t * (line.y1() - line.y0());
+      if (x > box[0] && x < box[2] && y > box[1] - 1 && y < box[3] + 1) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static boolean intersects(int[] a, int[] b) {

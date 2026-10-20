@@ -113,17 +113,52 @@ public final class YardFixtures {
 
   /** 两条平行的站台股道，各向东接一段 40 格的直线到无名目的地节点；两股道真实间距为 {@code gap} 格（1 道在北）。 */
   public static SimpleRailGraph twoPlatforms(int gap) {
+    return twoPlatforms(gap, 0, Optional.empty(), Optional.empty(), false);
+  }
+
+  /**
+   * 同 {@link #twoPlatforms(int)}，另带牌子位置与开门方向。
+   *
+   * @param signOffset 牌子比轨道向外偏几格（1 道的往北、2 道的往南）；节点坐标取牌子的位置
+   * @param door1 1 道 AutoStation 牌子写的开门方向
+   * @param door2 2 道的开门方向
+   * @param northSouth 南北向（x、z 对调：股道沿 z，1 道在西、2 道在东）
+   */
+  public static SimpleRailGraph twoPlatforms(
+      int gap, int signOffset, Optional<String> door1, Optional<String> door2, boolean northSouth) {
     NodeId end1 = NodeId.of("END-1");
     NodeId end2 = NodeId.of("END-2");
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, -signOffset, northSouth, door1);
+    node(nodes, P2, NodeType.STATION, 0, gap + signOffset, northSouth, door2);
+    node(nodes, end1, NodeType.DESTINATION, 40, 0, northSouth);
+    node(nodes, end2, NodeType.DESTINATION, 40, gap, northSouth);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, end1, straight(0, 40, 0), northSouth);
+    edge(edges, footprints, Set.of(), P2, end2, straight(0, 40, gap), northSouth);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  /** 同 {@link #twoPlatforms(int)}，两条站台股道正中间另有一条不进站的正线穿过（与站场不相连）。 */
+  public static SimpleRailGraph twoPlatformsAroundAThroughTrack(int gap) {
+    NodeId end1 = NodeId.of("END-1");
+    NodeId end2 = NodeId.of("END-2");
+    NodeId west = NodeId.of("THROUGH-W");
+    NodeId east = NodeId.of("THROUGH-E");
     Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
     node(nodes, P1, NodeType.STATION, 0, 0, false);
     node(nodes, P2, NodeType.STATION, 0, gap, false);
     node(nodes, end1, NodeType.DESTINATION, 40, 0, false);
     node(nodes, end2, NodeType.DESTINATION, 40, gap, false);
+    node(nodes, west, NodeType.DESTINATION, -600, gap / 2, false);
+    node(nodes, east, NodeType.DESTINATION, 600, gap / 2, false);
     Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
     Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
     edge(edges, footprints, Set.of(), P1, end1, straight(0, 40, 0), false);
     edge(edges, footprints, Set.of(), P2, end2, straight(0, 40, gap), false);
+    edge(edges, footprints, Set.of(), west, east, straight(-600, 600, gap / 2), false);
     return new SimpleRailGraph(
         nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
   }
@@ -148,6 +183,88 @@ public final class YardFixtures {
     edge(edges, footprints, Set.of(), Q1, IC, straight(200, 300, 0), false);
     return new SimpleRailGraph(
         nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  public static final NodeId TO_XYZ = NodeId.of("SURC:ABC:XYZ:1:01");
+  public static final NodeId TO_XYZ_FAR = NodeId.of("SURC:ABC:XYZ:1:02");
+  public static final NodeId DEF_TO_XYZ = NodeId.of("SURC:DEF:XYZ:1:01");
+  public static final NodeId JUNCTION = NodeId.of("SWITCHER:world:100:64:0");
+  public static final NodeId X1 = NodeId.of("SURC:S:XYZ:1");
+
+  /**
+   * DEF 线在 ABC→XYZ 的区间中途岔出：ABC 与 DEF 之间没有两端都是它们的区间点，要经过两条通往 XYZ 的区间与一组道岔才连得上。
+   *
+   * <pre>
+   *  P1(ABC 1道) ── TO_XYZ(ABC→XYZ) ── JUNCTION ── TO_XYZ_FAR(ABC→XYZ) ── X1(XYZ 1道)
+   *                                        ╲
+   *                                         DEF_TO_XYZ(DEF→XYZ) ── Q1(DEF 1道)
+   * </pre>
+   */
+  public static SimpleRailGraph junction() {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, TO_XYZ, NodeType.WAYPOINT, 60, 0, false);
+    node(nodes, JUNCTION, NodeType.SWITCHER, 100, 0, false);
+    node(nodes, TO_XYZ_FAR, NodeType.WAYPOINT, 160, 0, false);
+    node(nodes, X1, NodeType.STATION, 220, 0, false);
+    node(nodes, DEF_TO_XYZ, NodeType.WAYPOINT, 140, 20, false);
+    node(nodes, Q1, NodeType.STATION, 200, 40, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, TO_XYZ, straight(0, 60, 0), false);
+    edge(edges, footprints, Set.of(), TO_XYZ, JUNCTION, straight(60, 100, 0), false);
+    edge(edges, footprints, Set.of(), JUNCTION, TO_XYZ_FAR, straight(100, 160, 0), false);
+    edge(edges, footprints, Set.of(), TO_XYZ_FAR, X1, straight(160, 220, 0), false);
+    edge(edges, footprints, Set.of(), JUNCTION, DEF_TO_XYZ, line(100, 0, 140, 20), false);
+    edge(edges, footprints, Set.of(), DEF_TO_XYZ, Q1, line(140, 20, 200, 40), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  public static final NodeId MERGE = NodeId.of("SWITCHER:world:100:64:10");
+
+  /**
+   * ABC 与 DEF 两条线在 MERGE 汇合后同去 XYZ：从 ABC 到 DEF 要在道岔后折返，两站并不相通。
+   *
+   * <pre>
+   *  P1(ABC 1道) ── TO_XYZ(ABC→XYZ) ───╮
+   *                                    MERGE ── TO_XYZ_FAR(ABC→XYZ) ── X1(XYZ 1道)
+   *  Q1(DEF 1道) ── DEF_TO_XYZ(DEF→XYZ) ╯
+   * </pre>
+   */
+  public static SimpleRailGraph merge() {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, TO_XYZ, NodeType.WAYPOINT, 60, 0, false);
+    node(nodes, Q1, NodeType.STATION, 0, 20, false);
+    node(nodes, DEF_TO_XYZ, NodeType.WAYPOINT, 60, 20, false);
+    node(nodes, MERGE, NodeType.SWITCHER, 100, 10, false);
+    node(nodes, TO_XYZ_FAR, NodeType.WAYPOINT, 160, 10, false);
+    node(nodes, X1, NodeType.STATION, 220, 10, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, TO_XYZ, straight(0, 60, 0), false);
+    edge(edges, footprints, Set.of(), TO_XYZ, MERGE, line(60, 0, 100, 10), false);
+    edge(edges, footprints, Set.of(), Q1, DEF_TO_XYZ, straight(0, 60, 20), false);
+    edge(edges, footprints, Set.of(), DEF_TO_XYZ, MERGE, line(60, 20, 100, 10), false);
+    edge(edges, footprints, Set.of(), MERGE, TO_XYZ_FAR, straight(100, 160, 10), false);
+    edge(edges, footprints, Set.of(), TO_XYZ_FAR, X1, straight(160, 220, 10), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  /** 两点之间逐格连成的一条斜线（含两端）。 */
+  static List<int[]> line(int fromX, int fromZ, int toX, int toZ) {
+    int steps = Math.max(Math.abs(toX - fromX), Math.abs(toZ - fromZ));
+    List<int[]> cells = new ArrayList<>();
+    for (int i = 0; i <= steps; i++) {
+      double t = (double) i / steps;
+      cells.add(
+          new int[] {
+            (int) Math.round(fromX + t * (toX - fromX)), (int) Math.round(fromZ + t * (toZ - fromZ))
+          });
+    }
+    return cells;
   }
 
   /** 东西向时 SW1–P2 的轨道方块（含斜向台阶）。 */
@@ -185,6 +302,17 @@ public final class YardFixtures {
 
   private static void node(
       Map<NodeId, RailNode> nodes, NodeId id, NodeType type, int x, int z, boolean northSouth) {
+    node(nodes, id, type, x, z, northSouth, Optional.empty());
+  }
+
+  private static void node(
+      Map<NodeId, RailNode> nodes,
+      NodeId id,
+      NodeType type,
+      int x,
+      int z,
+      boolean northSouth,
+      Optional<String> door) {
     Vector at = northSouth ? new Vector(z, 64, x) : new Vector(x, 64, z);
     Optional<SignNodeDefinition> parsed =
         type == NodeType.SWITCHER
@@ -193,7 +321,12 @@ public final class YardFixtures {
     nodes.put(
         id,
         new SignRailNode(
-            id, type, at, Optional.empty(), parsed.flatMap(SignNodeDefinition::waypointMetadata)));
+            id,
+            type,
+            at,
+            Optional.empty(),
+            parsed.flatMap(SignNodeDefinition::waypointMetadata),
+            door));
   }
 
   private static void edge(

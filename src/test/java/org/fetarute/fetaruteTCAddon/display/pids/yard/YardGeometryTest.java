@@ -10,10 +10,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.junit.jupiter.api.Test;
@@ -157,28 +160,98 @@ class YardGeometryTest {
         geometry.paths().stream().anyMatch(p -> p.edge().equals(EdgeId.undirected(P2, SW2))));
   }
 
-  /** 两条站台股道之间有至少 3 格：岛式站台，画在两行之间，股道号上下各一个。 */
+  /** 两条都没写开门方向、相隔 10 格：岛式站台，画在两行之间，股道号上下各一个。 */
   @Test
-  void tracksWithRoomBetweenThemShareAnIslandPlatform() {
-    YardGeometry geometry = geometry(YardFixtures.twoPlatforms(4));
+  void widelySpacedTracksWithoutDoorsShareAnIslandPlatform() {
+    assertIsland(YardFixtures.twoPlatforms(10), 10);
+  }
+
+  /** 两条都没写开门方向、只隔 4 格（两侧式站台常见的间距，中间空着或只有栏杆）或 8 格（中间可能夹着图里没有的正线）：各自画在外侧。 */
+  @Test
+  void closeTracksWithoutDoorsGetPlatformsOnTheOutside() {
+    assertOutside(YardFixtures.twoPlatforms(8), 8);
+    assertOutside(YardFixtures.twoPlatforms(4), 4);
+    assertOutside(YardFixtures.twoPlatforms(2), 2);
+  }
+
+  /** 开门相对：岛式站台，哪怕只隔 4 格。只有一条写了、朝着对方开也算；写了两侧都开的也算。 */
+  @Test
+  void doorsFacingEachOtherMakeAnIsland() {
+    assertIsland(doors(4, "S", "N"), 4);
+    assertIsland(doors(4, "s", ""), 4);
+    assertIsland(doors(4, "", "NORTH"), 4);
+    assertIsland(doors(4, "BOTH", "N"), 4);
+  }
+
+  /** 有一条背着对方开：不是岛式，哪怕隔得很宽；侧式站台画在开门那一侧。 */
+  @Test
+  void doorsFacingAwayMakeSidePlatforms() {
+    assertOutside(doors(14, "N", "S"), 14);
+    assertOutside(doors(6, "N", ""), 6);
+
+    YardGeometry geometry = geometry(doors(4, "S", "S"));
     YardGeometry.Point one = geometry.pointOf(cell(0, 0, false)).orElseThrow();
     YardGeometry.Point two = geometry.pointOf(cell(0, 4, false)).orElseThrow();
+    assertEquals(2, geometry.platforms().size(), () -> "两块侧式站台: " + geometry.platforms());
+    YardGeometry.Platform first = geometry.platforms().get(0);
+    YardGeometry.Platform second = geometry.platforms().get(1);
+    assertTrue(first.top() > one.y() && first.bottom() < two.y(), () -> "1 道朝南开，站台在南侧: " + first);
+    assertTrue(second.top() > two.y(), () -> "2 道朝南开，站台在南侧: " + second);
+  }
 
-    assertEquals(1, geometry.platforms().size());
+  /** 南北向的站：开门方向按世界方位，转成横排后照样判断（东在上，所以 2 道画在上面）。 */
+  @Test
+  void doorsWorkOnNorthSouthStations() {
+    SimpleRailGraph facing =
+        YardFixtures.twoPlatforms(4, 0, Optional.of("E"), Optional.of("W"), true);
+    SimpleRailGraph away =
+        YardFixtures.twoPlatforms(4, 0, Optional.of("W"), Optional.of("E"), true);
+
+    assertEquals(1, geometry(facing).platforms().size(), () -> "相对开: " + geometry(facing));
+    assertEquals(2, geometry(away).platforms().size(), () -> "背对开: " + geometry(away));
+  }
+
+  /** 节点坐标取的是牌子，牌子常在轨道外侧一两格：间距按轨道量，牌子隔 6 格、轨道只隔 4 格时仍是两侧式。 */
+  @Test
+  void gapsAreMeasuredBetweenRailsNotSigns() {
+    YardGeometry geometry =
+        geometry(YardFixtures.twoPlatforms(4, 1, Optional.empty(), Optional.empty(), false));
+
+    assertEquals(2, geometry.platforms().size(), () -> "两块侧式站台: " + geometry.platforms());
+  }
+
+  /** 两条站台股道中间夹着一条正线：隔得再宽也不是两线共用的一块岛式站台。 */
+  @Test
+  void aTrackInBetweenRulesOutAnIsland() {
+    assertIsland(YardFixtures.twoPlatforms(12), 12);
+    YardGeometry geometry = geometry(YardFixtures.twoPlatformsAroundAThroughTrack(12));
+
+    assertEquals(2, geometry.platforms().size(), () -> "两块侧式站台: " + geometry.platforms());
+  }
+
+  private static SimpleRailGraph doors(int gap, String door1, String door2) {
+    return YardFixtures.twoPlatforms(
+        gap, 0, Optional.of(door1).filter(s -> !s.isEmpty()), Optional.of(door2), false);
+  }
+
+  private static void assertIsland(SimpleRailGraph graph, int gap) {
+    YardGeometry geometry = geometry(graph);
+    YardGeometry.Point one = geometry.pointOf(cell(0, 0, false)).orElseThrow();
+    YardGeometry.Point two = geometry.pointOf(cell(0, gap, false)).orElseThrow();
+
+    assertEquals(1, geometry.platforms().size(), () -> "一块岛式站台: " + geometry.platforms());
     YardGeometry.Platform island = geometry.platforms().get(0);
     assertEquals(List.of("1", "2"), island.tracks());
     assertTrue(island.top() > one.y() && island.bottom() < two.y(), () -> "夹在两行之间: " + island);
     assertTrue(island.left() <= one.x() && island.right() > one.x(), "站台节点在站台块范围内");
   }
 
-  /** 两条站台股道只隔 2 格，中间放不下站台：各自画在外侧。 */
-  @Test
-  void tracksTooCloseTogetherGetPlatformsOnTheOutside() {
-    YardGeometry geometry = geometry(YardFixtures.twoPlatforms(2));
+  private static void assertOutside(SimpleRailGraph graph, int gap) {
+    YardGeometry geometry = geometry(graph);
     YardGeometry.Point one = geometry.pointOf(cell(0, 0, false)).orElseThrow();
-    YardGeometry.Point two = geometry.pointOf(cell(0, 2, false)).orElseThrow();
+    YardGeometry.Point two = geometry.pointOf(cell(0, gap, false)).orElseThrow();
 
-    assertEquals(2, geometry.platforms().size());
+    assertEquals(2, geometry.platforms().size(), () -> "两块侧式站台: " + geometry.platforms());
     YardGeometry.Platform north = geometry.platforms().get(0);
     YardGeometry.Platform south = geometry.platforms().get(1);
     assertEquals(List.of("1"), north.tracks());
@@ -194,6 +267,96 @@ class YardGeometryTest {
 
     for (YardGeometry.Platform platform : geometry.platforms()) {
       assertTrue(platform.right() < east.x1(), () -> "不越过东头道岔: " + platform);
+    }
+  }
+
+  /** 控制区里一条贯通的线（车库—ABC—区间点—DEF）整条画在同一行。 */
+  @Test
+  void aThroughLineStaysOnOneRow() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.corridor(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.depot("DEP"));
+    int y = geometry.pointOf(cell(0, 0, false)).orElseThrow().y();
+
+    for (int x : new int[] {-60, -30, 100, 150, 200}) {
+      assertEquals(y, geometry.pointOf(cell(x, 0, false)).orElseThrow().y(), () -> "x=" + x);
+    }
+  }
+
+  /** 中途岔出的线另起一行；几个车站的站台各带站码，站名写不下时改写站码。 */
+  @Test
+  void aBranchingLineGetsItsOwnRow() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.junction(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"));
+    YardGeometry.Point abc = geometry.pointOf(cell(0, 0, false)).orElseThrow();
+    YardGeometry.Point def = geometry.pointOf(cell(200, 40, false)).orElseThrow();
+
+    assertTrue(def.y() != abc.y(), () -> "两站不在同一行: " + abc + " " + def);
+    assertEquals(
+        Set.of(Optional.of("ABC"), Optional.of("DEF")),
+        geometry.platforms().stream().map(YardGeometry.Platform::code).collect(Collectors.toSet()));
+  }
+
+  /** 不同区间的水平线不在同一行上重叠（端点相接不算），否则看不出是两条线。 */
+  @Test
+  void horizontalLinesOfDifferentEdgesNeverRunAlongEachOther() {
+    for (YardGeometry geometry : samples()) {
+      List<int[]> lines = new ArrayList<>();
+      List<EdgeId> owners = new ArrayList<>();
+      for (YardGeometry.Path path : geometry.paths()) {
+        for (YardGeometry.Segment s : path.segments()) {
+          if (s.y0() == s.y1() && s.x0() != s.x1()) {
+            lines.add(new int[] {s.y0(), Math.min(s.x0(), s.x1()), Math.max(s.x0(), s.x1())});
+            owners.add(path.edge());
+          }
+        }
+      }
+      for (int i = 0; i < lines.size(); i++) {
+        for (int j = i + 1; j < lines.size(); j++) {
+          int[] a = lines.get(i);
+          int[] b = lines.get(j);
+          if (owners.get(i).equals(owners.get(j)) || a[0] != b[0]) {
+            continue;
+          }
+          int shared = Math.min(a[2], b[2]) - Math.max(a[1], b[1]);
+          EdgeId first = owners.get(i);
+          EdgeId second = owners.get(j);
+          assertTrue(shared <= 2, () -> first + " 与 " + second + " 重叠 " + shared + " 像素");
+        }
+      }
+    }
+  }
+
+  /** 斜线不穿过站台块，免得压在站台与股道号上。 */
+  @Test
+  void diagonalsStayOutOfPlatforms() {
+    for (YardGeometry geometry : samples()) {
+      for (YardGeometry.Platform platform : geometry.platforms()) {
+        for (YardGeometry.Path path : geometry.paths()) {
+          for (YardGeometry.Segment s : path.segments()) {
+            if (s.y0() == s.y1()) {
+              continue;
+            }
+            int steps = Math.abs(s.y1() - s.y0());
+            for (int i = 0; i <= steps; i++) {
+              int x = s.x0() + (s.x1() - s.x0()) * i / steps;
+              int y = s.y0() + (s.y1() - s.y0()) * i / steps;
+              boolean inside =
+                  x > platform.left()
+                      && x < platform.right()
+                      && y > platform.top()
+                      && y < platform.bottom();
+              assertFalse(inside, () -> path.edge() + " 穿过站台 " + platform);
+            }
+          }
+        }
+      }
     }
   }
 
@@ -215,6 +378,28 @@ class YardGeometryTest {
         graph.interlockingState().footprintCellsByEdge(),
         RECT,
         code -> code.equals("XYZ") ? "西站" : code);
+  }
+
+  private static YardGeometry zone(SimpleRailGraph graph, YardArea.Member... members) {
+    YardArea area = YardArea.of(graph, "SURC", List.of(members)).orElseThrow();
+    return YardGeometry.of(
+        graph, area, graph.interlockingState().footprintCellsByEdge(), RECT, code -> code);
+  }
+
+  /** 几种站场：单站带两头道岔、走廊式控制区、中途岔出的控制区。 */
+  private static List<YardGeometry> samples() {
+    return List.of(
+        geometry(YardFixtures.graph()),
+        geometry(YardFixtures.twoPlatforms(4)),
+        zone(
+            YardFixtures.corridor(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.depot("DEP")),
+        zone(
+            YardFixtures.junction(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF")));
   }
 
   private static YardGeometry.Path path(YardGeometry geometry, EdgeId edge) {

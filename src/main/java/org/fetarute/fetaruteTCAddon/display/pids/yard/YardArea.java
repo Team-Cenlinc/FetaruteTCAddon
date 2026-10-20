@@ -5,12 +5,15 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.ControlZoneMember.Kind;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -30,6 +33,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
  *   <li>起点是成员车站的站台（{@code OP:S:站:股道}）与咽喉（{@code OP:S:站:股道:序号}）节点，以及成员车库的股道（{@code OP:D:库:股道}）与咽喉节点。
  *   <li>沿区间向外展开：道岔与无名目的地节点算区内，但离最近的起点超过 {@value #MAX_RADIUS_BLOCKS} 格的不算，免得没有区间点隔开的正线把整条线都卷进来；
  *       两端都是成员车站的区间点也算区内，几个车站因此连成一张图。
+ *   <li>控制区里的两个车站之间若经过别的区间（例如一条线在另一条线的区间中途岔出），只有一端是成员车站的区间点与经由它们走到的道岔先试着算进来；
+ *       只留下把两个不同成员连起来的几片，再把其中走不回区内的支线一段段剪掉。只有一个成员时不会多出节点。
  *   <li>碰到其余的区间点、别的车站、车库或跨世界节点就停下，这条区间记为出口，只画靠区内的一小段。
  *   <li>节点超过 {@value #MAX_NODES} 个时不再展开。
  * </ul>
@@ -141,46 +146,49 @@ public record YardArea(Set<NodeId> nodes, Set<EdgeId> edges, List<Exit> exits, L
       return Optional.empty();
     }
     Set<NodeId> inner = new LinkedHashSet<>();
-    Deque<RailNode> queue = new ArrayDeque<>();
     for (RailNode seed : seeds) {
       inner.add(seed.id());
-      queue.add(seed);
     }
+    expand(
+        graph,
+        inner,
+        new ArrayDeque<>(seeds),
+        node -> inside(node, operator, stations, depots, seeds));
+    // 第二轮：试着把一端是成员车站的区间点与经由它们走到的道岔也算进来，再剪掉走不回区内的支线
+    Set<NodeId> definite = Set.copyOf(inner);
+    Set<NodeId> tentative = new LinkedHashSet<>();
+    Deque<RailNode> frontier = new ArrayDeque<>();
+    inner.forEach(id -> graph.findNode(id).ifPresent(frontier::add));
+    Set<NodeId> before = Set.copyOf(inner);
+    expand(
+        graph,
+        inner,
+        frontier,
+        node ->
+            inside(node, operator, stations, depots, seeds)
+                || touchesMember(node, operator, stations)
+                || (isJunction(node) && nearestSeedDistance(node, seeds) <= MAX_RADIUS_BLOCKS));
+    inner.stream().filter(id -> !before.contains(id)).forEach(tentative::add);
+    keepBridges(graph, inner, tentative, definite, seeds, operator, stations, depots);
+    prune(graph, inner, tentative, definite);
     Set<EdgeId> edges = new LinkedHashSet<>();
     List<Exit> exits = new ArrayList<>();
-    Set<EdgeId> seen = new LinkedHashSet<>();
-    while (!queue.isEmpty()) {
-      RailNode node = queue.poll();
+    Set<EdgeId> exitEdges = new LinkedHashSet<>();
+    for (NodeId id : inner) {
       List<RailEdge> around =
-          graph.edgesFrom(node.id()).stream().sorted(Comparator.comparing(RailEdge::id)).toList();
+          graph.edgesFrom(id).stream().sorted(Comparator.comparing(RailEdge::id)).toList();
       for (RailEdge edge : around) {
-        if (!seen.add(edge.id())) {
-          continue;
-        }
-        NodeId otherId = edge.from().equals(node.id()) ? edge.to() : edge.from();
+        NodeId otherId = edge.from().equals(id) ? edge.to() : edge.from();
         if (inner.contains(otherId)) {
           edges.add(edge.id());
-          continue;
-        }
-        Optional<RailNode> other = graph.findNode(otherId);
-        if (other.isPresent()
-            && inner.size() < MAX_NODES
-            && inside(other.get(), operator, stations, depots, seeds)) {
-          inner.add(otherId);
-          edges.add(edge.id());
-          queue.add(other.get());
-        } else {
+        } else if (exitEdges.add(edge.id())) {
           exits.add(
               new Exit(
-                  edge.id(), node.id(), otherId, other.flatMap(o -> towards(o, stations, depots))));
+                  edge.id(),
+                  id,
+                  otherId,
+                  graph.findNode(otherId).flatMap(o -> towards(o, stations, depots))));
         }
-      }
-    }
-    // 先当成出口、后来另一端也进了站场的区间
-    exits.removeIf(exit -> inner.contains(exit.outer()));
-    for (EdgeId id : seen) {
-      if (inner.contains(id.a()) && inner.contains(id.b())) {
-        edges.add(id);
       }
     }
     List<Track> tracks = new ArrayList<>();
@@ -195,6 +203,171 @@ public record YardArea(Set<NodeId> nodes, Set<EdgeId> edges, List<Exit> exits, L
                           ref.stationCode().toUpperCase(Locale.ROOT))));
     }
     return Optional.of(new YardArea(inner, edges, exits, tracks));
+  }
+
+  /** 从 {@code queue} 里的节点沿区间向外展开，{@code inside} 认可的节点进区内，到 {@value #MAX_NODES} 个为止。 */
+  private static void expand(
+      RailGraph graph, Set<NodeId> inner, Deque<RailNode> queue, Predicate<RailNode> inside) {
+    while (!queue.isEmpty()) {
+      RailNode node = queue.poll();
+      List<RailEdge> around =
+          graph.edgesFrom(node.id()).stream().sorted(Comparator.comparing(RailEdge::id)).toList();
+      for (RailEdge edge : around) {
+        NodeId otherId = edge.from().equals(node.id()) ? edge.to() : edge.from();
+        if (inner.contains(otherId) || inner.size() >= MAX_NODES) {
+          continue;
+        }
+        Optional<RailNode> other = graph.findNode(otherId);
+        if (other.isPresent() && inside.test(other.get())) {
+          inner.add(otherId);
+          queue.add(other.get());
+        }
+      }
+    }
+  }
+
+  /** 只留连起两个不同成员的几片：试着算进来的节点按彼此相连分片，每片看它碰到的第一轮区内节点各属哪个成员（按第一轮区内的连通片认），碰不到两个不同成员的整片去掉。 */
+  private static void keepBridges(
+      RailGraph graph,
+      Set<NodeId> inner,
+      Set<NodeId> tentative,
+      Set<NodeId> definite,
+      List<RailNode> seeds,
+      String operator,
+      Set<String> stations,
+      Set<String> depots) {
+    Map<NodeId, Integer> piece = pieces(graph, definite);
+    Map<Integer, Set<String>> membersOf = new HashMap<>();
+    for (RailNode seed : seeds) {
+      membersOf
+          .computeIfAbsent(piece.get(seed.id()), ignored -> new LinkedHashSet<>())
+          .add(memberKey(seed, operator, stations, depots));
+    }
+    Set<NodeId> visited = new LinkedHashSet<>();
+    for (NodeId start : List.copyOf(tentative)) {
+      if (!visited.add(start)) {
+        continue;
+      }
+      Set<NodeId> group = new LinkedHashSet<>(List.of(start));
+      Set<String> touched = new LinkedHashSet<>();
+      Deque<NodeId> queue = new ArrayDeque<>(List.of(start));
+      while (!queue.isEmpty()) {
+        NodeId id = queue.poll();
+        for (RailEdge edge : graph.edgesFrom(id)) {
+          NodeId other = edge.from().equals(id) ? edge.to() : edge.from();
+          if (tentative.contains(other) && visited.add(other)) {
+            group.add(other);
+            queue.add(other);
+          } else if (definite.contains(other)) {
+            touched.addAll(membersOf.getOrDefault(piece.get(other), Set.of()));
+          }
+        }
+      }
+      if (touched.size() < 2) {
+        inner.removeAll(group);
+        tentative.removeAll(group);
+      }
+    }
+  }
+
+  /** 一组节点按彼此相连分片：节点 → 片号。 */
+  private static Map<NodeId, Integer> pieces(RailGraph graph, Set<NodeId> nodes) {
+    Map<NodeId, Integer> piece = new HashMap<>();
+    int next = 0;
+    for (NodeId start : nodes) {
+      if (piece.containsKey(start)) {
+        continue;
+      }
+      int id = next++;
+      Deque<NodeId> queue = new ArrayDeque<>(List.of(start));
+      piece.put(start, id);
+      while (!queue.isEmpty()) {
+        NodeId at = queue.poll();
+        for (RailEdge edge : graph.edgesFrom(at)) {
+          NodeId other = edge.from().equals(at) ? edge.to() : edge.from();
+          if (nodes.contains(other) && !piece.containsKey(other)) {
+            piece.put(other, id);
+            queue.add(other);
+          }
+        }
+      }
+    }
+    return piece;
+  }
+
+  /** 起点属于哪个成员：车站为 {@code S:站码}，车库为 {@code D:车库代码}。 */
+  private static String memberKey(
+      RailNode seed, String operator, Set<String> stations, Set<String> depots) {
+    return RouteTerminals.stationIdentityOfNode(seed.id().value())
+        .filter(ref -> ref.operatorCode().equalsIgnoreCase(operator))
+        .map(ref -> "S:" + ref.stationCode().toUpperCase(Locale.ROOT))
+        .orElseGet(
+            () ->
+                "D:"
+                    + seed.waypointMetadata()
+                        .map(m -> m.originStation().toUpperCase(Locale.ROOT))
+                        .orElse(seed.id().value()));
+  }
+
+  /**
+   * 剪支线：试着算进来的节点在区内的邻居不到两个就剪掉，一直剪到没有可剪的；第一轮就在区内的节点不剪。 只剩两个邻居、且两边朝同一侧离开（V
+   * 形）的也剪：那是从道岔的一条侧股进、另一条侧股出，车走不通。
+   */
+  private static void prune(
+      RailGraph graph, Set<NodeId> inner, Set<NodeId> tentative, Set<NodeId> definite) {
+    boolean changed = true;
+    while (changed) {
+      changed = false;
+      for (NodeId id : List.copyOf(tentative)) {
+        List<NodeId> neighbours =
+            graph.edgesFrom(id).stream()
+                .map(edge -> edge.from().equals(id) ? edge.to() : edge.from())
+                .filter(inner::contains)
+                .distinct()
+                .toList();
+        boolean dead =
+            neighbours.size() < 2 || (neighbours.size() == 2 && sameSide(graph, id, neighbours));
+        if (dead && !definite.contains(id)) {
+          inner.remove(id);
+          tentative.remove(id);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  /** 两个邻居在节点的同一侧（夹角小于 90°）。 */
+  private static boolean sameSide(RailGraph graph, NodeId id, List<NodeId> neighbours) {
+    Optional<RailNode> at = graph.findNode(id);
+    Optional<RailNode> a = graph.findNode(neighbours.get(0));
+    Optional<RailNode> b = graph.findNode(neighbours.get(1));
+    if (at.isEmpty() || a.isEmpty() || b.isEmpty()) {
+      return false;
+    }
+    Vector origin = at.get().worldPosition();
+    Vector toA = a.get().worldPosition().clone().subtract(origin);
+    Vector toB = b.get().worldPosition().clone().subtract(origin);
+    return toA.getX() * toB.getX() + toA.getZ() * toB.getZ() > 0;
+  }
+
+  /** 一端是成员车站的区间点（本运营商）。 */
+  private static boolean touchesMember(RailNode node, String operator, Set<String> stations) {
+    return node.type() != NodeType.SWITCHER
+        && node.waypointMetadata()
+            .filter(m -> m.kind() == WaypointKind.INTERVAL)
+            .filter(m -> m.operator().equalsIgnoreCase(operator))
+            .filter(
+                m ->
+                    stations.contains(m.originStation().toUpperCase(Locale.ROOT))
+                        || m.destinationStation()
+                            .map(to -> stations.contains(to.toUpperCase(Locale.ROOT)))
+                            .orElse(false))
+            .isPresent();
+  }
+
+  private static boolean isJunction(RailNode node) {
+    return node.type() == NodeType.SWITCHER
+        || (node.type() == NodeType.DESTINATION && node.waypointMetadata().isEmpty());
   }
 
   private static Set<String> codes(Collection<Member> members, Kind kind) {
@@ -236,10 +409,7 @@ public record YardArea(Set<NodeId> nodes, Set<EdgeId> edges, List<Exit> exits, L
     if (belongsTo(node, operator, stations, depots)) {
       return true;
     }
-    boolean junction =
-        node.type() == NodeType.SWITCHER
-            || (node.type() == NodeType.DESTINATION && node.waypointMetadata().isEmpty());
-    if (junction) {
+    if (isJunction(node)) {
       return nearestSeedDistance(node, seeds) <= MAX_RADIUS_BLOCKS;
     }
     return node.type() != NodeType.SWITCHER

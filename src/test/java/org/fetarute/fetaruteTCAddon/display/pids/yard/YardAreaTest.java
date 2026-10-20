@@ -1,9 +1,11 @@
 package org.fetarute.fetaruteTCAddon.display.pids.yard;
 
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.D1;
+import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.DEF_TO_XYZ;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.IA;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.IB;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.IC;
+import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.JUNCTION;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.P1;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.P2;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.Q1;
@@ -11,6 +13,8 @@ import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.SW1;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.SW2;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.SW3;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.T1;
+import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.TO_XYZ;
+import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.TO_XYZ_FAR;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -22,7 +26,7 @@ import java.util.stream.Collectors;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.junit.jupiter.api.Test;
 
-/** 站场推导：从本站站台与咽喉出发，经道岔展开，碰到区间点、别的车站与远处道岔就停。 */
+/** 站场推导：从本站站台与咽喉出发，经道岔展开，碰到区间点、别的车站与远处道岔就停；控制区的几个成员经别的区间连成一片。 */
 class YardAreaTest {
 
   @Test
@@ -121,6 +125,49 @@ class YardAreaTest {
         area.exits().stream()
             .collect(Collectors.toMap(YardArea.Exit::edge, YardArea.Exit::towards)));
     assertEquals(List.of(new YardArea.Track(P1, "1", "ABC")), area.tracks(), "车库股道不画站台");
+  }
+
+  /** 一条线在另一条线的区间中途岔出：经别的区间与道岔把两站连起来，伸向 XYZ 的那段走不回区内，剪掉、记为出口。 */
+  @Test
+  void zonesBridgeMembersThroughAJunctionOnAnotherInterval() {
+    YardArea area =
+        YardArea.of(
+                YardFixtures.junction(),
+                "SURC",
+                List.of(YardArea.Member.station("ABC"), YardArea.Member.station("DEF")))
+            .orElseThrow();
+
+    assertEquals(Set.of(P1, TO_XYZ, JUNCTION, DEF_TO_XYZ, Q1), area.nodes());
+    assertEquals(
+        Map.of(EdgeId.undirected(JUNCTION, TO_XYZ_FAR), Optional.of("XYZ")),
+        area.exits().stream()
+            .collect(Collectors.toMap(YardArea.Exit::edge, YardArea.Exit::towards)));
+  }
+
+  /** 只有一个成员时不往别的区间里伸：中途岔出的道岔不算本站。 */
+  @Test
+  void singleStationsDoNotReachIntoIntervals() {
+    YardArea area = YardArea.of(YardFixtures.junction(), "SURC", "ABC").orElseThrow();
+
+    assertEquals(Set.of(P1), area.nodes());
+    assertEquals(
+        Map.of(EdgeId.undirected(P1, TO_XYZ), Optional.of("XYZ")),
+        area.exits().stream()
+            .collect(Collectors.toMap(YardArea.Exit::edge, YardArea.Exit::towards)));
+  }
+
+  /** 两条线汇合后同去一站：从一站到另一站要在道岔后折返，不算相通，两站各自成片。 */
+  @Test
+  void mergingLinesDoNotBridgeTheirStations() {
+    YardArea area =
+        YardArea.of(
+                YardFixtures.merge(),
+                "SURC",
+                List.of(YardArea.Member.station("ABC"), YardArea.Member.station("DEF")))
+            .orElseThrow();
+
+    assertEquals(Set.of(P1, Q1), area.nodes());
+    assertTrue(area.edges().isEmpty());
   }
 
   @Test
