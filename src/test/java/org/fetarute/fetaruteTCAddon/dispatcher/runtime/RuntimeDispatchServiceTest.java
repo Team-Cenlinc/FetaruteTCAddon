@@ -17226,6 +17226,21 @@ class RuntimeDispatchServiceTest {
         (java.util.concurrent.ConcurrentMap<String, Instant>) cooldownField.get(service);
     cooldowns.put(
         "plan:" + candidate.cycleId() + ":" + candidate.planHash(), Instant.now().plusSeconds(60));
+    // 没有等待边时规划整轮早退，不会走到规划器；播一条等待边，让被替换的规划器真的被调用。
+    service.updateBlockerSnapshot(
+        "planner-blocked",
+        List.of(
+            new OccupancyClaim(
+                OccupancyResource.forConflict("single:planner-test"),
+                "planner-blocker",
+                Optional.empty(),
+                Instant.now(),
+                Duration.ZERO,
+                Optional.empty(),
+                ClaimRole.MOVEMENT_REQUIRED)),
+        null,
+        Instant.now(),
+        "test");
     java.lang.reflect.Method tracePlanner =
         RuntimeDispatchService.class.getDeclaredMethod(
             "traceSmartMinimalForwardPlanner", Set.class, Map.class, Instant.class, List.class);
@@ -17413,16 +17428,20 @@ class RuntimeDispatchServiceTest {
             Map.of("train-1", trainOne, "train-2", trainTwo),
             Set.of(),
             Set.of());
+    // owner 集合 trace 随规划采集一起挪进了规划现场入口（RuntimeDispatchService 的嵌套类）。
+    Object plannerHost = service.smartPlanner().host();
     java.lang.reflect.Method trace =
-        RuntimeDispatchService.class.getDeclaredMethod(
-            "traceMutualConflictOwnerSet",
-            SmartWaitForPlanner.PlannerInput.class,
-            SmartWaitForPlanner.UnlockCandidate.class,
-            boolean.class,
-            java.util.Collection.class);
+        plannerHost
+            .getClass()
+            .getDeclaredMethod(
+                "traceMutualConflictOwnerSet",
+                SmartWaitForPlanner.PlannerInput.class,
+                SmartWaitForPlanner.UnlockCandidate.class,
+                boolean.class,
+                java.util.Collection.class);
     trace.setAccessible(true);
     trace.invoke(
-        service,
+        plannerHost,
         plannerInput,
         smartUnlockCandidate(conflict.toString(), CorridorDirection.A_TO_B),
         false,

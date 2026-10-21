@@ -56,6 +56,8 @@ public final class RailGraphPathFinder {
    *
    * <p>运行时每个信号周期都要把交路相邻途经点展开成路径，同一对节点每辆车每轮都重跑一遍搜索。图快照不可变（重建即换新实例）， 运维覆盖视图只在其上加封锁，所以“快照 + 此刻被覆盖封锁的边
    * + 起讫点”相同，结果就相同。快照不再被引用时整张表随之回收。 只记 {@link Options#shortestDistance()}：其他代价模型可能读运行时状态。
+   *
+   * <p>可在任意线程读写：外层与每张图的表都是同步包装，后台预热写入、主线程查询互不干扰。两个线程同时未命中时各搜一遍、先后写入同一结果， 搜索只取决于图内容，写哪一份都一样。
    */
   private static final Map<RailGraph, Map<MemoKey, Optional<RailGraphPath>>> MEMO =
       Collections.synchronizedMap(new WeakHashMap<>());
@@ -93,23 +95,13 @@ public final class RailGraphPathFinder {
     if (options != SHORTEST_DISTANCE) {
       return search(graph, from, to, options);
     }
-    // 跨世界路网的视图同样不可变（路网重建即换新视图），按视图记忆。
-    RailGraph snapshot;
-    Set<EdgeId> overrideBlocked;
-    if (graph instanceof SimpleRailGraph || graph instanceof RailNetwork.View) {
-      snapshot = graph;
-      overrideBlocked = Set.of();
-    } else if (graph instanceof EdgeOverrideRailGraph view
-        && (view.delegate() instanceof SimpleRailGraph
-            || view.delegate() instanceof RailNetwork.View)) {
-      snapshot = view.delegate();
-      overrideBlocked = view.overrideBlockedEdges();
-    } else {
+    MemoSlot slot = memoSlot(graph);
+    if (slot == null) {
       return search(graph, from, to, options);
     }
     Map<MemoKey, Optional<RailGraphPath>> memo =
-        MEMO.computeIfAbsent(snapshot, ignored -> newMemo());
-    MemoKey key = new MemoKey(from, to, overrideBlocked);
+        MEMO.computeIfAbsent(slot.snapshot(), ignored -> newMemo());
+    MemoKey key = new MemoKey(from, to, slot.overrideBlocked());
     Optional<RailGraphPath> remembered = memo.get(key);
     if (remembered != null) {
       return remembered;
@@ -118,6 +110,47 @@ public final class RailGraphPathFinder {
     memo.put(key, result);
     return result;
   }
+
+  /**
+   * 这张图上这对起讫点的最短距离结果是否已经记住（只查不算，也不改变淘汰顺序）。
+   *
+   * <p>供预热统计与测试判断命中；与 {@link #shortestPath} 用同一套键，覆盖视图按此刻被覆盖封锁的边区分。
+   */
+  public static boolean remembers(RailGraph graph, NodeId from, NodeId to) {
+    if (graph == null || from == null || to == null) {
+      return false;
+    }
+    MemoSlot slot = memoSlot(graph);
+    if (slot == null) {
+      return false;
+    }
+    Map<MemoKey, Optional<RailGraphPath>> memo = MEMO.get(slot.snapshot());
+    return memo != null && memo.containsKey(new MemoKey(from, to, slot.overrideBlocked()));
+  }
+
+  /** 每张图快照最多记住多少对起讫点；预热据此给运行时留出余量，免得自己把自己挤掉。 */
+  public static int memoCapacityPerGraph() {
+    return MEMO_LIMIT_PER_GRAPH;
+  }
+
+  /**
+   * 记忆落在哪张表、带哪组覆盖封锁；不可记忆的图实现返回 {@code null}。
+   *
+   * <p>跨世界路网的视图同样不可变（路网重建即换新视图），按视图记忆。
+   */
+  private static MemoSlot memoSlot(RailGraph graph) {
+    if (graph instanceof SimpleRailGraph || graph instanceof RailNetwork.View) {
+      return new MemoSlot(graph, Set.of());
+    }
+    if (graph instanceof EdgeOverrideRailGraph view
+        && (view.delegate() instanceof SimpleRailGraph
+            || view.delegate() instanceof RailNetwork.View)) {
+      return new MemoSlot(view.delegate(), view.overrideBlockedEdges());
+    }
+    return null;
+  }
+
+  private record MemoSlot(RailGraph snapshot, Set<EdgeId> overrideBlocked) {}
 
   private static Map<MemoKey, Optional<RailGraphPath>> newMemo() {
     return Collections.synchronizedMap(

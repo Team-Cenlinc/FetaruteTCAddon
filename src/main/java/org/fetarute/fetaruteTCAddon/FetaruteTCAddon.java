@@ -58,6 +58,7 @@ import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.GraphWorker;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
@@ -70,6 +71,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteNodeUsage;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePathPrewarmer;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
@@ -82,6 +84,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.SmartPlannerCycle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserverHub;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopCurveAction;
@@ -163,6 +166,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private LoggerManager loggerManager;
   private SignNodeRegistry signNodeRegistry;
   private RailGraphService railGraphService;
+  private GraphWorker graphWorker;
+  private RoutePathPrewarmer routePathPrewarmer;
   private GraphStaleNotifier graphStaleNotifier;
   private SignNodeStorageSynchronizer signNodeStorageSync = SignNodeStorageSynchronizer.noop();
   private final PortalLinkRegistry portalLinks = new PortalLinkRegistry();
@@ -337,6 +342,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
       }
       signallerModule = null;
     }
+    if (etaService != null) {
+      etaService.close();
+    }
     if (licenseService != null) {
       licenseService.shutdown();
       licenseService = null;
@@ -358,6 +366,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
       TransferFunctionInputPlayerNearby.unregister();
     } catch (RuntimeException | LinkageError ignored) {
       // onLoad 登记失败时这里同样不可用，无需重复告警。
+    }
+    if (routePathPrewarmer != null) {
+      routePathPrewarmer.close();
+      routePathPrewarmer = null;
+    }
+    if (railGraphService != null) {
+      railGraphService.setBackgroundExecutor(null);
+    }
+    if (graphWorker != null) {
+      graphWorker.close();
+      graphWorker = null;
     }
     if (signalEventBus != null) {
       signalEventBus.clear();
@@ -1071,6 +1090,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             : ConfigManager.GraphSettings.defaults();
     this.railGraphService = new RailGraphService(loggerManager::debug);
     railGraphService.configureCrossWorld(graphSettings.crossWorld(), portalLinks);
+    // 跨世界路网重建与交路路径预热放到后台线程；没设执行器时同步，行为同前
+    this.graphWorker = GraphWorker.start("FTA-graph-worker", loggerManager::warn);
+    railGraphService.setBackgroundExecutor(graphWorker);
     this.graphStaleNotifier =
         GraphStaleNotifier.forPlugin(this, railGraphService, localeManager, loggerManager);
     getServer().getPluginManager().registerEvents(graphStaleNotifier, this);
@@ -1200,6 +1222,19 @@ public final class FetaruteTCAddon extends JavaPlugin {
           () ->
               getCallService()
                   .ifPresent(org.fetarute.fetaruteTCAddon.call.CallService::invalidate));
+      // 换图或交路变了：后台把交路相邻途经点之间的最短路与交路展开计划先算好，首轮信号周期不必在主线程现算
+      if (railGraphService != null && graphWorker != null) {
+        RoutePathPrewarmer prewarmer =
+            new RoutePathPrewarmer(
+                railGraphService,
+                routeDefinitionCache,
+                graphWorker,
+                task -> getServer().getScheduler().runTask(this, task),
+                loggerManager::debug);
+        railGraphService.addRuntimeGraphListener(prewarmer::requestPrewarm);
+        routeDefinitionCache.addChangeListener(prewarmer::requestPrewarm);
+        this.routePathPrewarmer = prewarmer;
+      }
     }
     if (this.stationDirectory == null) {
       // 与交路缓存同寿命：重载不换实例，公开 API 的数据版本不会回退。
@@ -1214,6 +1249,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 stationDirectory.reload(provider);
                 controlZoneDirectory.reload(provider);
               });
+    }
+    // 启动时图已从库里载入，监听注册得晚，补一次
+    if (routePathPrewarmer != null) {
+      routePathPrewarmer.requestPrewarm();
     }
   }
 
@@ -1409,6 +1448,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
             storageManager,
             new TrainConfigResolver(),
             runtimeDispatchDiagnostics());
+    // Smart 等待图规划放到后台线程：主线程只拼输入、下一轮取回结论再复核执行
+    runtimeDispatchService.smartPlanner().useBackgroundExecutor();
     // 停靠事件的唯一出口：时刻表、HUD 在站判定、公开 API 事件都从这里按名字挂载。
     this.stationStopHub = new StationStopObserverHub(loggerManager::debug);
     this.stationPresence = new StationPresenceTracker();
@@ -1679,6 +1720,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     runtimeDispatchRecoveryComplete = false;
     if (runtimeDispatchService != null) {
       runtimeDispatchService.beginPluginShutdown();
+      SmartPlannerCycle planner = runtimeDispatchService.smartPlanner();
+      if (planner != null) {
+        planner.shutdown();
+      }
     }
     suspendRuntimeDispatchComponentsForRecovery();
     debug("运行时停用事务已进入 STOP_FIRST: reason=plugin-disable");
@@ -1805,6 +1850,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
             trainSnapshotStore,
             runtimeDispatchService != null ? runtimeDispatchService::getActiveStopState : null,
             loggerManager::debug);
+    if (etaService != null) {
+      // 旧服务的站牌后台刷新线程随之退出
+      etaService.close();
+    }
     etaService = new EtaService(trainSnapshotStore, railGraphService, routeDefinitionCache);
     // 站牌上回程支线的车开往联挂后主干的终点：联挂服务按交路建的索引，任意线程读
     etaService.attachThroughRoutes(

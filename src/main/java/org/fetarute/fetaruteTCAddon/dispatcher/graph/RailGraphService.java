@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -10,14 +11,18 @@ import java.util.OptionalDouble;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingEdgeSignature;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetworkCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailComponentCautionRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
@@ -64,16 +69,12 @@ public final class RailGraphService {
   private volatile boolean crossWorld;
   private volatile org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry
       portalLinks;
-  private volatile CachedNetwork cachedNetwork;
 
-  private record CachedNetwork(
-      long snapshotVersion,
-      long linkRevision,
-      Instant builtAt,
-      org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network) {}
+  /** 跨世界路网：输入变了或定时封锁到期才重建，能用旧网时放到后台建（见 {@link RailNetworkCache}）。 */
+  private final RailNetworkCache networkCache;
 
-  /** 路网里各世界的运维封锁可能带时限：路网至少每隔这么久按当时的封锁重建一次。 */
-  private static final java.time.Duration NETWORK_MAX_AGE = java.time.Duration.ofSeconds(30);
+  /** 运行时图可能变了（换图、移出、覆盖增删、路网换新）之后的回调，见 {@link #addRuntimeGraphListener}。 */
+  private final List<Runnable> runtimeGraphListeners = new CopyOnWriteArrayList<>();
 
   private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
       componentCautions = new ConcurrentHashMap<>();
@@ -85,6 +86,47 @@ public final class RailGraphService {
 
   public RailGraphService(Consumer<String> debugLogger) {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+    this.networkCache = new RailNetworkCache(this::fireRuntimeGraphChanged, this.debugLogger);
+  }
+
+  /**
+   * 注册运行时图变化的回调：快照激活或移出、边覆盖增删、跨世界路网换新之后各调一次。
+   *
+   * <p>回调可能在任意线程上被调用（路网后台重建在后台线程换新），必须线程安全、不阻塞；只适合登记一个“稍后处理”的请求。 回调抛的异常只记日志。
+   */
+  public void addRuntimeGraphListener(Runnable listener) {
+    if (listener != null) {
+      runtimeGraphListeners.add(listener);
+    }
+  }
+
+  /** 移除运行时图变化的回调。 */
+  public void removeRuntimeGraphListener(Runnable listener) {
+    runtimeGraphListeners.remove(listener);
+  }
+
+  /**
+   * 跨世界路网后台重建用的执行器；{@code null}（默认）时路网一律在调用方线程上同步重建。
+   *
+   * <p>插件停用时先置空再关执行器。跨世界关闭时不建路网，与此无关。
+   */
+  public void setBackgroundExecutor(Executor executor) {
+    networkCache.setExecutor(executor);
+  }
+
+  /** 判断路网里定时封锁是否到期用的时钟（测试注入）。 */
+  void setNetworkClock(Clock clock) {
+    networkCache.setClock(clock);
+  }
+
+  private void fireRuntimeGraphChanged() {
+    for (Runnable listener : runtimeGraphListeners) {
+      try {
+        listener.run();
+      } catch (RuntimeException ex) {
+        debugLogger.accept("运行时图变化回调失败: " + ex);
+      }
+    }
   }
 
   /** 图快照版本：任何世界的快照切换、移出都会让它变；按它判断按旧图算的缓存是否作废。 */
@@ -153,6 +195,7 @@ public final class RailGraphService {
     lastActivatedInterlockingStates.put(worldId, nextState);
     staleStates.remove(worldId);
     traceInterlockingCoverage(worldId, nextState);
+    fireRuntimeGraphChanged();
   }
 
   /**
@@ -232,7 +275,7 @@ public final class RailGraphService {
       org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links) {
     this.crossWorld = enabled;
     this.portalLinks = links;
-    this.cachedNetwork = null;
+    networkCache.reset();
   }
 
   /**
@@ -263,6 +306,23 @@ public final class RailGraphService {
   public static RailGraph runtimeGraph(RailGraphService service, UUID worldId, RailGraph own) {
     RailGraph network = service == null ? null : service.networkGraph(worldId);
     return network != null ? network : own;
+  }
+
+  /**
+   * 运行时控车、占用申请与选台实际查询用的图：{@link #runtimeGraph} 再叠加本世界此刻的运维覆盖；本世界没有图时为空。
+   *
+   * <p>最短路记忆按“底层图实例 + 此刻被覆盖封锁的边”分开记，预热必须用与运行时同一个底层图实例才能命中；各处解析运行时图应当都走这里。
+   */
+  public Optional<RailGraph> runtimeQueryGraph(UUID worldId, Instant now) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(now, "now");
+    return getSnapshot(worldId)
+        .map(
+            snapshot -> {
+              RailGraph graph = runtimeGraph(this, worldId, snapshot.graph());
+              Map<EdgeId, RailEdgeOverrideRecord> overrides = edgeOverrides(worldId);
+              return overrides.isEmpty() ? graph : new EdgeOverrideRailGraph(graph, overrides, now);
+            });
   }
 
   /** 交路途经节点所在的世界：先按单个世界找，找不到再看跨世界路网（见 {@link #findCrossWorldPath}）。 */
@@ -301,36 +361,26 @@ public final class RailGraphService {
     if (!crossWorld || links == null || links.links().isEmpty()) {
       return null;
     }
+    // 先读版本再采集输入：采集期间又有变化时，下一次取到的版本对不上，会再判定一次。
     long version = snapshotVersion.get();
     long revision = links.revision();
-    Instant now = Instant.now();
-    CachedNetwork cached = cachedNetwork;
-    if (cached == null
-        || cached.snapshotVersion() != version
-        || cached.linkRevision() != revision
-        || now.isAfter(cached.builtAt().plus(NETWORK_MAX_AGE))) {
-      Map<UUID, RailGraph> graphs = new HashMap<>();
-      for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
-        // 各世界叠加自己的运维封锁：从本世界规划跨到别的世界时，也要绕开那边封锁的边。
-        Map<EdgeId, RailEdgeOverrideRecord> overrides = edgeOverrides(entry.getKey());
-        RailGraph graph = entry.getValue().graph();
-        graphs.put(
-            entry.getKey(),
-            overrides.isEmpty()
-                ? graph
-                : new org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph(
-                    graph, overrides, now));
-      }
-      cached =
-          new CachedNetwork(
-              version,
-              revision,
-              now,
-              org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork.build(
-                  graphs, links.links()));
-      cachedNetwork = cached;
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network =
+        networkCache.get(version, revision, () -> networkInputs(version, revision, links));
+    return network.hasPortalEdges() ? network : null;
+  }
+
+  /** 拼路网的输入：各世界的图（未叠加覆盖）与覆盖快照、传送门连接。 */
+  private RailNetworkCache.Inputs networkInputs(
+      long version,
+      long revision,
+      org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links) {
+    Map<UUID, RailGraph> graphs = new HashMap<>();
+    Map<UUID, Map<EdgeId, RailEdgeOverrideRecord>> overrides = new HashMap<>();
+    for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
+      graphs.put(entry.getKey(), entry.getValue().graph());
+      overrides.put(entry.getKey(), edgeOverrides(entry.getKey()));
     }
-    return cached.network().hasPortalEdges() ? cached.network() : null;
+    return new RailNetworkCache.Inputs(version, revision, graphs, overrides, links.links());
   }
 
   /** 返回已加载的图快照数量，用于命令校验/诊断。 */
@@ -465,6 +515,7 @@ public final class RailGraphService {
     snapshotVersion.incrementAndGet();
     componentIndexes.remove(worldId);
     staleStates.put(worldId, state.withSnapshotRetained(false));
+    fireRuntimeGraphChanged();
   }
 
   /**
@@ -514,6 +565,7 @@ public final class RailGraphService {
     componentIndexes.remove(worldId);
     boolean removed = snapshots.remove(worldId) != null;
     snapshotVersion.incrementAndGet();
+    fireRuntimeGraphChanged();
     return removed;
   }
 
@@ -615,6 +667,7 @@ public final class RailGraphService {
       edgeOverrideSnapshots.remove(override.worldId());
       snapshotVersion.incrementAndGet();
     }
+    fireRuntimeGraphChanged();
   }
 
   /** 删除某条边的运维覆盖（仅更新内存）。 */
@@ -634,6 +687,7 @@ public final class RailGraphService {
       edgeOverrideSnapshots.remove(worldId);
       snapshotVersion.incrementAndGet();
     }
+    fireRuntimeGraphChanged();
   }
 
   /**
