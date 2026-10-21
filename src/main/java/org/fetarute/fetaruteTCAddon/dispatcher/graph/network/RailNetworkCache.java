@@ -106,6 +106,25 @@ public final class RailNetworkCache {
     }
   }
 
+  /**
+   * 换图前在后台先拼好的一张路网（{@link #prebuild}），切换时由 {@link #installPrebuilt} 换上。
+   *
+   * <p>只读；可以丢弃不用。
+   */
+  public static final class Prebuilt {
+
+    private final Built built;
+
+    private Prebuilt(Built built) {
+      this.built = built;
+    }
+
+    /** 拼好的路网。 */
+    public RailNetwork network() {
+      return built.network();
+    }
+  }
+
   /** 已判定能继续用的旧网，及判定时的版本号。 */
   private record Verified(Built built, long snapshotVersion, long linkRevision) {
     boolean covers(Built current, long version, long revision) {
@@ -142,6 +161,47 @@ public final class RailNetworkCache {
   /** 判断封锁是否到期用的时钟（测试注入）。 */
   public void setClock(Clock clock) {
     this.clock = Objects.requireNonNull(clock, "clock");
+  }
+
+  /**
+   * 按 {@code inputs} 拼一张路网但不换上，可在任意线程调用：换图前在后台先拼好，切换时再用 {@link #installPrebuilt} 换上。
+   *
+   * @param inputs 按切换后的样子采集的输入（本世界换成新图），版本号是采集前读到的
+   */
+  public Prebuilt prebuild(Inputs inputs) {
+    return new Prebuilt(build(Objects.requireNonNull(inputs, "inputs"), clock.instant()));
+  }
+
+  /**
+   * 换上切换前拼好的路网，记为 {@code version} 的路网。
+   *
+   * <p>只在它按 {@code previousVersion} 采集的输入拼成、此后只多了这一次切换（版本恰好到 {@code version}）、传送门连接版本也没变时换上；
+   * 否则什么都不做，路网照旧由 {@link #get} 按需重建。换上的这张会让正在后台按旧网重建的那张作废（换不上去）。不触发换新回调：切换方自己会发图变化通知。
+   *
+   * @param previousVersion 本次切换前的图快照版本
+   * @param version 本次切换后的图快照版本
+   * @param linkRevision 此刻的传送门连接版本
+   * @return 是否换上
+   */
+  public boolean installPrebuilt(
+      Prebuilt prebuilt, long previousVersion, long version, long linkRevision) {
+    Objects.requireNonNull(prebuilt, "prebuilt");
+    Built built = prebuilt.built;
+    if (version != previousVersion + 1
+        || built.snapshotVersion() != previousVersion
+        || built.linkRevision() != linkRevision) {
+      return false;
+    }
+    current.set(
+        new Built(
+            version,
+            built.linkRevision(),
+            built.baseGraphs(),
+            built.blockedAtBuild(),
+            built.nextExpiry(),
+            built.network()));
+    verified = null;
+    return true;
   }
 
   /** 丢掉缓存的路网；下一次取时同步重建。正在后台建的那张建好后也不会换上。 */

@@ -79,6 +79,7 @@ public final class RailGraphService {
   private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
       componentCautions = new ConcurrentHashMap<>();
   private volatile BooleanSupplier snapshotActivationGuard = () -> true;
+  private volatile Executor backgroundExecutor;
 
   public RailGraphService() {
     this(message -> {});
@@ -106,11 +107,16 @@ public final class RailGraphService {
   }
 
   /**
-   * 跨世界路网后台重建用的执行器；{@code null}（默认）时路网一律在调用方线程上同步重建。
+   * 后台执行器：跨世界路网后台重建、快照激活后的索引与路网预热、运行时从库重载时组装图都交给它；{@code null}（默认）时路网一律在调用方线程上
+   * 同步重建，激活后不预热（第一次查询时懒加载），从库重载同步做。
+   *
+   * <p>建图命令在切换前已用 {@link #prepareSnapshot} 建好；启动加载与各命令的同步兜底切换前没有准备，激活后由这里预热，主线程的第一次占用/授权查询
+   * 多半直接命中。索引预热到一半时主线程来查，会等它建完，不比自己建更久。
    *
    * <p>插件停用时先置空再关执行器。跨世界关闭时不建路网，与此无关。
    */
   public void setBackgroundExecutor(Executor executor) {
+    this.backgroundExecutor = executor;
     networkCache.setExecutor(executor);
   }
 
@@ -175,27 +181,133 @@ public final class RailGraphService {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(graph, "graph");
     Objects.requireNonNull(builtAt, "builtAt");
-    activateSnapshot(world.getUID(), graph, builtAt, false);
+    activateSnapshot(world.getUID(), graph, builtAt, false, null);
+  }
+
+  /** 同 {@link #putSnapshot(World, RailGraph, Instant)}，切换的是切换前已准备好的图。 */
+  public void putSnapshot(World world, PreparedSnapshot prepared, Instant builtAt) {
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(prepared, "prepared");
+    Objects.requireNonNull(builtAt, "builtAt");
+    activateSnapshot(world.getUID(), prepared.graph(), builtAt, true, prepared);
+  }
+
+  /** 同 {@link #putVerifiedAppendSnapshot(World, RailGraph, Instant)}，切换的是切换前已准备好的图。 */
+  public void putVerifiedAppendSnapshot(World world, PreparedSnapshot prepared, Instant builtAt) {
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(prepared, "prepared");
+    Objects.requireNonNull(builtAt, "builtAt");
+    activateSnapshot(world.getUID(), prepared.graph(), builtAt, false, prepared);
+  }
+
+  /**
+   * 切换前为新图建好派生数据，可在任意线程调用（只读不可变的图与线程安全的快照表、覆盖表、传送门登记）。
+   *
+   * <p>建好连通分量、冲突走廊与单线 section 三份索引；跨世界开启且有传送门连接时，再按此刻各世界的快照（本世界换成新图）与运维覆盖 拼一张路网候选（{@link
+   * RailNetworkCache#prebuild}）。切换时只要期间各世界快照、运维覆盖与传送门连接都没变，候选就交给路网缓存换上；变过则丢弃，
+   * 路网照旧由缓存按需重建。建索引出错不抛出，留给第一次查询懒加载。
+   *
+   * @param worldId 新图所属世界
+   * @param graph 将要切换上去的图
+   */
+  public PreparedSnapshot prepareSnapshot(UUID worldId, RailGraph graph) {
+    Objects.requireNonNull(worldId, "worldId");
+    Objects.requireNonNull(graph, "graph");
+    if (graph instanceof SimpleRailGraph simple && !simple.prewarmIndexes()) {
+      debugLogger.accept("调度图索引预建失败，第一次查询时再建: world=" + worldId);
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links = portalLinks;
+    if (!crossWorld || links == null) {
+      return new PreparedSnapshot(graph, null, null);
+    }
+    // 先记版本与连接修订号，再读快照与连接：期间有任何变化，切换时版本或修订号就对不上。
+    long version = snapshotVersion.get();
+    long revision = links.revision();
+    RailNetworkCache.Inputs inputs = networkInputs(version, revision, links, worldId, graph);
+    if (inputs.links().isEmpty()) {
+      return new PreparedSnapshot(graph, null, null);
+    }
+    return new PreparedSnapshot(graph, networkCache.prebuild(inputs), links);
   }
 
   private void activateSnapshot(UUID worldId, RailGraph graph, Instant builtAt) {
-    activateSnapshot(worldId, graph, builtAt, true);
+    activateSnapshot(worldId, graph, builtAt, true, null);
   }
 
   private void activateSnapshot(
-      UUID worldId, RailGraph graph, Instant builtAt, boolean enforceProjectionGuard) {
+      UUID worldId,
+      RailGraph graph,
+      Instant builtAt,
+      boolean enforceProjectionGuard,
+      PreparedSnapshot prepared) {
     if (enforceProjectionGuard) {
       validateSnapshotActivation(worldId, graph);
     }
     RailInterlockingState nextState = interlockingState(graph);
-    RailGraphComponentIndex nextComponentIndex = RailGraphComponentIndex.fromGraph(graph);
+    RailGraphComponentIndex nextComponentIndex = componentIndexOf(graph);
+    long previousVersion = snapshotVersion.get();
     snapshots.put(worldId, new RailGraphSnapshot(graph, builtAt));
-    snapshotVersion.incrementAndGet();
+    long version = snapshotVersion.incrementAndGet();
     componentIndexes.put(worldId, nextComponentIndex);
     lastActivatedInterlockingStates.put(worldId, nextState);
     staleStates.remove(worldId);
     traceInterlockingCoverage(worldId, nextState);
+    installPreparedNetwork(prepared, graph, previousVersion, version);
     fireRuntimeGraphChanged();
+    schedulePrewarm(worldId, graph);
+  }
+
+  private static RailGraphComponentIndex componentIndexOf(RailGraph graph) {
+    return graph instanceof SimpleRailGraph simple
+        ? simple.componentIndex()
+        : RailGraphComponentIndex.fromGraph(graph);
+  }
+
+  /**
+   * 切换时把切换前拼好的路网候选交给 {@link RailNetworkCache} 换上：只在准备之后除本次切换外快照版本没动过、传送门连接没变过时换，否则路网照旧由缓存按需重建。
+   *
+   * <p>在发出运行时图变化通知之前换上，收到通知去取路网的（交路路径预热等）直接命中。
+   *
+   * @param previousVersion 本次切换前的快照版本
+   * @param version 本次切换后的快照版本
+   */
+  private void installPreparedNetwork(
+      PreparedSnapshot prepared, RailGraph graph, long previousVersion, long version) {
+    if (prepared == null || prepared.network == null || prepared.graph() != graph) {
+      return;
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links = portalLinks;
+    if (!crossWorld || links == null || links != prepared.links) {
+      return;
+    }
+    networkCache.installPrebuilt(prepared.network, previousVersion, version, links.revision());
+  }
+
+  /**
+   * 把刚激活的快照交给后台执行器预热索引与跨世界路网；轮到时它已被换掉就不再预热。排不上（插件停用中等）时留给第一次查询懒加载。
+   *
+   * <p>用于切换前没机会准备的路径（启动加载与各命令的同步兜底）；切换前已准备好的图在这里立即返回。
+   */
+  private void schedulePrewarm(UUID worldId, RailGraph graph) {
+    Executor executor = backgroundExecutor;
+    if (executor == null || !(graph instanceof SimpleRailGraph simple)) {
+      return;
+    }
+    try {
+      executor.execute(
+          () -> {
+            RailGraphSnapshot current = snapshots.get(worldId);
+            if (current == null || current.graph() != graph) {
+              return;
+            }
+            if (!simple.prewarmIndexes()) {
+              debugLogger.accept("调度图索引预热失败，第一次查询时再建: world=" + worldId);
+            }
+            network();
+          });
+    } catch (RuntimeException ex) {
+      debugLogger.accept("调度图索引预热未排上，第一次查询时再建: world=" + worldId + " msg=" + ex.getMessage());
+    }
   }
 
   /**
@@ -365,20 +477,31 @@ public final class RailGraphService {
     long version = snapshotVersion.get();
     long revision = links.revision();
     org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network =
-        networkCache.get(version, revision, () -> networkInputs(version, revision, links));
+        networkCache.get(
+            version, revision, () -> networkInputs(version, revision, links, null, null));
     return network.hasPortalEdges() ? network : null;
   }
 
-  /** 拼路网的输入：各世界的图（未叠加覆盖）与覆盖快照、传送门连接。 */
+  /**
+   * 拼路网的输入：各世界的图（未叠加覆盖）与覆盖快照、传送门连接。
+   *
+   * @param replacedWorld 换成 {@code replacement} 的世界（切换前准备用）；不换时为 {@code null}
+   */
   private RailNetworkCache.Inputs networkInputs(
       long version,
       long revision,
-      org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links) {
+      org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links,
+      UUID replacedWorld,
+      RailGraph replacement) {
     Map<UUID, RailGraph> graphs = new HashMap<>();
     Map<UUID, Map<EdgeId, RailEdgeOverrideRecord>> overrides = new HashMap<>();
     for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
       graphs.put(entry.getKey(), entry.getValue().graph());
       overrides.put(entry.getKey(), edgeOverrides(entry.getKey()));
+    }
+    if (replacedWorld != null) {
+      graphs.put(replacedWorld, replacement);
+      overrides.put(replacedWorld, edgeOverrides(replacedWorld));
     }
     return new RailNetworkCache.Inputs(version, revision, graphs, overrides, links.links());
   }
@@ -590,8 +713,8 @@ public final class RailGraphService {
     if (graph == null) {
       return 0;
     }
-    // 动态计算，不依赖缓存
-    return RailGraphComponentIndex.fromGraph(graph).componentCount();
+    // 按这张图自己缓存的分量索引算，不依赖按世界的缓存
+    return componentIndexOf(graph).componentCount();
   }
 
   /** 查询某连通分量的 caution 速度覆盖（blocks/s）。 */
@@ -765,11 +888,121 @@ public final class RailGraphService {
   /**
    * 从存储后端加载每个世界的持久化调度图到内存。
    *
-   * <p>若某世界没有快照记录，将跳过加载。
+   * <p>若某世界没有快照记录，将跳过加载。读库、组装图与切换都在调用线程上同步做（启动时用）；运行时重载用 {@link #reloadFromStorage}。
    */
   public void loadFromStorage(StorageProvider provider, java.util.List<World> worlds) {
     Objects.requireNonNull(provider, "provider");
     Objects.requireNonNull(worlds, "worlds");
+    for (World world : worlds) {
+      if (world == null) {
+        continue;
+      }
+      StoredGraph stored = readStoredGraph(provider, world.getUID());
+      if (stored != null) {
+        activateStored(stored, stored.build(), null);
+      }
+    }
+  }
+
+  /**
+   * 运行时从库重载一个世界的调度图（牌子签名恢复一致后）。
+   *
+   * <p>读库仍在调用线程（主线程）上做。设了后台执行器（{@link #setBackgroundExecutor}）且给了主线程执行器时，组装图与切换前准备 （{@link
+   * #prepareSnapshot}）交给后台，回到主线程时本世界的快照与失效状态都没变才切换；变过（期间建图命令换了图、牌子又改了等）就放弃这次重载，
+   * 以那次变化为准。没有执行器或交不出去时与 {@link #loadFromStorage} 一样同步做。
+   *
+   * @param mainThread 回到主线程的执行器；{@code null} 时同步做
+   * @param afterLoad 处理结束（切换了、放弃了或库里没有可用快照）后在主线程调用
+   */
+  public void reloadFromStorage(
+      StorageProvider provider, World world, Executor mainThread, Runnable afterLoad) {
+    Objects.requireNonNull(provider, "provider");
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(afterLoad, "afterLoad");
+    UUID worldId = world.getUID();
+    StoredGraph stored = readStoredGraph(provider, worldId);
+    if (stored == null) {
+      afterLoad.run();
+      return;
+    }
+    Executor background = backgroundExecutor;
+    Executor main = mainThread;
+    if (background != null && main != null) {
+      RailGraphSnapshot snapshotBefore = snapshots.get(worldId);
+      RailGraphStaleState staleBefore = staleStates.get(worldId);
+      try {
+        background.execute(
+            () -> {
+              Runnable back;
+              try {
+                RailGraph graph = stored.build();
+                PreparedSnapshot prepared = prepareSnapshot(worldId, graph);
+                back =
+                    () -> {
+                      if (snapshots.get(worldId) == snapshotBefore
+                          && staleStates.get(worldId) == staleBefore) {
+                        activateStored(stored, graph, prepared);
+                      } else {
+                        debugLogger.accept("从库重载期间调度图或失效状态有变，放弃这次重载: world=" + worldId);
+                      }
+                    };
+              } catch (Throwable ex) {
+                back = () -> debugLogger.accept("从库重载调度图失败: world=" + worldId + " msg=" + ex);
+              }
+              Runnable finish = back;
+              try {
+                main.execute(
+                    () -> {
+                      try {
+                        finish.run();
+                      } finally {
+                        afterLoad.run();
+                      }
+                    });
+              } catch (RuntimeException ex) {
+                debugLogger.accept("从库重载调度图回不到主线程，放弃: world=" + worldId);
+              }
+            });
+        return;
+      } catch (RuntimeException ex) {
+        debugLogger.accept("从库重载调度图交不出后台，改为同步: world=" + worldId);
+      }
+    }
+    activateStored(stored, stored.build(), null);
+    afterLoad.run();
+  }
+
+  /** 从库里读出的一个世界的调度图记录（签名已核对一致）。 */
+  private record StoredGraph(
+      UUID worldId,
+      java.util.List<RailNodeRecord> nodes,
+      java.util.List<RailEdgeRecord> edges,
+      Optional<RailInterlockingSnapshotRecord> interlocking,
+      Instant builtAt) {
+
+    /** 组装图：只读记录，可在后台线程调用。 */
+    RailGraph build() {
+      return buildGraphFromRecords(nodes, edges, interlocking);
+    }
+  }
+
+  private void activateStored(StoredGraph stored, RailGraph graph, PreparedSnapshot prepared) {
+    try {
+      activateSnapshot(stored.worldId(), graph, stored.builtAt(), true, prepared);
+    } catch (IllegalStateException exception) {
+      debugLogger.accept(
+          "持久化调度图未激活，旧联锁投影保持生效: world=" + stored.worldId() + " msg=" + exception.getMessage());
+    }
+  }
+
+  /**
+   * 读一个世界的运维覆盖、分量限速与调度图记录，并核对节点签名。
+   *
+   * <p>运维覆盖与分量限速当场换进内存；签名不一致时记失效并移出快照。
+   *
+   * @return 可以组装并切换的记录；库里没有快照或已失效时为 {@code null}
+   */
+  private StoredGraph readStoredGraph(StorageProvider provider, UUID worldId) {
     RailNodeRepository nodeRepo = provider.railNodes();
     RailEdgeRepository edgeRepo = provider.railEdges();
     RailEdgeOverrideRepository overrideRepo = provider.railEdgeOverrides();
@@ -777,132 +1010,119 @@ public final class RailGraphService {
     RailGraphSnapshotRepository snapshotRepo = provider.railGraphSnapshots();
     RailInterlockingSnapshotRepository interlockingSnapshotRepo =
         provider.railInterlockingSnapshots();
-
-    for (World world : worlds) {
-      if (world == null) {
-        continue;
+    try {
+      ConcurrentMap<EdgeId, RailEdgeOverrideRecord> overridesById = new ConcurrentHashMap<>();
+      for (RailEdgeOverrideRecord override : overrideRepo.listByWorld(worldId)) {
+        if (override == null || override.edgeId() == null) {
+          continue;
+        }
+        EdgeId normalized = EdgeId.undirected(override.edgeId().a(), override.edgeId().b());
+        overridesById.put(normalized, override);
       }
-      UUID worldId = world.getUID();
-      try {
-        ConcurrentMap<EdgeId, RailEdgeOverrideRecord> overridesById = new ConcurrentHashMap<>();
-        for (RailEdgeOverrideRecord override : overrideRepo.listByWorld(worldId)) {
-          if (override == null || override.edgeId() == null) {
-            continue;
-          }
-          EdgeId normalized = EdgeId.undirected(override.edgeId().a(), override.edgeId().b());
-          overridesById.put(normalized, override);
-        }
-        synchronized (edgeOverrideLock) {
-          if (!overridesById.isEmpty()) {
-            edgeOverrides.put(worldId, overridesById);
-          } else {
-            edgeOverrides.remove(worldId);
-          }
-          edgeOverrideSnapshots.remove(worldId);
-          snapshotVersion.incrementAndGet();
-        }
-      } catch (Exception ex) {
-        debugLogger.accept(
-            "读取 rail_edge_overrides 失败: world=" + worldId + " msg=" + ex.getMessage());
-      }
-
-      try {
-        ConcurrentMap<String, RailComponentCautionRecord> byKey = new ConcurrentHashMap<>();
-        for (RailComponentCautionRecord record : cautionRepo.listByWorld(worldId)) {
-          if (record == null || record.componentKey() == null || record.componentKey().isBlank()) {
-            continue;
-          }
-          byKey.put(record.componentKey(), record);
-        }
-        if (!byKey.isEmpty()) {
-          componentCautions.put(worldId, byKey);
+      synchronized (edgeOverrideLock) {
+        if (!overridesById.isEmpty()) {
+          edgeOverrides.put(worldId, overridesById);
         } else {
-          componentCautions.remove(worldId);
+          edgeOverrides.remove(worldId);
         }
-      } catch (Exception ex) {
-        debugLogger.accept(
-            "读取 rail_component_cautions 失败: world=" + worldId + " msg=" + ex.getMessage());
-      }
-
-      Optional<RailGraphSnapshotRecord> snapshotOpt = snapshotRepo.findByWorld(worldId);
-      if (snapshotOpt.isEmpty()) {
-        continue;
-      }
-      RailGraphSnapshotRecord snapshot = snapshotOpt.get();
-      java.util.List<RailNodeRecord> nodeRecords = nodeRepo.listByWorld(worldId);
-      String currentSignature = RailGraphSignature.signatureForNodes(nodeRecords);
-      if (snapshot.nodeSignature().isEmpty()
-          && !currentSignature.isEmpty()
-          && snapshot.nodeCount() != nodeRecords.size()) {
-        staleStates.put(
-            worldId,
-            new RailGraphStaleState(
-                snapshot.builtAt(),
-                snapshot.nodeSignature(),
-                currentSignature,
-                snapshot.nodeCount(),
-                snapshot.edgeCount(),
-                nodeRecords.size()));
-        snapshots.remove(worldId);
+        edgeOverrideSnapshots.remove(worldId);
         snapshotVersion.incrementAndGet();
-        continue;
       }
+    } catch (Exception ex) {
+      debugLogger.accept("读取 rail_edge_overrides 失败: world=" + worldId + " msg=" + ex.getMessage());
+    }
 
-      if (!snapshot.nodeSignature().isEmpty()
-          && !currentSignature.isEmpty()
-          && !snapshot.nodeSignature().equals(currentSignature)) {
-        staleStates.put(
-            worldId,
-            new RailGraphStaleState(
-                snapshot.builtAt(),
-                snapshot.nodeSignature(),
-                currentSignature,
-                snapshot.nodeCount(),
-                snapshot.edgeCount(),
-                nodeRecords.size()));
-        snapshots.remove(worldId);
-        snapshotVersion.incrementAndGet();
-        continue;
+    try {
+      ConcurrentMap<String, RailComponentCautionRecord> byKey = new ConcurrentHashMap<>();
+      for (RailComponentCautionRecord record : cautionRepo.listByWorld(worldId)) {
+        if (record == null || record.componentKey() == null || record.componentKey().isBlank()) {
+          continue;
+        }
+        byKey.put(record.componentKey(), record);
       }
+      if (!byKey.isEmpty()) {
+        componentCautions.put(worldId, byKey);
+      } else {
+        componentCautions.remove(worldId);
+      }
+    } catch (Exception ex) {
+      debugLogger.accept(
+          "读取 rail_component_cautions 失败: world=" + worldId + " msg=" + ex.getMessage());
+    }
 
-      java.util.List<RailEdgeRecord> edgeRecords = edgeRepo.listByWorld(worldId);
-      Optional<RailInterlockingSnapshotRecord> interlockingSnapshot = Optional.empty();
+    Optional<RailGraphSnapshotRecord> snapshotOpt = snapshotRepo.findByWorld(worldId);
+    if (snapshotOpt.isEmpty()) {
+      return null;
+    }
+    RailGraphSnapshotRecord snapshot = snapshotOpt.get();
+    java.util.List<RailNodeRecord> nodeRecords = nodeRepo.listByWorld(worldId);
+    String currentSignature = RailGraphSignature.signatureForNodes(nodeRecords);
+    if (snapshot.nodeSignature().isEmpty()
+        && !currentSignature.isEmpty()
+        && snapshot.nodeCount() != nodeRecords.size()) {
+      staleStates.put(
+          worldId,
+          new RailGraphStaleState(
+              snapshot.builtAt(),
+              snapshot.nodeSignature(),
+              currentSignature,
+              snapshot.nodeCount(),
+              snapshot.edgeCount(),
+              nodeRecords.size()));
+      snapshots.remove(worldId);
+      snapshotVersion.incrementAndGet();
+      return null;
+    }
+
+    if (!snapshot.nodeSignature().isEmpty()
+        && !currentSignature.isEmpty()
+        && !snapshot.nodeSignature().equals(currentSignature)) {
+      staleStates.put(
+          worldId,
+          new RailGraphStaleState(
+              snapshot.builtAt(),
+              snapshot.nodeSignature(),
+              currentSignature,
+              snapshot.nodeCount(),
+              snapshot.edgeCount(),
+              nodeRecords.size()));
+      snapshots.remove(worldId);
+      snapshotVersion.incrementAndGet();
+      return null;
+    }
+
+    java.util.List<RailEdgeRecord> edgeRecords = edgeRepo.listByWorld(worldId);
+    Optional<RailInterlockingSnapshotRecord> interlockingSnapshot = Optional.empty();
+    try {
+      interlockingSnapshot = interlockingSnapshotRepo.findByWorld(worldId);
+    } catch (Exception ex) {
+      debugLogger.accept(
+          "读取 rail_interlocking_snapshots 失败，已按 fail-closed 加载: world="
+              + worldId
+              + " msg="
+              + ex.getMessage());
+    }
+    if (snapshot.nodeSignature().isEmpty() && !currentSignature.isEmpty()) {
+      RailGraphSnapshotRecord updated =
+          new RailGraphSnapshotRecord(
+              worldId,
+              snapshot.builtAt(),
+              snapshot.nodeCount(),
+              snapshot.edgeCount(),
+              currentSignature);
       try {
-        interlockingSnapshot = interlockingSnapshotRepo.findByWorld(worldId);
+        snapshotRepo.save(updated);
+        snapshot = updated;
       } catch (Exception ex) {
         debugLogger.accept(
-            "读取 rail_interlocking_snapshots 失败，已按 fail-closed 加载: world="
+            "写入 rail_graph_snapshots.node_signature 失败: world="
                 + worldId
                 + " msg="
                 + ex.getMessage());
       }
-      if (snapshot.nodeSignature().isEmpty() && !currentSignature.isEmpty()) {
-        RailGraphSnapshotRecord updated =
-            new RailGraphSnapshotRecord(
-                worldId,
-                snapshot.builtAt(),
-                snapshot.nodeCount(),
-                snapshot.edgeCount(),
-                currentSignature);
-        try {
-          snapshotRepo.save(updated);
-          snapshot = updated;
-        } catch (Exception ex) {
-          debugLogger.accept(
-              "写入 rail_graph_snapshots.node_signature 失败: world="
-                  + worldId
-                  + " msg="
-                  + ex.getMessage());
-        }
-      }
-      RailGraph graph = buildGraphFromRecords(nodeRecords, edgeRecords, interlockingSnapshot);
-      try {
-        activateSnapshot(worldId, graph, snapshot.builtAt());
-      } catch (IllegalStateException exception) {
-        debugLogger.accept(
-            "持久化调度图未激活，旧联锁投影保持生效: world=" + worldId + " msg=" + exception.getMessage());
-      }
     }
+    return new StoredGraph(
+        worldId, nodeRecords, edgeRecords, interlockingSnapshot, snapshot.builtAt());
   }
 
   /**
@@ -1054,6 +1274,33 @@ public final class RailGraphService {
     public RailGraphSnapshot {
       Objects.requireNonNull(graph, "graph");
       Objects.requireNonNull(builtAt, "builtAt");
+    }
+  }
+
+  /** {@link #prepareSnapshot} 的结果：派生索引已建好的新图，跨世界开启时附带路网候选。交给带它的切换入口。 */
+  public static final class PreparedSnapshot {
+
+    private final RailGraph graph;
+    private final RailNetworkCache.Prebuilt network;
+    private final org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links;
+
+    private PreparedSnapshot(
+        RailGraph graph,
+        RailNetworkCache.Prebuilt network,
+        org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links) {
+      this.graph = graph;
+      this.network = network;
+      this.links = links;
+    }
+
+    /** 将要切换上去的图。 */
+    public RailGraph graph() {
+      return graph;
+    }
+
+    /** 附带的路网候选；跨世界未开启或没有传送门连接时为 {@code null}。只供测试核对切换时是否原样换上。 */
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network() {
+      return network == null ? null : network.network();
     }
   }
 

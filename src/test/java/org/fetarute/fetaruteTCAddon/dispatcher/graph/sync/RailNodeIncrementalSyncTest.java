@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -121,7 +120,7 @@ final class RailNodeIncrementalSyncTest {
     RailGraphService.RailGraphStaleState stale = staleCaptor.getValue();
     assertEquals("deadbeef", stale.snapshotSignature());
     assertEquals(currentSignature, stale.currentSignature());
-    verify(railGraphService, never()).loadFromStorage(any(), anyList());
+    verify(railGraphService, never()).reloadFromStorage(any(), any(), any(), any());
   }
 
   @Test
@@ -183,7 +182,7 @@ final class RailNodeIncrementalSyncTest {
 
     verify(nodeRepo).deleteByPosition(worldId, 1, 64, 2);
     verify(nodeRepo).upsert(any(RailNodeRecord.class));
-    verify(railGraphService).loadFromStorage(provider, List.of(world));
+    verify(railGraphService).reloadFromStorage(eq(provider), eq(world), any(), any());
     verify(railGraphService, never()).markStale(any(), any());
   }
 
@@ -605,6 +604,7 @@ final class RailNodeIncrementalSyncTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getStaleState(world))
         .thenReturn(Optional.of(staleState()), Optional.empty());
+    runReloadCallbackInline(railGraphService);
     GraphStaleListener listener = mock(GraphStaleListener.class);
     RailNodeIncrementalSync sync =
         new RailNodeIncrementalSync(
@@ -612,7 +612,7 @@ final class RailNodeIncrementalSyncTest {
 
     sync.upsert(mockBlock(world, 1, 64, 2), definition);
 
-    verify(railGraphService).loadFromStorage(any(), eq(List.of(world)));
+    verify(railGraphService).reloadFromStorage(any(), eq(world), any(), any());
     verify(listener).onRecovered(world);
     verify(listener, never()).onStale(any(), any(), any(), any());
   }
@@ -677,6 +677,7 @@ final class RailNodeIncrementalSyncTest {
                     Optional.empty())));
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getStaleState(world)).thenReturn(Optional.of(staleState()));
+    runReloadCallbackInline(railGraphService);
     GraphStaleListener listener = mock(GraphStaleListener.class);
     RailNodeIncrementalSync sync =
         new RailNodeIncrementalSync(
@@ -684,7 +685,7 @@ final class RailNodeIncrementalSyncTest {
 
     sync.upsert(mockBlock(world, 1, 64, 2), definition);
 
-    verify(railGraphService).loadFromStorage(any(), eq(List.of(world)));
+    verify(railGraphService).reloadFromStorage(any(), eq(world), any(), any());
     verify(listener, never()).onRecovered(any());
   }
 
@@ -1120,5 +1121,16 @@ final class RailNodeIncrementalSyncTest {
 
   private StorageTransactionManager directTransactionManager() {
     return new DirectTransactionManager();
+  }
+
+  /** 模拟的服务在重载时当场执行"处理结束"回调（真实服务在没设执行器时也是同步执行）。 */
+  private static void runReloadCallbackInline(RailGraphService railGraphService) {
+    doAnswer(
+            invocation -> {
+              invocation.<Runnable>getArgument(3).run();
+              return null;
+            })
+        .when(railGraphService)
+        .reloadFromStorage(any(), any(), any(), any());
   }
 }

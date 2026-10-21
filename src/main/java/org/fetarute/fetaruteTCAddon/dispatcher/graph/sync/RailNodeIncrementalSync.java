@@ -466,10 +466,16 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
       return;
     }
     if (railGraphService.getSnapshot(world).isEmpty() || wasStale) {
-      railGraphService.loadFromStorage(provider, List.of(world));
-      if (wasStale && railGraphService.getStaleState(world).isEmpty()) {
-        notifyListener(() -> staleListener.onRecovered(world));
-      }
+      // 组装图与切换前准备可能交给后台：切换（或放弃）之后再看是否已恢复。
+      railGraphService.reloadFromStorage(
+          provider,
+          world,
+          checkScheduler::accept,
+          () -> {
+            if (wasStale && railGraphService.getStaleState(world).isEmpty()) {
+              notifyListener(() -> staleListener.onRecovered(world));
+            }
+          });
     }
   }
 

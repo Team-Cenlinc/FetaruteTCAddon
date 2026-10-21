@@ -1090,7 +1090,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             : ConfigManager.GraphSettings.defaults();
     this.railGraphService = new RailGraphService(loggerManager::debug);
     railGraphService.configureCrossWorld(graphSettings.crossWorld(), portalLinks);
-    // 跨世界路网重建与交路路径预热放到后台线程；没设执行器时同步，行为同前
+    // 跨世界路网重建、调度图索引预热与交路路径预热放到后台线程；没设执行器时同步，行为同前
     this.graphWorker = GraphWorker.start("FTA-graph-worker", loggerManager::warn);
     railGraphService.setBackgroundExecutor(graphWorker);
     this.graphStaleNotifier =

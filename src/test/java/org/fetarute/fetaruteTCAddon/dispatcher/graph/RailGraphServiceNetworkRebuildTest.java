@@ -176,7 +176,9 @@ class RailGraphServiceNetworkRebuildTest {
     service.putSnapshot(world(NETHER), rebuiltNether, T0);
     RailGraph swapped = RailGraphService.runtimeGraph(service, OVER, overworld);
     assertEquals(40.0, swapped.findNode(B).orElseThrow().worldPosition().getX(), 1e-9, "新图立即可见");
-    assertTrue(background.isEmpty());
+    // 换图后排进后台的只有索引预热：它取路网直接命中刚同步建好的那张，不另建一张换上
+    runBackground();
+    assertSame(swapped, RailGraphService.runtimeGraph(service, OVER, overworld));
 
     links.remove(PA);
     assertSame(overworld, RailGraphService.runtimeGraph(service, OVER, overworld));

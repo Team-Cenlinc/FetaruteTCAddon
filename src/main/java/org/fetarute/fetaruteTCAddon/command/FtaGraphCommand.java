@@ -48,6 +48,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
@@ -712,55 +713,7 @@ public final class FtaGraphCommand {
                     player.sendMessage(locale.component("command.graph.delete.here.no-seed"));
                     return;
                   }
-                  NodeId seed = seedOpt.get().id();
-
-                  RailGraphMerger.RemoveResult removed =
-                      RailGraphMerger.removeComponents(graph, Set.of(seed));
-                  RailGraph nextGraph = removed.graph();
-                  if (removed.totalNodes() <= 0) {
-                    deleteGraphFromStorage(world, false);
-                    plugin.getRailGraphService().clearSnapshot(world);
-                    dropContinuations(worldId);
-                  } else {
-                    // 先写库再换内存图：写库失败或仍有列车占用时旧图保持不变。
-                    java.time.Instant now = java.time.Instant.now();
-                    List<RailNodeRecord> nodes = nodeRecordsFromGraph(worldId, nextGraph);
-                    String signature = RailGraphSignature.signatureForNodes(nodes);
-                    try {
-                      activatePersistedGraph(
-                          player,
-                          world,
-                          new RailGraphBuildResult(
-                              nextGraph, now, signature, nodes, List.of(), List.of()),
-                          locale);
-                    } catch (GraphPersistException exception) {
-                      plugin.getLogger().warning("局部删除调度图写库失败: " + exception.getMessage());
-                      player.sendMessage(locale.component("command.graph.build.persist-failed"));
-                      return;
-                    } catch (IllegalStateException exception) {
-                      plugin.getLogger().warning("局部删除调度图未激活: " + exception.getMessage());
-                      player.sendMessage(
-                          locale.component("command.graph.build.activation-blocked"));
-                      return;
-                    }
-                  }
-
-                  player.sendMessage(
-                      locale.component(
-                          "command.graph.delete.here.success",
-                          Map.of(
-                              "seed",
-                              seed.value(),
-                              "removed_components",
-                              String.valueOf(removed.removedComponentCount()),
-                              "removed_nodes",
-                              String.valueOf(removed.removedNodes()),
-                              "removed_edges",
-                              String.valueOf(removed.removedEdges()),
-                              "total_nodes",
-                              String.valueOf(removed.totalNodes()),
-                              "total_edges",
-                              String.valueOf(removed.totalEdges()))));
+                  startDeleteHere(player, world, seedOpt.get().id(), locale);
                 }));
 
     manager.command(
@@ -5729,6 +5682,9 @@ public final class FtaGraphCommand {
    *
    * <p>当 build 结果可能缺失（未加载区块/达到 maxChunks/区块加载失败）时，使用 upsert 以避免误删旧图数据。
    *
+   * <p>合并与切换都在调用线程（主线程）上同步做。build 收尾平时把合并交给后台（{@link #buildFinished}），只在交不出后台、或几次回到主线程
+   * 都发现调度图已被换过时走这里。
+   *
    * @return 最终写入的图结果，以及可选的 merge 统计（用于命令回显）
    */
   AppliedGraphBuild applyBuildSuccess(
@@ -5737,40 +5693,413 @@ public final class FtaGraphCommand {
       RailGraphBuildResult result,
       RailGraphBuildCompletion completion,
       LocaleManager locale) {
-    RailGraphService service = plugin.getRailGraphService();
+    return applyBuildPlan(
+        sender,
+        world,
+        BuildPlan.compute(world.getUID(), resolveMergeBase(world), result, completion, null),
+        locale);
+  }
 
-    Optional<RailGraph> baseGraph =
-        service.getSnapshot(world).map(RailGraphService.RailGraphSnapshot::graph);
-    if (baseGraph.isEmpty()) {
-      baseGraph = loadGraphFromStorage(world);
+  /** 合并用的旧图：内存快照；快照已失效移出时从库里读上一版（见 {@link #loadGraphFromStorage}）。 */
+  private Optional<RailGraph> resolveMergeBase(World world) {
+    Optional<RailGraph> base =
+        plugin
+            .getRailGraphService()
+            .getSnapshot(world)
+            .map(RailGraphService.RailGraphSnapshot::graph);
+    return base.isPresent() ? base : loadGraphFromStorage(world);
+  }
+
+  /**
+   * build 收尾的纯计算部分（可在后台线程）：与旧图合并，组装落库用的节点记录与签名；给了 {@code service} 时再建好切换要用的派生索引与路网候选。
+   *
+   * @param prepared 切换前准备好的图；同步兜底时为 {@code null}
+   */
+  private record BuildPlan(
+      RailGraphBuildResult result,
+      Optional<RailGraphMerger.MergeResult> merge,
+      RailGraphService.PreparedSnapshot prepared) {
+
+    static BuildPlan compute(
+        UUID worldId,
+        Optional<RailGraph> base,
+        RailGraphBuildResult result,
+        RailGraphBuildCompletion completion,
+        RailGraphService service) {
+      RailGraphBuildResult applied = result;
+      Optional<RailGraphMerger.MergeResult> merge = Optional.empty();
+      if (base.isPresent()) {
+        RailGraphMerger.MergeResult merged =
+            completion != null && completion.canReplaceComponents()
+                ? RailGraphMerger.appendOrReplaceComponents(base.get(), result.graph())
+                : RailGraphMerger.upsert(base.get(), result.graph());
+        List<RailNodeRecord> mergedNodes = nodeRecordsFromGraph(worldId, merged.graph());
+        applied =
+            new RailGraphBuildResult(
+                merged.graph(),
+                result.builtAt(),
+                RailGraphSignature.signatureForNodes(mergedNodes),
+                mergedNodes,
+                result.missingSwitcherJunctions(),
+                result.duplicateNodeIds());
+        merge = Optional.of(merged);
+      }
+      return new BuildPlan(
+          applied,
+          merge,
+          service == null ? null : service.prepareSnapshot(worldId, applied.graph()));
+    }
+  }
+
+  /** build 收尾的主线程部分：写库、切换，同步节点牌子登记。 */
+  private AppliedGraphBuild applyBuildPlan(
+      CommandSender sender, World world, BuildPlan plan, LocaleManager locale) {
+    activatePersistedGraph(sender, world, plan.result(), locale, plan.prepared());
+    syncSignNodeRegistry(world, plan.result().nodes());
+    scheduleStationAutoSync(world, plan.result().nodes());
+    return new AppliedGraphBuild(plan.result(), plan.merge());
+  }
+
+  /** 换图收尾最多交给后台几次：每次回到主线程发现调度图已被换过，就按当前图再交一次。 */
+  private static final int SWITCH_ATTEMPTS = 3;
+
+  /**
+   * 一次换图收尾：主线程取输入 → 后台纯计算（合并、组装落库记录、切换前准备）→ 回到主线程核验本世界的调度图没被换过 → 落地。
+   *
+   * <p>回到主线程时调度图已被换过（期间别的命令或牌子同步换了图），按当前图重取输入、再交一次后台，最多 {@link #SWITCH_ATTEMPTS} 次；
+   * 仍被换过、取不到输入或交不出后台（插件停用中）时在主线程同步兜底。旧图上算出的结果从不拿来切换。
+   *
+   * <p>绑定的建图任务在此期间被 {@code /fta graph cancel} 取消（或换成了别的任务）时不再落地；结束时只把自己这个任务移出任务表。
+   * 后台抛出的任何异常（含栈溢出、内存不足这类 Error）都回主线程回显并解锁；落地这一步漏出的异常只回显，不当作“没切换”处理。
+   *
+   * <p>{@link #compute} 在后台线程调用，只能读不可变的图与 {@link #capture} 取好的数据，不能碰 Bukkit 世界、实体与牌子；其余方法都在主线程调用。
+   *
+   * @param <S> 主线程取好、交给后台的输入
+   * @param <T> 后台算出的结果
+   */
+  private abstract class GraphSwitch<S, T> {
+
+    private final World world;
+    private final RailGraphBuildTask task;
+    private final CommandSender sender;
+    private final LocaleManager locale;
+    private final String label;
+
+    /**
+     * @param task 本世界登记的建图任务；为 {@code null} 时不检查取消，也不移出任务
+     * @param label 日志里的这一步，如“调度图构建收尾”
+     */
+    GraphSwitch(
+        World world,
+        RailGraphBuildTask task,
+        CommandSender sender,
+        LocaleManager locale,
+        String label) {
+      this.world = world;
+      this.task = task;
+      this.sender = sender;
+      this.locale = locale;
+      this.label = label;
     }
 
-    if (baseGraph.isPresent()) {
-      RailGraphMerger.MergeResult merge =
-          completion != null && completion.canReplaceComponents()
-              ? RailGraphMerger.appendOrReplaceComponents(baseGraph.get(), result.graph())
-              : RailGraphMerger.upsert(baseGraph.get(), result.graph());
+    /** 取后台要用的输入；返回 {@code null} 表示没法交给后台（如图已不在），直接走 {@link #syncFallback}。 */
+    abstract S capture();
 
-      List<RailNodeRecord> mergedNodes = nodeRecordsFromGraph(world.getUID(), merge.graph());
-      String signature = RailGraphSignature.signatureForNodes(mergedNodes);
-      RailGraphBuildResult merged =
+    /** 后台线程上的纯计算。 */
+    abstract T compute(S input);
+
+    /** 调度图没被换过：用后台结果写库、切换并回显。 */
+    abstract void apply(T result);
+
+    /** 同步兜底：在主线程自己取输入、计算、落地并回显。 */
+    abstract void syncFallback();
+
+    /** 后台计算出错（没有切换）。默认记日志并回显。 */
+    void failed(Throwable ex) {
+      reportFailure(ex);
+    }
+
+    /** 建图任务在此期间被取消，结果不再采用。 */
+    void abandoned() {}
+
+    /** 开始：交给后台；交不出去时在主线程同步兜底。 */
+    final void start() {
+      boolean dispatched;
+      try {
+        dispatched = dispatch(1);
+      } catch (RuntimeException ex) {
+        finish(() -> failed(ex));
+        return;
+      }
+      if (!dispatched) {
+        finish(this::syncFallback);
+      }
+    }
+
+    /** 主线程：取输入并交给后台；取不到输入或交不出去时返回 false。 */
+    private boolean dispatch(int attempt) {
+      S input = capture();
+      if (input == null) {
+        return false;
+      }
+      RailGraph expected = currentGraph(plugin.getRailGraphService(), world);
+      try {
+        var scheduler = plugin.getServer().getScheduler();
+        scheduler.runTaskAsynchronously(
+            plugin, () -> computeInBackground(scheduler, attempt, expected, input));
+        return true;
+      } catch (RuntimeException ex) {
+        return false;
+      }
+    }
+
+    private void computeInBackground(
+        org.bukkit.scheduler.BukkitScheduler scheduler, int attempt, RailGraph expected, S input) {
+      Runnable back;
+      try {
+        T result = compute(input);
+        back = () -> land(attempt, expected, result);
+      } catch (Throwable ex) {
+        // 含 Error：照样回主线程回显并解锁，不让本世界的建图任务一直挂着。
+        back = () -> finish(() -> failed(ex));
+      }
+      try {
+        scheduler.runTask(plugin, back);
+      } catch (RuntimeException ex) {
+        // 插件已停用：回不到主线程，直接解锁，免得本世界的建图任务一直显示在进行中。
+        release();
+      }
+    }
+
+    /** 主线程：核验后落地；调度图被换过就按当前图再交一次后台，次数用完才同步兜底。 */
+    private void land(int attempt, RailGraph expected, T result) {
+      if (abandonedMeanwhile() || currentGraph(plugin.getRailGraphService(), world) == expected) {
+        finish(() -> apply(result));
+        return;
+      }
+      boolean dispatched = false;
+      if (attempt < SWITCH_ATTEMPTS) {
+        try {
+          dispatched = dispatch(attempt + 1);
+        } catch (RuntimeException ex) {
+          finish(() -> failed(ex));
+          return;
+        }
+      }
+      if (!dispatched) {
+        finish(this::syncFallback);
+      }
+    }
+
+    /** 主线程：做最后一步（任务已被取消时改为 {@link #abandoned}），然后解锁。 */
+    private void finish(Runnable last) {
+      try {
+        if (abandonedMeanwhile()) {
+          abandoned();
+        } else {
+          last.run();
+        }
+      } catch (RuntimeException ex) {
+        reportFailure(ex);
+      } finally {
+        release();
+      }
+    }
+
+    private boolean abandonedMeanwhile() {
+      return task != null && jobs.get(world.getUID()) != task;
+    }
+
+    private void release() {
+      if (task != null) {
+        jobs.remove(world.getUID(), task);
+      }
+    }
+
+    void reportFailure(Throwable ex) {
+      plugin.getLogger().warning(label + "失败: " + ex);
+      sender.sendMessage(failureMessage(locale, ex));
+    }
+  }
+
+  /** 换图收尾占着本世界建图任务时的占位：没有分段任务可取消，取消只是让收尾不再落地。 */
+  private static final class SwitchTask implements RailGraphBuildTask {
+
+    private final Instant startedAt = Instant.now();
+
+    @Override
+    public Optional<RailGraphBuildJob.RailGraphBuildStatus> getStatus() {
+      return Optional.of(
+          new RailGraphBuildJob.RailGraphBuildStatus(startedAt, "switch", 0, 0, 0, 0, 0, 0, 0, 0));
+    }
+
+    @Override
+    public boolean cancel() {
+      return false;
+    }
+  }
+
+  /** 建图收尾出错时回显的消息：带上异常消息，没有消息时用异常类名。 */
+  private static Component failureMessage(LocaleManager locale, Throwable ex) {
+    String error = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+    return locale.component("command.graph.build.failed", Map.of("error", error));
+  }
+
+  /**
+   * 结果不再采用（任务期间被取消）时，释放它暂停的发现会话所持的区块票，相当于任务还在跑时取消会做的那样；续跑表里仍有记录引用同一个会话 （continue 沿用的会话）时不动，留给下次续跑。
+   */
+  private void releaseUnusedContinuation(RailGraphBuildOutcome outcome) {
+    outcome
+        .continuation()
+        .ifPresent(
+            continuation -> {
+              boolean kept =
+                  continuations.values().stream()
+                      .anyMatch(
+                          other -> other.discoverySession() == continuation.discoverySession());
+              if (!kept) {
+                continuation.discoverySession().releaseChunkTickets();
+              }
+            });
+  }
+
+  private static RailGraph currentGraph(RailGraphService service, World world) {
+    return service.getSnapshot(world).map(RailGraphService.RailGraphSnapshot::graph).orElse(null);
+  }
+
+  /**
+   * 局部删除的纯计算部分（可在后台线程）：拆掉种子所在的连通分量，组装落库记录；给了 {@code service} 时再建好切换要用的派生索引与路网候选。
+   *
+   * @param result 删除后剩下的图；什么都不剩时为 {@code null}（整世界删图）
+   * @param prepared 切换前准备好的图；同步兜底或什么都不剩时为 {@code null}
+   */
+  private record DeleteHerePlan(
+      NodeId seed,
+      RailGraphMerger.RemoveResult removed,
+      RailGraphBuildResult result,
+      RailGraphService.PreparedSnapshot prepared) {
+
+    static DeleteHerePlan compute(
+        UUID worldId, RailGraph graph, NodeId seed, RailGraphService service) {
+      RailGraphMerger.RemoveResult removed = RailGraphMerger.removeComponents(graph, Set.of(seed));
+      if (removed.totalNodes() <= 0) {
+        return new DeleteHerePlan(seed, removed, null, null);
+      }
+      RailGraph nextGraph = removed.graph();
+      List<RailNodeRecord> nodes = nodeRecordsFromGraph(worldId, nextGraph);
+      RailGraphBuildResult result =
           new RailGraphBuildResult(
-              merge.graph(),
-              result.builtAt(),
-              signature,
-              mergedNodes,
-              result.missingSwitcherJunctions(),
-              result.duplicateNodeIds());
-      activatePersistedGraph(sender, world, merged, locale);
-      syncSignNodeRegistry(world, mergedNodes);
-      scheduleStationAutoSync(world, merged.nodes());
-      return new AppliedGraphBuild(merged, Optional.of(merge));
+              nextGraph,
+              Instant.now(),
+              RailGraphSignature.signatureForNodes(nodes),
+              nodes,
+              List.of(),
+              List.of());
+      return new DeleteHerePlan(
+          seed,
+          removed,
+          result,
+          service == null ? null : service.prepareSnapshot(worldId, nextGraph));
+    }
+  }
+
+  /**
+   * 局部删除：拆分量、组装落库记录与切换前准备交给后台（{@link GraphSwitch}），回到主线程核验后写库、切换。
+   *
+   * <p>期间占着本世界的建图任务：build、continue、refresh、extend 与整世界删图都要等它结束，免得删光时清掉正在跑的续跑所用的区块票。
+   */
+  private void startDeleteHere(Player player, World world, NodeId seed, LocaleManager locale) {
+    UUID worldId = world.getUID();
+    RailGraphBuildTask task = new SwitchTask();
+    if (jobs.putIfAbsent(worldId, task) != null) {
+      player.sendMessage(locale.component("command.graph.build.running"));
+      return;
+    }
+    RailGraphService service = plugin.getRailGraphService();
+    new GraphSwitch<RailGraph, DeleteHerePlan>(world, task, player, locale, "局部删除调度图") {
+      @Override
+      RailGraph capture() {
+        RailGraph graph = currentGraph(service, world);
+        return graph != null && graph.findNode(seed).isPresent() ? graph : null;
+      }
+
+      @Override
+      DeleteHerePlan compute(RailGraph graph) {
+        return DeleteHerePlan.compute(worldId, graph, seed, service);
+      }
+
+      @Override
+      void apply(DeleteHerePlan plan) {
+        completeDeleteHere(player, world, plan, locale);
+      }
+
+      @Override
+      void syncFallback() {
+        recomputeDeleteHere(player, world, seed, locale);
+      }
+    }.start();
+  }
+
+  /** 局部删除的同步兜底：按当前图在主线程算；图已不在或种子已不在图里时照常提示。 */
+  private void recomputeDeleteHere(Player player, World world, NodeId seed, LocaleManager locale) {
+    RailGraphService service = plugin.getRailGraphService();
+    RailGraph graph = currentGraph(service, world);
+    if (graph == null) {
+      service
+          .getStaleState(world)
+          .ifPresentOrElse(
+              stale -> player.sendMessage(staleInfoMessage(locale, stale)),
+              () -> player.sendMessage(locale.component("command.graph.info.missing")));
+      return;
+    }
+    if (graph.findNode(seed).isEmpty()) {
+      player.sendMessage(locale.component("command.graph.delete.here.no-seed"));
+      return;
+    }
+    completeDeleteHere(
+        player, world, DeleteHerePlan.compute(world.getUID(), graph, seed, null), locale);
+  }
+
+  /** 局部删除的主线程部分：写库、切换（或整世界删图）并回显。 */
+  private void completeDeleteHere(
+      Player player, World world, DeleteHerePlan plan, LocaleManager locale) {
+    UUID worldId = world.getUID();
+    RailGraphMerger.RemoveResult removed = plan.removed();
+    if (plan.result() == null) {
+      deleteGraphFromStorage(world, false);
+      plugin.getRailGraphService().clearSnapshot(world);
+      dropContinuations(worldId);
+    } else {
+      // 先写库再换内存图：写库失败或仍有列车占用时旧图保持不变。
+      try {
+        activatePersistedGraph(player, world, plan.result(), locale, plan.prepared());
+      } catch (GraphPersistException exception) {
+        plugin.getLogger().warning("局部删除调度图写库失败: " + exception.getMessage());
+        player.sendMessage(locale.component("command.graph.build.persist-failed"));
+        return;
+      } catch (IllegalStateException exception) {
+        plugin.getLogger().warning("局部删除调度图未激活: " + exception.getMessage());
+        player.sendMessage(locale.component("command.graph.build.activation-blocked"));
+        return;
+      }
     }
 
-    activatePersistedGraph(sender, world, result, locale);
-    syncSignNodeRegistry(world, result.nodes());
-    scheduleStationAutoSync(world, result.nodes());
-    return new AppliedGraphBuild(result, Optional.empty());
+    player.sendMessage(
+        locale.component(
+            "command.graph.delete.here.success",
+            Map.of(
+                "seed",
+                plan.seed().value(),
+                "removed_components",
+                String.valueOf(removed.removedComponentCount()),
+                "removed_nodes",
+                String.valueOf(removed.removedNodes()),
+                "removed_edges",
+                String.valueOf(removed.removedEdges()),
+                "total_nodes",
+                String.valueOf(removed.totalNodes()),
+                "total_edges",
+                String.valueOf(removed.totalEdges()))));
   }
 
   /** build 完成后异步自愈 Station 主数据（用于 PIDS/站点显示）。 */
@@ -6233,14 +6562,18 @@ public final class FtaGraphCommand {
             anchorsByNode.size(),
             missingAnchors,
             tickBudgetMs,
-            done -> {
-              try {
-                finishRefresh(
-                    sender, world, loaded, stale, done, finalMissingAnchors, startNanos, locale);
-              } finally {
-                jobs.remove(worldId);
-              }
-            },
+            // 收尾结束（含交给后台再回来）时由收尾自己解锁本世界的建图任务。
+            done ->
+                startRefreshSwitch(
+                    sender,
+                    world,
+                    loaded,
+                    stale,
+                    done,
+                    finalMissingAnchors,
+                    startNanos,
+                    locale,
+                    jobs.get(worldId)),
             exploreFailed(sender, worldId, locale));
     sender.sendMessage(
         Component.text("快速刷新模式: 从存储加载 " + nodes.size() + " 个节点，开始边探索...", NamedTextColor.YELLOW));
@@ -6248,7 +6581,67 @@ public final class FtaGraphCommand {
   }
 
   /**
-   * 快速刷新收尾（主线程）：合并旧图、写库、激活。
+   * 快速刷新收尾（主线程）：把组装新图、与旧图合并、切换前准备交给后台（{@link RefreshPlan#compute}），回到主线程核对节点表没变、调度图没被换过后
+   * 写库、切换（{@link #completeRefresh}）。调度图被换过时按当前图重新合并，已组装好的新图沿用；任务已被取消就不再切换；交不出后台时按 {@link
+   * #finishRefresh} 在主线程同步做。
+   *
+   * @param loaded 刷新开始时从库里读到的全部节点（含作废道岔）
+   * @param stale 核对出的作废道岔节点
+   * @param task 本世界登记的这次刷新任务；收尾结束时移出
+   */
+  private void startRefreshSwitch(
+      CommandSender sender,
+      World world,
+      List<RailNodeRecord> loaded,
+      List<RailNodeRecord> stale,
+      NodeToNodeEdgeExplorer explorer,
+      int missingAnchors,
+      long startNanos,
+      LocaleManager locale,
+      RailGraphBuildTask task) {
+    UUID worldId = world.getUID();
+    List<RailNodeRecord> nodes = withoutNodes(loaded, stale);
+    Map<EdgeId, ExploredRailEdge> explored = explorer.getExploredEdges();
+    RailGraphService service = plugin.getRailGraphService();
+    new GraphSwitch<Optional<RailGraph>, RefreshPlan>(world, task, sender, locale, "调度图快速刷新收尾") {
+      private volatile RailGraph fresh;
+
+      @Override
+      Optional<RailGraph> capture() {
+        return resolveMergeBase(world);
+      }
+
+      @Override
+      RefreshPlan compute(Optional<RailGraph> existing) {
+        return RefreshPlan.compute(worldId, nodes, fresh(), existing, service);
+      }
+
+      @Override
+      void apply(RefreshPlan plan) {
+        completeRefresh(
+            sender, world, loaded, stale, plan, explorer, missingAnchors, startNanos, locale);
+      }
+
+      @Override
+      void syncFallback() {
+        refreshOnMainThread(
+            sender, world, loaded, stale, fresh, explorer, missingAnchors, startNanos, locale);
+      }
+
+      /** 按探索到的区间组装的新图：与旧图无关，重新合并时沿用。 */
+      private RailGraph fresh() {
+        RailGraph built = fresh;
+        if (built == null) {
+          built = RailGraphBuildJob.buildGraph(worldId, nodes, explored);
+          fresh = built;
+        }
+        return built;
+      }
+    }.start();
+  }
+
+  /**
+   * 快速刷新收尾（主线程同步）：合并旧图、写库、激活。
    *
    * <p>写库按世界覆盖 rail_nodes，作废道岔节点不在新图里，随这次写入从节点表去掉；写库或激活没成时节点表与生效图都不动，不会先让图失效。
    *
@@ -6264,45 +6657,132 @@ public final class FtaGraphCommand {
       int missingAnchors,
       long startNanos,
       LocaleManager locale) {
+    refreshOnMainThread(
+        sender, world, loaded, stale, null, explorer, missingAnchors, startNanos, locale);
+  }
+
+  /**
+   * 在主线程同步做快速刷新收尾：先核对节点表，再组装新图（给了 {@code fresh} 就沿用）、与旧图合并、写库、切换。
+   *
+   * @param fresh 已按探索结果组装好的新图；没有时为 {@code null}
+   */
+  private void refreshOnMainThread(
+      CommandSender sender,
+      World world,
+      List<RailNodeRecord> loaded,
+      List<RailNodeRecord> stale,
+      RailGraph fresh,
+      NodeToNodeEdgeExplorer explorer,
+      int missingAnchors,
+      long startNanos,
+      LocaleManager locale) {
     UUID worldId = world.getUID();
-    long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
     // 写库会按世界覆盖 rail_nodes：刷新期间放下或拆掉的牌子会被这份开始时读的节点表抹掉。
     if (storedNodesDiffer(worldId, loaded)) {
       sender.sendMessage(locale.component("command.graph.refresh.nodes-changed"));
       return;
     }
     List<RailNodeRecord> nodes = withoutNodes(loaded, stale);
-    RailGraph fresh = RailGraphBuildJob.buildGraph(worldId, nodes, explorer.getExploredEdges());
+    RailGraph built =
+        fresh != null
+            ? fresh
+            : RailGraphBuildJob.buildGraph(worldId, nodes, explorer.getExploredEdges());
+    applyRefresh(
+        sender,
+        world,
+        stale,
+        RefreshPlan.compute(worldId, nodes, built, resolveMergeBase(world), null),
+        explorer,
+        missingAnchors,
+        startNanos,
+        locale);
+  }
 
-    Optional<RailGraph> existing =
-        plugin
-            .getRailGraphService()
-            .getSnapshot(world)
-            .map(RailGraphService.RailGraphSnapshot::graph)
-            .or(() -> loadGraphFromStorage(world));
-    RailGraph finalGraph = fresh;
-    int preservedEdges = 0;
-    if (existing.isPresent()) {
-      Set<NodeId> currentNodes = new HashSet<>();
-      nodes.forEach(node -> currentNodes.add(node.nodeId()));
-      RailGraphMerger.MergeResult merge =
-          RailGraphMerger.upsert(RailGraphMerger.retainNodes(existing.get(), currentNodes), fresh);
-      finalGraph = merge.graph();
-      preservedEdges = Math.max(0, merge.totalEdges() - fresh.edges().size());
+  /**
+   * 快速刷新收尾的纯计算部分（可在后台线程）：把按探索到的区间组装的新图与旧图合并（只保留仍在节点表里的旧节点），整体降级为联锁不完整， 组装落库记录；给了 {@code service}
+   * 时再建好切换要用的派生索引与路网候选。
+   *
+   * @param preservedEdges 合并后沿用的旧区间数（回显用）
+   * @param prepared 切换前准备好的图；同步兜底时为 {@code null}
+   */
+  private record RefreshPlan(
+      RailGraphBuildResult result, int preservedEdges, RailGraphService.PreparedSnapshot prepared) {
+
+    static RefreshPlan compute(
+        UUID worldId,
+        List<RailNodeRecord> nodes,
+        RailGraph fresh,
+        Optional<RailGraph> existing,
+        RailGraphService service) {
+      RailGraph finalGraph = fresh;
+      int preservedEdges = 0;
+      if (existing.isPresent()) {
+        Set<NodeId> currentNodes = new HashSet<>();
+        nodes.forEach(node -> currentNodes.add(node.nodeId()));
+        RailGraphMerger.MergeResult merge =
+            RailGraphMerger.upsert(
+                RailGraphMerger.retainNodes(existing.get(), currentNodes), fresh);
+        finalGraph = merge.graph();
+        preservedEdges = Math.max(0, merge.totalEdges() - fresh.edges().size());
+      }
+      finalGraph = markRefreshInterlockingCatalogIncomplete(finalGraph);
+
+      List<RailNodeRecord> finalNodes = nodeRecordsFromGraph(worldId, finalGraph);
+      RailGraphBuildResult result =
+          new RailGraphBuildResult(
+              finalGraph,
+              Instant.now(),
+              RailGraphSignature.signatureForNodes(finalNodes),
+              finalNodes,
+              List.of(),
+              List.of());
+      return new RefreshPlan(
+          result,
+          preservedEdges,
+          service == null ? null : service.prepareSnapshot(worldId, finalGraph));
     }
-    finalGraph = markRefreshInterlockingCatalogIncomplete(finalGraph);
+  }
 
-    List<RailNodeRecord> finalNodes = nodeRecordsFromGraph(worldId, finalGraph);
-    RailGraphBuildResult result =
-        new RailGraphBuildResult(
-            finalGraph,
-            Instant.now(),
-            RailGraphSignature.signatureForNodes(finalNodes),
-            finalNodes,
-            List.of(),
-            List.of());
+  /**
+   * 快速刷新收尾的主线程部分（后台算完回来）：核对节点表没变，再写库、切换。
+   *
+   * @param loaded 刷新开始时从库里读到的全部节点（含作废道岔）
+   */
+  private void completeRefresh(
+      CommandSender sender,
+      World world,
+      List<RailNodeRecord> loaded,
+      List<RailNodeRecord> stale,
+      RefreshPlan plan,
+      NodeToNodeEdgeExplorer explorer,
+      int missingAnchors,
+      long startNanos,
+      LocaleManager locale) {
+    // 写库会按世界覆盖 rail_nodes：刷新期间（含后台合并期间）放下或拆掉的牌子会被这份开始时读的节点表抹掉，所以在写库前这一刻核对。
+    if (storedNodesDiffer(world.getUID(), loaded)) {
+      sender.sendMessage(locale.component("command.graph.refresh.nodes-changed"));
+      return;
+    }
+    applyRefresh(sender, world, stale, plan, explorer, missingAnchors, startNanos, locale);
+  }
+
+  /** 快速刷新的落地：写库、切换，同步节点牌子登记并回显。 */
+  private void applyRefresh(
+      CommandSender sender,
+      World world,
+      List<RailNodeRecord> stale,
+      RefreshPlan plan,
+      NodeToNodeEdgeExplorer explorer,
+      int missingAnchors,
+      long startNanos,
+      LocaleManager locale) {
+    long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    RailGraphBuildResult result = plan.result();
+    RailGraph finalGraph = result.graph();
+    List<RailNodeRecord> finalNodes = result.nodes();
+    int preservedEdges = plan.preservedEdges();
     try {
-      activatePersistedGraph(sender, world, result, locale);
+      activatePersistedGraph(sender, world, result, locale, plan.prepared());
     } catch (GraphPersistException exception) {
       plugin.getLogger().warning("调度图快速刷新写库失败: " + exception.getMessage());
       sender.sendMessage(locale.component("command.graph.build.persist-failed"));
@@ -6386,14 +6866,7 @@ public final class FtaGraphCommand {
                 }
               } catch (RuntimeException ex) {
                 jobs.remove(worldId, self);
-                sender.sendMessage(
-                    locale.component(
-                        "command.graph.build.failed",
-                        Map.of(
-                            "error",
-                            ex.getMessage() != null
-                                ? ex.getMessage()
-                                : ex.getClass().getSimpleName())));
+                sender.sendMessage(failureMessage(locale, ex));
               }
             },
             exploreFailed(sender, worldId, locale));
@@ -6578,7 +7051,8 @@ public final class FtaGraphCommand {
             0,
             tickBudgetMs,
             done -> {
-              // 收尾的合并与资源核算交给后台线程时，由收尾回到主线程后再解锁本世界的建图任务。
+              // 交给收尾（含后台合并）后由收尾结束时自己解锁本世界的建图任务。
+              RailGraphBuildTask self = jobs.get(worldId);
               boolean handedOff = false;
               try {
                 handedOff =
@@ -6592,7 +7066,7 @@ public final class FtaGraphCommand {
                         access,
                         startNanos,
                         locale,
-                        () -> jobs.remove(worldId));
+                        self);
               } finally {
                 if (!handedOff) {
                   jobs.remove(worldId);
@@ -6609,10 +7083,10 @@ public final class FtaGraphCommand {
 
   /**
    * 增补收尾（主线程）：核验新区间（要读世界里的道岔），再把合并、受影响资源与运维限速的核算交给后台线程——它们只读不可变的图，大网上要算全网足迹；
-   * 算完回到主线程核验占用、写库、激活（{@link #completeExtend}）。
+   * 算完回到主线程核验占用、写库、激活（{@link #completeExtend}）。期间调度图被换过就拒绝（新区间是对着旧图核验的），任务被取消就不再激活。
    *
-   * @param release 收尾结束时解锁本世界的建图任务
-   * @return 是否已交给后台线程（此时由后续步骤调用 {@code release}）
+   * @param task 本世界登记的这次增补任务；交给收尾后由收尾结束时移出
+   * @return 是否已交给收尾（{@link GraphSwitch}）；为 false 时已回显拒绝，由调用方移出任务
    */
   private boolean finishExtend(
       CommandSender sender,
@@ -6624,7 +7098,7 @@ public final class FtaGraphCommand {
       TrainCartsRailBlockAccess access,
       long startNanos,
       LocaleManager locale,
-      Runnable release) {
+      RailGraphBuildTask task) {
     UUID worldId = world.getUID();
     RailGraphService service = plugin.getRailGraphService();
     if (service.getSnapshot(world).map(RailGraphService.RailGraphSnapshot::graph).orElse(null)
@@ -6658,45 +7132,49 @@ public final class FtaGraphCommand {
       return false;
     }
     Set<String> cautionKeys = Set.copyOf(service.componentCautions(worldId).keySet());
-    var scheduler = plugin.getServer().getScheduler();
-    scheduler.runTaskAsynchronously(
-        plugin,
-        () -> {
-          Runnable back;
-          try {
-            ExtendPlan plan =
-                ExtendPlan.compute(worldId, base, newRailNodes, verified, cautionKeys);
-            back = () -> completeExtend(sender, world, base, plan, explorer, startNanos, locale);
-          } catch (RuntimeException ex) {
-            plugin.getLogger().warning("调度图增补收尾失败: " + ex);
-            back = () -> sendExtendRefusal(sender, locale, "增补收尾出错：" + ex.getMessage());
-          }
-          Runnable finish = back;
-          try {
-            scheduler.runTask(
-                plugin,
-                () -> {
-                  try {
-                    finish.run();
-                  } finally {
-                    release.run();
-                  }
-                });
-          } catch (RuntimeException ex) {
-            // 插件已停用：回不到主线程，直接解锁，免得本世界的建图任务一直显示在进行中。
-            release.run();
-          }
-        });
+    new GraphSwitch<RailGraph, ExtendPlan>(world, task, sender, locale, "调度图增补收尾") {
+      @Override
+      RailGraph capture() {
+        // 新区间是对着 base 核验的：图被换过就不能再算，交给同步兜底拒绝。
+        return currentGraph(service, world) == base ? base : null;
+      }
+
+      @Override
+      ExtendPlan compute(RailGraph graph) {
+        return ExtendPlan.compute(worldId, graph, newRailNodes, verified, cautionKeys, service);
+      }
+
+      @Override
+      void apply(ExtendPlan plan) {
+        completeExtend(sender, world, base, plan, explorer, startNanos, locale);
+      }
+
+      @Override
+      void syncFallback() {
+        if (currentGraph(service, world) != base) {
+          sendExtendRefusal(sender, locale, "增补期间调度图被更新过；请重试");
+          return;
+        }
+        apply(ExtendPlan.compute(worldId, base, newRailNodes, verified, cautionKeys, null));
+      }
+
+      @Override
+      void failed(Throwable ex) {
+        plugin.getLogger().warning("调度图增补收尾失败: " + ex);
+        sendExtendRefusal(sender, locale, "增补收尾出错：" + ex.getMessage());
+      }
+    }.start();
     return true;
   }
 
   /**
-   * 增补的纯计算部分（后台线程）：只读不可变的旧图与新区间。
+   * 增补的纯计算部分（后台线程；交不出后台时在主线程）：只读不可变的旧图与新区间。
    *
    * @param appended 合并后的新图
    * @param changed 键会变的旧占用资源
    * @param lostCautions 会因分量键变化而失效的运维限速所在分量
    * @param finalNodes 新图的全部节点记录（写库与核对用）
+   * @param prepared 切换前准备好的新图（派生索引与路网候选）；在主线程同步算时为 {@code null}
    */
   private record ExtendPlan(
       RailGraph appended,
@@ -6704,16 +7182,21 @@ public final class FtaGraphCommand {
       int addedEdges,
       Set<OccupancyResource> changed,
       Set<String> lostCautions,
-      List<RailNodeRecord> finalNodes) {
+      List<RailNodeRecord> finalNodes,
+      RailGraphService.PreparedSnapshot prepared) {
 
     static ExtendPlan compute(
         UUID worldId,
         RailGraph base,
         List<RailNode> newRailNodes,
         RailGraphExtension.Verified verified,
-        Set<String> cautionKeys) {
+        Set<String> cautionKeys,
+        RailGraphService service) {
       RailGraph appended =
           RailGraphMerger.append(base, newRailNodes, verified.edges(), verified.footprints());
+      // 激活前在本后台线程建好派生索引与路网候选，激活后主线程的第一次占用/授权查询直接命中；下面的资源核算也用上这些索引。
+      RailGraphService.PreparedSnapshot prepared =
+          service == null ? null : service.prepareSnapshot(worldId, appended);
       List<NodeId> newIds = newRailNodes.stream().map(RailNode::id).toList();
       return new ExtendPlan(
           appended,
@@ -6721,7 +7204,8 @@ public final class FtaGraphCommand {
           verified.edges().size(),
           RailGraphExtension.changedResources(base, appended, newIds),
           RailGraphExtension.componentKeysLosingCautions(base, appended, newIds, cautionKeys),
-          nodeRecordsFromGraph(worldId, appended));
+          nodeRecordsFromGraph(worldId, appended),
+          prepared);
     }
   }
 
@@ -6776,7 +7260,11 @@ public final class FtaGraphCommand {
       return;
     }
     boolean wasStale = service.getStaleState(world).isPresent();
-    service.putVerifiedAppendSnapshot(world, appended, now);
+    if (plan.prepared() != null) {
+      service.putVerifiedAppendSnapshot(world, plan.prepared(), now);
+    } else {
+      service.putVerifiedAppendSnapshot(world, appended, now);
+    }
     notifyRecovered(world, wasStale);
     syncSignNodeRegistry(world, finalNodes);
     scheduleStationAutoSync(world, finalNodes);
@@ -7001,8 +7489,23 @@ public final class FtaGraphCommand {
    */
   void activatePersistedGraph(
       CommandSender sender, World world, RailGraphBuildResult result, LocaleManager locale) {
+    activatePersistedGraph(sender, world, result, locale, null);
+  }
+
+  /**
+   * 同 {@link #activatePersistedGraph(CommandSender, World, RailGraphBuildResult,
+   * LocaleManager)}，切换的是切换前在后台准备好的图。
+   *
+   * @param prepared 切换前准备好的同一张图；没有时为 {@code null}（切换后再异步预热）
+   */
+  private void activatePersistedGraph(
+      CommandSender sender,
+      World world,
+      RailGraphBuildResult result,
+      LocaleManager locale,
+      RailGraphService.PreparedSnapshot prepared) {
     try {
-      commitGraph(world, result);
+      commitGraph(world, result, prepared);
     } catch (ActivationBlockedException blocked) {
       PendingRailGraphStore.Candidate candidate;
       try {
@@ -7024,6 +7527,16 @@ public final class FtaGraphCommand {
    * @throws GraphPersistException 写库失败，旧内存快照保持不变
    */
   private void commitGraph(World world, RailGraphBuildResult result) {
+    commitGraph(world, result, null);
+  }
+
+  /**
+   * 同 {@link #commitGraph(World, RailGraphBuildResult)}，切换的是切换前准备好的图（与 {@code result} 同一张时才用）。
+   *
+   * @param prepared 切换前准备好的图；没有时为 {@code null}
+   */
+  private void commitGraph(
+      World world, RailGraphBuildResult result, RailGraphService.PreparedSnapshot prepared) {
     RailGraphService service = plugin.getRailGraphService();
     try {
       service.validateSnapshotActivation(world, result.graph());
@@ -7034,7 +7547,11 @@ public final class FtaGraphCommand {
       throw new GraphPersistException("调度图持久化失败，保留旧内存快照");
     }
     boolean wasStale = service.getStaleState(world).isPresent();
-    service.putSnapshot(world, result.graph(), result.builtAt());
+    if (prepared != null && prepared.graph() == result.graph()) {
+      service.putSnapshot(world, prepared, result.builtAt());
+    } else {
+      service.putSnapshot(world, result.graph(), result.builtAt());
+    }
     notifyRecovered(world, wasStale);
     clearPendingGraph(world.getUID());
   }
@@ -7358,7 +7875,12 @@ public final class FtaGraphCommand {
     return rails;
   }
 
-  /** build 与 continue 共用的收尾：激活新图、更新续跑状态、回显结果；任何结局都把任务从任务表移出。 */
+  /**
+   * build 与 continue 共用的收尾：与旧图合并、切换前准备交给后台（{@link BuildPlan#compute}），回到主线程核验后激活新图、更新续跑状态、回显结果；
+   * 任何结局都把任务从任务表移出（见 {@link GraphSwitch}）。
+   *
+   * <p>任务在收尾期间被取消时不再激活，只释放结果里暂停的发现会话的区块票（续跑表还在用的不动）；后台合并出错按没切换处理，丢掉续跑状态。
+   */
   private java.util.function.Consumer<RailGraphBuildOutcome> buildFinished(
       CommandSender sender,
       World world,
@@ -7367,33 +7889,91 @@ public final class FtaGraphCommand {
       LocaleManager locale) {
     UUID worldId = world.getUID();
     return outcome -> {
-      try {
-        AppliedGraphBuild applied;
-        try {
-          applied =
-              applyBuildSuccess(sender, world, outcome.result(), outcome.completion(), locale);
-        } catch (GraphPersistException exception) {
-          plugin.getLogger().warning("调度图写库失败: " + exception.getMessage());
-          discardContinuation(cacheKey, outcome);
-          sender.sendMessage(locale.component("command.graph.build.persist-failed"));
-          return;
-        } catch (IllegalStateException exception) {
-          plugin.getLogger().warning("调度图构建未激活: " + exception.getMessage());
-          replaceContinuation(cacheKey, outcome.continuation());
-          sender.sendMessage(locale.component("command.graph.build.activation-blocked"));
-          return;
+      RailGraphService service = plugin.getRailGraphService();
+      new GraphSwitch<Optional<RailGraph>, BuildPlan>(
+          world, jobs.get(worldId), sender, locale, "调度图构建收尾") {
+        @Override
+        Optional<RailGraph> capture() {
+          return resolveMergeBase(world);
         }
-        replaceContinuation(cacheKey, outcome.continuation());
-        long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
-        plugin
-            .getServer()
-            .getScheduler()
-            .runTask(
-                plugin, () -> reportBuildApplied(sender, world, outcome, applied, tookMs, locale));
-      } finally {
-        jobs.remove(worldId);
-      }
+
+        @Override
+        BuildPlan compute(Optional<RailGraph> base) {
+          return BuildPlan.compute(worldId, base, outcome.result(), outcome.completion(), service);
+        }
+
+        @Override
+        void apply(BuildPlan plan) {
+          completeBuild(
+              sender,
+              world,
+              cacheKey,
+              outcome,
+              () -> applyBuildPlan(sender, world, plan, locale),
+              startNanos,
+              locale);
+        }
+
+        @Override
+        void syncFallback() {
+          completeBuild(
+              sender,
+              world,
+              cacheKey,
+              outcome,
+              () ->
+                  applyBuildSuccess(sender, world, outcome.result(), outcome.completion(), locale),
+              startNanos,
+              locale);
+        }
+
+        @Override
+        void failed(Throwable ex) {
+          discardContinuation(cacheKey, outcome);
+          super.failed(ex);
+        }
+
+        @Override
+        void abandoned() {
+          releaseUnusedContinuation(outcome);
+        }
+      }.start();
     };
+  }
+
+  /**
+   * build 收尾的主线程部分：写库、激活、更新续跑状态并回显。
+   *
+   * @param apply 写库并切换：后台已合并好时只切换，否则在主线程同步合并（{@link #applyBuildSuccess}）
+   */
+  private void completeBuild(
+      CommandSender sender,
+      World world,
+      GraphBuildCacheKey cacheKey,
+      RailGraphBuildOutcome outcome,
+      java.util.function.Supplier<AppliedGraphBuild> apply,
+      long startNanos,
+      LocaleManager locale) {
+    AppliedGraphBuild applied;
+    try {
+      applied = apply.get();
+    } catch (GraphPersistException exception) {
+      plugin.getLogger().warning("调度图写库失败: " + exception.getMessage());
+      discardContinuation(cacheKey, outcome);
+      sender.sendMessage(locale.component("command.graph.build.persist-failed"));
+      return;
+    } catch (IllegalStateException exception) {
+      plugin.getLogger().warning("调度图构建未激活: " + exception.getMessage());
+      replaceContinuation(cacheKey, outcome.continuation());
+      sender.sendMessage(locale.component("command.graph.build.activation-blocked"));
+      return;
+    }
+    replaceContinuation(cacheKey, outcome.continuation());
+    long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
+    plugin
+        .getServer()
+        .getScheduler()
+        .runTask(plugin, () -> reportBuildApplied(sender, world, outcome, applied, tookMs, locale));
   }
 
   private void reportBuildApplied(
@@ -7447,10 +8027,7 @@ public final class FtaGraphCommand {
                     sender.sendMessage(locale.component("command.graph.build.no-nodes"));
                     return;
                   }
-                  sender.sendMessage(
-                      locale.component(
-                          "command.graph.build.failed",
-                          Map.of("error", ex.getMessage() != null ? ex.getMessage() : "")));
+                  sender.sendMessage(failureMessage(locale, ex));
                 });
       } finally {
         jobs.remove(worldId);
@@ -7464,15 +8041,10 @@ public final class FtaGraphCommand {
     return ex -> {
       try {
         plugin.getLogger().warning("调度图边探索失败: " + ex);
-        String error = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
         plugin
             .getServer()
             .getScheduler()
-            .runTask(
-                plugin,
-                () ->
-                    sender.sendMessage(
-                        locale.component("command.graph.build.failed", Map.of("error", error))));
+            .runTask(plugin, () -> sender.sendMessage(failureMessage(locale, ex)));
       } finally {
         jobs.remove(worldId);
       }
