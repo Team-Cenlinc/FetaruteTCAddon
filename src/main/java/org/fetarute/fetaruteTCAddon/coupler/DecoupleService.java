@@ -172,6 +172,22 @@ public final class DecoupleService {
   private record Remainder(String routeId, int index) {}
 
   /**
+   * 刚在这一站拆过、留下的一段（车名键）→ 拆开时的交路、下标与站台。留下的一段往前开时车头会再压过本站牌子：这一站不能再拆一次，AutoStation 也不再停一次；
+   * 离开这一站（进度变了）或不在了就删。主线程写，任意线程读。
+   */
+  private final Map<String, SplitAt> splitDone = new ConcurrentHashMap<>();
+
+  private record SplitAt(String routeId, int index, NodeId platform) {}
+
+  /**
+   * 刚在本站解下、等着接下一班的车（车名键）→ 那一班的计划发车：重新触发本站牌子时停站延到这个时刻，车门开到快发车再关，不先关门干等。
+   * 车被派走（不在待命池）或过了这个时刻一分钟就删。主线程写，任意线程读。
+   */
+  private final Map<String, DoorHold> doorHolds = new ConcurrentHashMap<>();
+
+  private record DoorHold(String trainName, Instant departure) {}
+
+  /**
    * 刚在本站拆开、解下的车（车名键）→ 拆开以后的车厢标识（{@link DivisionForecast#divided}）与留下那一段停在哪里。两段都还停在分行站时有效：
    * 解下的车不再待命（开走了）或留下的一段离开就删。主线程写，任意线程读。
    */
@@ -230,6 +246,8 @@ public final class DecoupleService {
     depotPatterns.clear();
     patternRequests.clear();
     remainders.clear();
+    splitDone.clear();
+    doorHolds.clear();
     divided.clear();
   }
 
@@ -256,6 +274,11 @@ public final class DecoupleService {
       return 0;
     }
     String key = key(trainName);
+    SplitAt done = splitDone.get(key);
+    if (done != null && done.index() == index && done.routeId().equalsIgnoreCase(route.value())) {
+      // 这一站已经拆过：留下的一段往前开时又压过了本站的牌子
+      return 0;
+    }
     boolean station = RouteTerminals.isStationStop(stops.get(index));
     Pending previous = pending.get(key);
     if (previous == null || !previous.route().equals(route) || previous.index() != index) {
@@ -270,6 +293,17 @@ public final class DecoupleService {
       stationDwell.put(key, seconds);
     }
     return seconds;
+  }
+
+  /**
+   * AutoStation 停站：刚在本站解下、等着接下一班的车，停站要延到的时刻（那一班的计划发车）。任意线程可读。
+   *
+   * @return 不是这样的车时为空
+   */
+  public Optional<Instant> holdDoorsUntil(String trainName) {
+    return trainName == null
+        ? Optional.empty()
+        : Optional.ofNullable(doorHolds.get(key(trainName))).map(DoorHold::departure);
   }
 
   /**
@@ -317,6 +351,12 @@ public final class DecoupleService {
   public boolean dividesHere(String trainName) {
     Pending item = trainName == null ? null : pending.get(key(trainName));
     return item != null && !planOf(item).skips();
+  }
+
+  /** 这列车是刚在站台 {@code platform} 拆开后留下的一段、还没离开这一站。 */
+  public boolean splitHere(String trainName, NodeId platform) {
+    SplitAt done = trainName == null ? null : splitDone.get(key(trainName));
+    return done != null && done.platform().equals(platform);
   }
 
   /** 解下的车正等着被接走（闲置回收不收它）。 */
@@ -564,6 +604,15 @@ public final class DecoupleService {
                   detachedDestination(item, plan))));
     }
     if (item.station()) {
+      // 按表接下一班：停站延到那一班的计划发车（重新触发牌子时 AutoStation 来取）
+      plan.child()
+          .flatMap(child -> timetable().flatMap(service -> service.firstTripOf(child)))
+          .map(TimetableService.DueTrip::departure)
+          .filter(departure -> departure.isAfter(now))
+          .ifPresent(
+              departure -> doorHolds.put(key(detachedName), new DoorHold(detachedName, departure)));
+    }
+    if (item.station()) {
       // 解下的一段没有再压过站牌，本站的停站会话只管留下的一段：给它重新触发本站牌子，自己开门、停站、关门
       Bukkit.getScheduler()
           .runTask(
@@ -585,6 +634,7 @@ public final class DecoupleService {
         && destinations.detached(item.route(), directive, plan).inService()) {
       remainders.put(key(item.trainName()), new Remainder(item.route().value(), item.index()));
     }
+    splitDone.put(key(item.trainName()), new SplitAt(item.route().value(), item.index(), node));
     if (item.station()) {
       rememberDivided(item, detachedName, cut.get());
     }
@@ -792,6 +842,28 @@ public final class DecoupleService {
                                         .routeId()
                                         .value()
                                         .equalsIgnoreCase(entry.keptRoute())));
+    // 解下的车被派走（不在待命池）或早过了那一班的发车：不再延停站
+    Instant now = Instant.now();
+    doorHolds
+        .entrySet()
+        .removeIf(
+            hold ->
+                now.isAfter(hold.getValue().departure().plusSeconds(60))
+                    || layovers.flatMap(found -> found.get(hold.getValue().trainName())).isEmpty());
+    // 拆过的一段离开这一站（进度变了）或不在了：以后再到这一站照常拆
+    splitDone
+        .entrySet()
+        .removeIf(
+            done ->
+                progress.values().stream()
+                    .noneMatch(
+                        entry ->
+                            key(entry.trainName()).equals(done.getKey())
+                                && entry.currentIndex() == done.getValue().index()
+                                && entry
+                                    .routeId()
+                                    .value()
+                                    .equalsIgnoreCase(done.getValue().routeId())));
     // 留下的一段离开分行站（进度变了）或不在了：站牌照常列它
     remainders
         .entrySet()

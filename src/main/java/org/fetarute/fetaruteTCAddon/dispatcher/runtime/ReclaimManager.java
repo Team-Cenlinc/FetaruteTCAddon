@@ -1054,33 +1054,47 @@ public class ReclaimManager {
       return ReturnOutcome.NO_ROUTE;
     }
 
-    boolean matched = false;
+    // 回库线路按编组方案分流：从这个终点出发的回库线路里，有接这个车型的就只派这些；一条都不接时照样派回库，
+    // 不然方案外的车（叫车的折返车、按整列出车的车）一旦摘了交路就永远搁在线上
+    List<Route> startingHere = new ArrayList<>();
     for (Route route : allReturnRoutes) {
       if (startsAt(provider, route, candidate.terminalKey())) {
-        matched = true;
-        Optional<ServiceTicket> ticketOpt = stableReturnTicket(candidate, route.id());
-        if (ticketOpt.isEmpty()) {
-          debugLogger.accept("回收跳过: 候选已由其他 dispatch 事务认领 train=" + candidate.trainName());
-          continue;
-        }
-        ServiceTicket ticket = ticketOpt.get();
-
-        debugLogger.accept(
-            "尝试回收: 分配 RETURN ticket route=" + route.code() + " train=" + candidate.trainName());
-
-        boolean success = ticketAssigner.forceAssign(provider, candidate.trainName(), ticket);
-        if (success) {
-          stableReturnTickets.remove(ticket.ticketId());
-          notifyReclaimed(candidate.trainName(), route.id());
-          debugLogger.accept("回收成功: 已分配 RETURN ticket train=" + candidate.trainName());
-          return ReturnOutcome.ASSIGNED;
-        }
-        debugLogger.accept("回收失败: TicketAssigner 拒绝分配 train=" + candidate.trainName());
-        if (layoverRegistry.findDispatchAttemptOwner(ticket.ticketId()).isPresent()) {
-          return ReturnOutcome.BLOCKED;
-        }
-        stableReturnTickets.remove(ticket.ticketId());
+        startingHere.add(route);
       }
+    }
+    List<Route> accepting = new ArrayList<>();
+    for (Route route : startingHere) {
+      if (ticketAssigner.acceptsConsist(route.id(), candidate)) {
+        accepting.add(route);
+      }
+    }
+    if (accepting.isEmpty() && !startingHere.isEmpty()) {
+      debugLogger.accept("回收: 没有接这个车型的回库线路，照样派回库 train=" + candidate.trainName());
+    }
+    boolean matched = !startingHere.isEmpty();
+    for (Route route : accepting.isEmpty() ? startingHere : accepting) {
+      Optional<ServiceTicket> ticketOpt = stableReturnTicket(candidate, route.id());
+      if (ticketOpt.isEmpty()) {
+        debugLogger.accept("回收跳过: 候选已由其他 dispatch 事务认领 train=" + candidate.trainName());
+        continue;
+      }
+      ServiceTicket ticket = ticketOpt.get();
+
+      debugLogger.accept(
+          "尝试回收: 分配 RETURN ticket route=" + route.code() + " train=" + candidate.trainName());
+
+      boolean success = ticketAssigner.forceAssign(provider, candidate.trainName(), ticket);
+      if (success) {
+        stableReturnTickets.remove(ticket.ticketId());
+        notifyReclaimed(candidate.trainName(), route.id());
+        debugLogger.accept("回收成功: 已分配 RETURN ticket train=" + candidate.trainName());
+        return ReturnOutcome.ASSIGNED;
+      }
+      debugLogger.accept("回收失败: TicketAssigner 拒绝分配 train=" + candidate.trainName());
+      if (layoverRegistry.findDispatchAttemptOwner(ticket.ticketId()).isPresent()) {
+        return ReturnOutcome.BLOCKED;
+      }
+      stableReturnTickets.remove(ticket.ticketId());
     }
     if (matched) {
       return ReturnOutcome.BLOCKED;

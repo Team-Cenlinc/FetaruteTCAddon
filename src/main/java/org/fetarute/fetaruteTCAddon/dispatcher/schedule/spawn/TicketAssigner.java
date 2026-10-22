@@ -37,6 +37,18 @@ public interface TicketAssigner {
   }
 
   /**
+   * 这条交路的编组方案接不接这辆待命车的车型（回收挑回库线路时用）。默认不裁决，一律接。
+   *
+   * @param routeId 交路
+   * @param candidate 待命车
+   * @return 交路没绑方案、或方案里有这个车型时为 true
+   */
+  default boolean acceptsConsist(
+      java.util.UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
+    return true;
+  }
+
+  /**
    * Layover 注册事件回调：有列车进入待命池时触发。
    *
    * <p>默认不处理，具体行为由实现类决定。

@@ -56,6 +56,9 @@ public final class CouplerService {
   /** 同股道列车对：{@code <对方车名>|<离开方向 x>,<离开方向 z>}。 */
   public static final String TAG_CO_LOCATED = "FTA_COLOCATED";
 
+  /** 改名后认车：候选车标签里的离开方向与这一对给失踪一方记下的方向点积至少这么大才算同一辆。 */
+  private static final double SAME_AWAY_DOT = 0.99;
+
   /** 拆开后隔多久（tick）开始登记成对：两车先要按现场车身重新占用。 */
   private static final long PAIR_FIRST_DELAY_TICKS = 2L;
 
@@ -106,6 +109,10 @@ public final class CouplerService {
               pairs.exempts(request, resource, claim)
                   || coupling.exempts(request, resource, claim));
     }
+    // 调度改名（待命复用接下一趟）时同步把列车对迁到新名下
+    plugin
+        .getRuntimeDispatchService()
+        .ifPresent(dispatch -> dispatch.coupling().setRenameListener(this::followRenamed));
     if (maintainTask == null) {
       maintainTask =
           Bukkit.getScheduler()
@@ -146,9 +153,21 @@ public final class CouplerService {
     if (plugin.getOccupancyManager() instanceof SimpleOccupancyManager occupancy) {
       occupancy.setCoLocationPolicy(null);
     }
+    plugin
+        .getRuntimeDispatchService()
+        .ifPresent(dispatch -> dispatch.coupling().setRenameListener(null));
     pairs.clear();
     decoupling.stop();
     coupling.stop();
+  }
+
+  /**
+   * 聊天栏的“连挂”按钮（{@code /fta coupler couple <令牌>}），见 {@link CouplerWrenchListener#coupleSelected}。
+   */
+  public void coupleSelected(org.bukkit.entity.Player player, String token) {
+    if (wrenchListener != null && player != null) {
+      wrenchListener.coupleSelected(player, token);
+    }
   }
 
   /** 扳手物品。 */
@@ -484,6 +503,9 @@ public final class CouplerService {
       return false;
     }
     Vector awaySecond = awayFirst.get().clone().multiply(-1.0);
+    // 两车原先各自的搭档：对拆掉，它们身上指向这两车的标签一并删掉，不留过时的标签
+    dropStaleTag(first, second);
+    dropStaleTag(second, first);
     pairs.register(
         new CoLocatedPairs.Pair(
             first, second, firstGroup.getWorld().getUID(), shared, awayFirst.get(), awaySecond));
@@ -497,9 +519,78 @@ public final class CouplerService {
     return true;
   }
 
+  /**
+   * 调度给列车改了名（占用账本已迁到新名）：这一对立即迁到新名下，另一方的标签跟着改。与新一趟的授权在同一拍，不能等定时维护。
+   *
+   * @param from 旧名
+   * @param to 新名
+   */
+  void followRenamed(String from, String to) {
+    Optional<CoLocatedPairs.Pair> found = pairs.pairOf(from);
+    if (found.isEmpty() || to == null || pairs.pairOf(to).isPresent()) {
+      return;
+    }
+    CoLocatedPairs.Pair pair = found.get();
+    boolean first = TrainNameNormalizer.sameLogicalTrain(pair.first(), from);
+    String partner = first ? pair.second() : pair.first();
+    CoLocatedPairs.Pair renamed =
+        first
+            ? new CoLocatedPairs.Pair(
+                to,
+                pair.second(),
+                pair.worldId(),
+                pair.shared(),
+                pair.awayFirst(),
+                pair.awaySecond())
+            : new CoLocatedPairs.Pair(
+                pair.first(),
+                to,
+                pair.worldId(),
+                pair.shared(),
+                pair.awayFirst(),
+                pair.awaySecond());
+    pairs.register(renamed);
+    Vector partnerAway = first ? pair.awaySecond() : pair.awayFirst();
+    liveProperties(partner)
+        .ifPresent(
+            properties ->
+                TrainTagHelper.writeTag(properties, TAG_CO_LOCATED, formatTag(to, partnerAway)));
+    plugin
+        .getLoggerManager()
+        .debug(
+            "COUPLER_PAIR_RENAMED from="
+                + from
+                + " to="
+                + to
+                + " partner="
+                + partner
+                + " source=dispatch");
+  }
+
+  /** 这列车原先在别的对里（搭档不是 {@code next}）：删掉原搭档身上指向它的标签。 */
+  private void dropStaleTag(String trainName, String next) {
+    pairs
+        .pairOf(trainName)
+        .flatMap(previous -> previous.partnerOf(trainName))
+        .filter(partner -> !TrainNameNormalizer.sameLogicalTrain(partner, next))
+        .flatMap(CouplerService::liveProperties)
+        .ifPresent(
+            partner -> {
+              boolean pointsHere =
+                  TrainTagHelper.readTagValue(partner, TAG_CO_LOCATED)
+                      .flatMap(PairTag::parse)
+                      .filter(tag -> TrainNameNormalizer.sameLogicalTrain(tag.partner(), trainName))
+                      .isPresent();
+              if (pointsHere) {
+                TrainTagHelper.removeTagKey(partner, TAG_CO_LOCATED);
+              }
+            });
+  }
+
   /** 检查每一对：两车仍共占的资源收窄共用集；不再共占或一方不在了就解除。再按标签找回重启前的对。 */
   void maintainPairs() {
-    for (CoLocatedPairs.Pair pair : pairs.pairs()) {
+    for (CoLocatedPairs.Pair listed : pairs.pairs()) {
+      CoLocatedPairs.Pair pair = followRename(listed);
       Optional<TrainProperties> first = liveProperties(pair.first());
       Optional<TrainProperties> second = liveProperties(pair.second());
       if (first.isEmpty() || second.isEmpty()) {
@@ -518,6 +609,89 @@ public final class CouplerService {
       maintainsUntilRestore = RESTORE_EVERY_MAINTAINS;
       restorePairsFromTags();
     }
+  }
+
+  /**
+   * 一方按登记的车名找不到、另一方还在：多半是改了名（待命复用接下一趟时会改名）。改名后的车还带着指向另一方的标签，按标签找到它就把这一对改到新名下，
+   * 另一方的标签跟着改，不解散——解散了两车共占的资源就互相挡住。
+   *
+   * <p>认错车会把豁免给错一对（方向也跟着错），所以只在认得准时改：还在的一方的标签仍指向失踪的一方；候选车的标签指向还在的一方、 离开方向与这一对给失踪一方记下的一致、
+   * 不在别的对里，且只有这一辆。否则原样返回，照常解散。
+   */
+  private CoLocatedPairs.Pair followRename(CoLocatedPairs.Pair pair) {
+    boolean firstLive = liveProperties(pair.first()).isPresent();
+    boolean secondLive = liveProperties(pair.second()).isPresent();
+    if (firstLive == secondLive) {
+      return pair;
+    }
+    String present = firstLive ? pair.first() : pair.second();
+    String missing = firstLive ? pair.second() : pair.first();
+    Vector missingAway = firstLive ? pair.awaySecond() : pair.awayFirst();
+    boolean presentPointsToMissing =
+        liveProperties(present)
+            .flatMap(properties -> TrainTagHelper.readTagValue(properties, TAG_CO_LOCATED))
+            .flatMap(PairTag::parse)
+            .filter(tag -> TrainNameNormalizer.sameLogicalTrain(tag.partner(), missing))
+            .isPresent();
+    if (!presentPointsToMissing) {
+      return pair;
+    }
+    String found = null;
+    for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+      TrainProperties properties = group == null ? null : group.getProperties();
+      if (properties == null) {
+        continue;
+      }
+      String name = properties.getTrainName();
+      if (name == null
+          || TrainNameNormalizer.sameLogicalTrain(name, present)
+          || TrainNameNormalizer.sameLogicalTrain(name, missing)) {
+        continue;
+      }
+      Optional<PairTag> tag =
+          TrainTagHelper.readTagValue(properties, TAG_CO_LOCATED).flatMap(PairTag::parse);
+      if (tag.isEmpty()
+          || !TrainNameNormalizer.sameLogicalTrain(tag.get().partner(), present)
+          || tag.get().away().dot(missingAway) < SAME_AWAY_DOT
+          || pairs.pairOf(name).isPresent()) {
+        continue;
+      }
+      if (found != null) {
+        // 不止一辆像：认不准，不改
+        return pair;
+      }
+      found = name;
+    }
+    if (found != null) {
+      String name = found;
+      CoLocatedPairs.Pair renamed =
+          firstLive
+              ? new CoLocatedPairs.Pair(
+                  pair.first(),
+                  name,
+                  pair.worldId(),
+                  pair.shared(),
+                  pair.awayFirst(),
+                  pair.awaySecond())
+              : new CoLocatedPairs.Pair(
+                  name,
+                  pair.second(),
+                  pair.worldId(),
+                  pair.shared(),
+                  pair.awayFirst(),
+                  pair.awaySecond());
+      pairs.register(renamed);
+      Vector presentAway = firstLive ? pair.awayFirst() : pair.awaySecond();
+      liveProperties(present)
+          .ifPresent(
+              partner ->
+                  TrainTagHelper.writeTag(partner, TAG_CO_LOCATED, formatTag(name, presentAway)));
+      plugin
+          .getLoggerManager()
+          .debug("COUPLER_PAIR_RENAMED from=" + missing + " to=" + name + " partner=" + present);
+      return renamed;
+    }
+    return pair;
   }
 
   private void dissolve(

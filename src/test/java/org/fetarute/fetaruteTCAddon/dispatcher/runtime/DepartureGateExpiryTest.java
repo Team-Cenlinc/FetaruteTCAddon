@@ -199,6 +199,30 @@ class DepartureGateExpiryTest {
     assertFalse(service.hasDepartureGate("train-A"), "冻结前已握的 120 秒不得被抄掉");
   }
 
+  /** 停站任务还活着时续锁：长停站（等车掌、等联挂、解下的车等下一班）不被持锁超时清掉；续的必须是同一个会话，而且锁已经不在时不得重新挂上。 */
+  @Test
+  void renewingKeepsALiveSessionButNeverRevivesOrStealsAGate() {
+    AtomicReference<Instant> now = new AtomicReference<>(T0);
+    RuntimeDispatchService service = TestServices.minimal(new ArrayList<>(), now::get);
+
+    service.acquireDepartureGate("train-A", "session-1", "autostation_dwell");
+    for (long second = 60; second <= 600; second += 60) {
+      now.set(T0.plus(Duration.ofSeconds(second)));
+      service.renewDepartureGate("train-A", "session-1");
+    }
+    now.set(T0.plus(Duration.ofSeconds(600 + 170)));
+    assertTrue(service.hasDepartureGate("train-A"), "持锁的停站任务一直在续，锁不得超时");
+
+    // 别的会话续不动这把锁：它照旧按上一次真正续上的时刻超时
+    service.renewDepartureGate("train-A", "session-other");
+    now.set(T0.plus(Duration.ofSeconds(600 + 181)));
+    assertFalse(service.hasDepartureGate("train-A"), "不是持锁会话的续锁不得生效");
+
+    // 锁已经不在：续锁不得把它重新挂上
+    service.renewDepartureGate("train-A", "session-1");
+    assertFalse(service.hasDepartureGate("train-A"), "续锁只延长还在的锁，不重新取锁");
+  }
+
   /** 按生产节奏推进时钟：每 {@code stepSeconds} 一拍，每拍都告诉调度器已经跳动。 */
   private static void tickFor(
       RuntimeDispatchService service,

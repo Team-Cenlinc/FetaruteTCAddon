@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling;
 
 import java.util.Objects;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -12,6 +13,7 @@ public final class CouplingRuntime {
 
   private final CouplingOperations operations = new CouplingOperations();
   private final Consumer<String> physicalRehydration;
+  private volatile BiConsumer<String, String> renameListener = (from, to) -> {};
 
   /**
    * @param physicalRehydration 忘掉这列车已认定的物理车身，下一次信号检查按现场车身重新占用
@@ -33,6 +35,31 @@ public final class CouplingRuntime {
   public void requestPhysicalRehydration(String trainName) {
     if (trainName != null && !trainName.isBlank()) {
       physicalRehydration.accept(trainName);
+    }
+  }
+
+  /**
+   * 接收调度改名（待命复用接下一趟等）的通知：拆挂服务据此把同股道列车对立即迁到新名下。改名与新一趟的授权在同一拍，等定时维护再迁， 这一拍新名对不上豁免，授权失败丢掉共用的资源。 传入
+   * {@code null} 恢复为不通知。
+   */
+  public void setRenameListener(BiConsumer<String, String> listener) {
+    this.renameListener = listener == null ? (from, to) -> {} : listener;
+  }
+
+  /**
+   * 调度改了列车的逻辑车名（占用账本已迁到新名）。监听方出错不影响改名。
+   *
+   * @param from 旧名
+   * @param to 新名
+   */
+  public void renamed(String from, String to) {
+    if (from == null || to == null || from.equals(to)) {
+      return;
+    }
+    try {
+      renameListener.accept(from, to);
+    } catch (RuntimeException ignored) {
+      // 列车对迁不过去时由定时维护按标签兜底
     }
   }
 }

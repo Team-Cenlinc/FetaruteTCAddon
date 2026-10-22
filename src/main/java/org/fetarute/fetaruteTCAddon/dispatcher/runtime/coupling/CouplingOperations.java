@@ -52,6 +52,11 @@ public final class CouplingOperations {
     return false;
   }
 
+  /** 此刻是否正在一次插件自己发起的拆分/联挂调用里。调用里 TrainCarts 同步发出的站牌事件都来自这次拓扑变化（拆下的一半此刻还带着 TrainCarts 的临时车名）。 */
+  public boolean inProgress() {
+    return !active.isEmpty();
+  }
+
   /** 一次登记的范围：关闭时只撤销这一次加进来的编组。 */
   public final class Scope implements AutoCloseable {
 

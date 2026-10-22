@@ -29,8 +29,9 @@ class DoorCarsTest {
   @DisplayName("没有停车位置标或没写 door: 时全车开门")
   void allWithoutDoorSpec() {
     assertSame(DoorCars.ALL, DoorCars.select(null, train));
-    assertSame(DoorCars.ALL, DoorCars.select(sign(""), train));
-    assertSame(DoorCars.ALL, DoorCars.select(sign("door:*"), train));
+    assertTrue(DoorCars.select(sign(""), train).all());
+    assertTrue(DoorCars.select(sign("door:*"), train).all());
+    assertTrue(DoorCars.select(sign(""), train).includes(UUID.randomUUID()));
     assertTrue(DoorCars.ALL.all());
     assertTrue(DoorCars.ALL.includes(UUID.randomUUID()));
   }
@@ -44,6 +45,53 @@ class DoorCarsTest {
     assertFalse(cars.includes(second));
     assertFalse(cars.includes(fourth));
     assertFalse(cars.includes(null));
+  }
+
+  @Test
+  @DisplayName("停站中挂上来的车厢：没有标志时都开；标志对得上整列节数时照它选；只对得上先到那列的节数时不开")
+  void joinedCarsFollowTheSameMark() {
+    List<UUID> trunk = List.of(first, second);
+    java.util.Set<UUID> joined = java.util.Set.of(third, fourth);
+
+    DoorCars all = DoorCars.ALL.joined(train, joined);
+    assertFalse(all.all(), "只含挂上来的那几节");
+    assertTrue(all.includes(third));
+    assertTrue(all.includes(fourth));
+    assertFalse(all.includes(first), "原来那几节的门已经开着");
+
+    DoorCars marked = DoorCars.select(sign("door:1-3"), trunk).joined(train, joined);
+    assertTrue(marked.includes(third), "第三节在 door:1-3 里");
+    assertFalse(marked.includes(fourth), "第四节在站台外");
+    assertFalse(marked.includes(first));
+
+    StopMarkSign forTwo = StopMarkSign.parse("car:2", "").orElseThrow();
+    DoorCars ownLength = DoorCars.select(forTwo, trunk).joined(train, joined);
+    assertFalse(ownLength.includes(third), "标志是两节车的：挂上后四节，后两节多半在站台外");
+    StopMarkSign forFour = StopMarkSign.parse("car:4", "").orElseThrow();
+    assertTrue(DoorCars.select(forFour, trunk).joined(train, joined).includes(fourth));
+
+    assertFalse(DoorCars.only(first).joined(train, joined).includes(third), "只有一节的不扩");
+  }
+
+  @Test
+  @DisplayName("并上挂上来的车厢：按标志选的取并集，全车开门的还是全车")
+  void plusJoinedCars() {
+    DoorCars front = DoorCars.select(sign("door:1"), train);
+    DoorCars more =
+        DoorCars.select(sign("door:1-3"), List.of(first, second))
+            .joined(train, java.util.Set.of(third, fourth));
+    DoorCars union = front.plus(more);
+    assertTrue(union.includes(first));
+    assertTrue(union.includes(third));
+    assertFalse(union.includes(second));
+    assertFalse(union.includes(fourth));
+    assertSame(DoorCars.ALL, DoorCars.ALL.plus(more));
+
+    DoorCars trunkOnly = DoorCars.ALL.restrictTo(java.util.Set.of(first, second));
+    assertFalse(trunkOnly.all());
+    assertTrue(trunkOnly.includes(second));
+    assertFalse(trunkOnly.includes(third), "全车开门改成明确的几节：没开门的挂上来的车厢不在内");
+    assertTrue(trunkOnly.plus(more).includes(third));
   }
 
   @Test

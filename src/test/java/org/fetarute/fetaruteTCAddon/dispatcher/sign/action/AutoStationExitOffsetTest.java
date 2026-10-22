@@ -124,6 +124,26 @@ class AutoStationExitOffsetTest {
   }
 
   @Test
+  @DisplayName("停站中挂上来、跟着开门的车厢：当场按同一方位登记，发车前一起撤销")
+  void joinedCarsGetTheSameExitAndAreRemovedTogether() {
+    UUID trunk = UUID.randomUUID();
+    UUID joined = UUID.randomUUID();
+    AutoStationSignAction.StationExitState state =
+        new AutoStationSignAction.StationExitState(List.of(trunk));
+    state.apply(BlockFace.SOUTH, 3.0);
+    state.add(List.of(joined, trunk));
+
+    MemberBeforeSeatExitEvent fromJoined = exit(joined, false);
+    listener.onSeatExit(fromJoined);
+    assertEquals(23.0, landed(fromJoined).getZ(), 1e-9, "南是 +Z");
+
+    state.restore();
+    MemberBeforeSeatExitEvent departed = exit(joined, false);
+    listener.onSeatExit(departed);
+    verify(departed, never()).setExitPosition(any(), anyBoolean());
+  }
+
+  @Test
   @DisplayName("方位不是水平方向、距离无效时不登记")
   void invalidSidesAreNotRegistered() {
     AutoStationSignAction.StationExitState state =

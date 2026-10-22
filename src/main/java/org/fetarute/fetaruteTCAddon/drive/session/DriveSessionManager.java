@@ -1777,7 +1777,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return;
     }
     MinecartMember<?> member = MinecartMemberStore.getFromEntity(clicked);
-    MinecartGroup group = member == null ? null : member.getGroup();
+    // 车厢刚被移走（存车、拆挂、销毁）的同一拍里也会点到：这时取编组 TrainCarts 会抛异常
+    MinecartGroup group =
+        member == null || member.isUnloaded() || clicked.isDead() || !clicked.isValid()
+            ? null
+            : member.getGroup();
     if (group == null || group.getProperties() == null) {
       return;
     }

@@ -109,6 +109,10 @@ class TimetableJoinRuntimeTest {
     return new TimetableService.DutyKey(table.id(), table.duties().get(1).id(), DAY);
   }
 
+  private TimetableService.DutyKey trunkKey(Timetable table) {
+    return new TimetableService.DutyKey(table.id(), table.duties().get(0).id(), DAY);
+  }
+
   @Test
   void theTrunkFindsTheFeederJoiningItsRunningTrip() {
     Timetable table = start();
@@ -127,14 +131,63 @@ class TimetableJoinRuntimeTest {
   void theFeederWaitsOnlyWhileTheTrunkIsStillComing() {
     Timetable table = start();
     service.bindDuty("feeder", feederKey(table), "test");
-    assertEquals(Optional.of(""), service.joinTrunkOf("feeder"), "主干交路还没有车：不会来");
+    TimetableService.JoinTrunk pending = service.joinTrunkOf("feeder").orElseThrow();
+    assertTrue(pending.coming(), "主干交路还没出车、首班没误：会来");
+    assertTrue(pending.train().isEmpty());
+    assertEquals(Optional.of(trunkKey(table)), pending.duty());
 
     service.scheduledDepartureAt(event("trunk", 0, T0));
-    assertEquals(Optional.of("trunk"), service.joinTrunkOf("feeder"));
+    TimetableService.JoinTrunk running = service.joinTrunkOf("feeder").orElseThrow();
+    assertTrue(running.coming());
+    assertEquals(Optional.of("trunk"), running.train());
 
     clock.set(Instant.parse("2026-03-02T08:10:05Z"));
     service.scheduledDepartureAt(event("trunk", 0, clock.get()));
-    assertEquals(Optional.of(""), service.joinTrunkOf("feeder"), "主干已经跑上下一班：那一班过去了");
+    assertFalse(service.joinTrunkOf("feeder").orElseThrow().coming(), "主干已经跑上下一班：那一班过去了");
+  }
+
+  /** 出库豁免只给开那一班主干的票：同一交路的别的班、回程支线交路自己的票都不算。 */
+  @Test
+  void onlyTheTicketForTheJoinedTrunkTripRunsIt() {
+    Timetable table = start();
+    service.bindDuty("feeder", feederKey(table), "test");
+    TimetableService.JoinTrunk pending = service.joinTrunkOf("feeder").orElseThrow();
+
+    assertTrue(pending.runBy(ticket(table, 0, 0)));
+    assertFalse(pending.runBy(ticket(table, 0, 1)), "主干的第二班不联挂");
+    assertFalse(pending.runBy(ticket(table, 1, 0)), "回程支线交路自己的票");
+    assertFalse(TimetableService.JoinTrunk.NOT_COMING.runBy(ticket(table, 0, 0)));
+    assertFalse(
+        pending.runBy(
+            new TimetableService.TicketIntent(
+                table.id(),
+                table.duties().get(0).id(),
+                DAY,
+                org.fetarute.fetaruteTCAddon.company.model.RouteOperationType.CREATE,
+                0)),
+        "出库走行票开的是出库线路");
+  }
+
+  private static TimetableService.TicketIntent ticket(Timetable table, int duty, int tripIndex) {
+    return new TimetableService.TicketIntent(
+        table.id(),
+        table.duties().get(duty).id(),
+        DAY,
+        org.fetarute.fetaruteTCAddon.company.model.RouteOperationType.OPERATION,
+        tripIndex);
+  }
+
+  /** 主干交路一直没出车：首班过了发车容差、也没有票在等车，就不会来了；票还在等车（晚出库）时照样等。 */
+  @Test
+  void aTrunkThatNeverLeftTheDepotStopsCountingOnceItsFirstTripIsMissed() {
+    Timetable table = start();
+    service.bindDuty("feeder", feederKey(table), "test");
+    clock.set(Instant.parse("2026-03-02T08:06:00Z"));
+    assertFalse(service.joinTrunkOf("feeder").orElseThrow().coming(), "首班过了发车容差：不会来");
+
+    service.setPendingTicketProbe(
+        intent -> intent.dutyId().equals(table.duties().get(0).id()) && intent.tripIndex() == 0);
+    assertTrue(service.joinTrunkOf("feeder").orElseThrow().coming(), "首班的票还在等车：晚出库，照样等");
   }
 
   /** 站牌按表提前写联挂：主干被并进来的那一班、回程支线的末班各自认得出自己是哪一方，带上两边车底的编组。 */

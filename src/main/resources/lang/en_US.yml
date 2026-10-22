@@ -45,6 +45,7 @@ coupler:
     toggle: "  <white>Right-click the outer end of an end car</white> <gray>Open or lock that coupler; while holding the wrench, nearby outer couplers show green (open) or red (locked) particles</gray>"
     split: "  <white>Right-click the joint between two cars</white> <gray>Uncouple there and lock both ends at the cut; on a dispatched train the detached part gets a new train name</gray>"
     push: "  <white>Shift+right-click an end car with an open coupler</white> <gray>Push the whole train slowly to the train ahead and couple; the facing coupler of that train must be open</gray>"
+    couple: "  <white>Click [Couple] in chat after opening a coupler</white> <gray>This train moves slowly to the train ahead and couples; the facing coupler of that train is opened as well</gray>"
     info: "  <white>Right-click the middle of a car</white> <gray>Show the car number, formation, both couplers and whether it can be worked on</gray>"
   player-only: "<prefix> <red>Only a player can get a coupler wrench</red>"
   unavailable: "<prefix> <red>The coupling service is not ready</red>"
@@ -77,6 +78,10 @@ coupler:
     done: "<prefix> <green>Uncoupled</green> <white><train></white> <gray>(<kept> + <detached> cars, detached train:</gray> <white><name></white><gray>)</gray>"
     rename-failed: "<prefix> <yellow>Uncoupled</yellow> <white><train></white><yellow>, but the detached <detached> car(s) could not get a new train name and will be treated as a duplicate train</yellow>"
     failed: "<prefix> <red>Could not uncouple</red> <white><train></white>"
+  couple:
+    offer: "<prefix> <gray>Train</gray> <white><train></white> <gray>is about <gap> blocks ahead</gray> <click:run_command:'/fta coupler couple <token>'><hover:show_text:'<gray>This train moves slowly to it and couples; its facing coupler is opened as well</gray>'><green>[Couple]</green></hover></click>"
+    none: "<prefix> <yellow>This [Couple] button is no longer valid: open the coupler at the end you want to couple with the wrench again, then click the new [Couple]</yellow>"
+    far: "<prefix> <yellow>You are too far from the train; move closer, then click [Couple]</yellow>"
   push:
     joint: "<prefix> <yellow>This is the joint between two cars; push only from the outer end of an end car</yellow>"
     closed: "<prefix> <yellow>This coupler is locked; right-click to open it first</yellow>"

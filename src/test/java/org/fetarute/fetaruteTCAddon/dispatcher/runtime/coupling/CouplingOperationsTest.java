@@ -24,6 +24,18 @@ class CouplingOperationsTest {
     assertFalse(operations.involves(source), "关闭后撤销登记");
   }
 
+  /** 调用期间 TrainCarts 新生出的编组（拆下的一半）不在登记里，但此刻整体处在拆挂中。 */
+  @Test
+  void anOperationIsInProgressOnlyWhileAScopeIsOpen() {
+    CouplingOperations operations = new CouplingOperations();
+    assertFalse(operations.inProgress());
+
+    try (CouplingOperations.Scope ignored = operations.begin(List.of(new Object()))) {
+      assertTrue(operations.inProgress());
+    }
+    assertFalse(operations.inProgress(), "关闭后不再算");
+  }
+
   @Test
   void identityNotEqualityDecides() {
     CouplingOperations operations = new CouplingOperations();

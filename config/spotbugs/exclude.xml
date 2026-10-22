@@ -7,6 +7,12 @@
         <Method name="getLoggerManager"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 拆挂协作者必须是调度持有的同一实例：插件自己发起的拆挂登记与改名通知都挂在它上面，不能复制。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService"/>
+        <Method name="coupling"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getRailGraphService"/>

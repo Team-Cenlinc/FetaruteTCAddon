@@ -1797,12 +1797,14 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
-   * 以联挂结束的交路的车跑完、在联挂站等主干：它要并进的那一班主干还会不会来（主干那辆车绑着交路、还没跑过那一班、那一班没取消）。
+   * 以联挂结束的交路的车跑完、在联挂站等主干：它要并进的那一班主干还会不会来。
+   *
+   * <p>那一班没取消，且主干交路的车还没跑过那一班；主干交路还没出车时，首班没误点作废（没过发车容差，或票还在等车）就算会来。
    *
    * @param trainName 回程支线车
-   * @return 车的交路不以联挂结束时为空；否则为主干车名（主干不会来时为空串）
+   * @return 车的交路不以联挂结束时为空
    */
-  public Optional<String> joinTrunkOf(String trainName) {
+  public Optional<JoinTrunk> joinTrunkOf(String trainName) {
     String key = keyOf(trainName);
     if (!settings.enabled() || key == null) {
       return Optional.empty();
@@ -1820,7 +1822,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (cancellations
         .find(timetable.id(), trunkTrip.get(), bound.get().serviceDate())
         .isPresent()) {
-      return Optional.of("");
+      return Optional.of(JoinTrunk.NOT_COMING);
     }
     for (VehicleDuty trunk : timetable.duties()) {
       int position = trunk.tripIds().indexOf(trunkTrip.get());
@@ -1829,15 +1831,29 @@ public final class TimetableService implements ScheduledDeparturePlan {
       }
       DutyKey trunkKey = new DutyKey(timetable.id(), trunk.id(), bound.get().serviceDate());
       Optional<String> holder = ledger.holderOf(trunkKey);
+      if (holder.isEmpty()) {
+        BoundDuty pending = new BoundDuty(trunkKey, timetable, trunk.tripIds());
+        boolean missed =
+            pending.trip(0).filter(first -> overdue(pending, first, settings)).isPresent()
+                && !ticketWaiting(pending, 0);
+        return Optional.of(
+            missed
+                ? JoinTrunk.NOT_COMING
+                : new JoinTrunk(true, Optional.empty(), Optional.of(trunkKey), position));
+      }
       boolean coming =
           holder
               .flatMap(ledger::progressOf)
               .filter(p -> p.dutyId().equals(trunk.id()))
               .map(p -> p.assignedTrips() <= position + 1)
               .orElse(false);
-      return Optional.of(coming ? holder.map(ledger::displayName).orElse("") : "");
+      return Optional.of(
+          coming
+              ? new JoinTrunk(
+                  true, holder.map(ledger::displayName), Optional.of(trunkKey), position)
+              : JoinTrunk.NOT_COMING);
     }
-    return Optional.of("");
+    return Optional.of(JoinTrunk.NOT_COMING);
   }
 
   /** 解下的车被派走或不再等子交路：作废它的解编对应。 */
@@ -3358,6 +3374,36 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
     /** 车绑着交路，表上这一班不挂。 */
     public static final JoinPlan NONE = new JoinPlan(true, Optional.empty(), Optional.empty());
+  }
+
+  /**
+   * 回程支线车要并进的那一班主干。
+   *
+   * @param coming 主干还会来
+   * @param train 跑那一班的主干车；主干交路还没出车时为空
+   * @param duty 主干交路；不会来时为空
+   * @param tripIndex 那一班是主干交路的第几班（0 起）；不会来时为 -1
+   */
+  public record JoinTrunk(
+      boolean coming, Optional<String> train, Optional<DutyKey> duty, int tripIndex) {
+
+    /** 主干不会来了：那一班取消了、跑过去了，或主干交路误了首班。 */
+    public static final JoinTrunk NOT_COMING =
+        new JoinTrunk(false, Optional.empty(), Optional.empty(), -1);
+
+    /** 这张票开的就是那一班：同一交路、同一班次的运营票（出库走行票开的是出库线路，不算）。 */
+    public boolean runBy(TicketIntent intent) {
+      return coming
+          && intent != null
+          && intent.kind() == RouteOperationType.OPERATION
+          && intent.tripIndex() == tripIndex
+          && duty.filter(intent.key()::equals).isPresent();
+    }
+
+    public JoinTrunk {
+      train = train == null ? Optional.empty() : train;
+      duty = duty == null ? Optional.empty() : duty;
+    }
   }
 
   /**

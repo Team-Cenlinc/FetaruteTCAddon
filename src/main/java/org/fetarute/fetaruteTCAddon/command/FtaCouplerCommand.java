@@ -10,10 +10,11 @@ import org.fetarute.fetaruteTCAddon.coupler.CouplerService;
 import org.fetarute.fetaruteTCAddon.coupler.CouplerWrenchListener;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
+import org.incendo.cloud.parser.standard.StringParser;
 
 /**
- * 车钩扳手命令：{@code /fta coupler} 查看用法，{@code /fta coupler wrench} 领取扳手（权限 {@code fetarute.coupler}，默认
- * OP）。
+ * 车钩扳手命令：{@code /fta coupler} 查看用法，{@code /fta coupler wrench} 领取扳手，{@code /fta coupler couple
+ * <令牌>} 是开启车钩后聊天栏“连挂”按钮执行的命令（权限 {@code fetarute.coupler}，默认 OP）。
  */
 public final class FtaCouplerCommand {
 
@@ -37,12 +38,35 @@ public final class FtaCouplerCommand {
             .literal("wrench")
             .permission(CouplerWrenchListener.PERMISSION)
             .handler(ctx -> giveWrench(ctx.sender())));
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("coupler")
+            .literal("couple")
+            .required("token", StringParser.stringParser())
+            .permission(CouplerWrenchListener.PERMISSION)
+            .handler(ctx -> couple(ctx.sender(), ctx.get("token"))));
+  }
+
+  /** 聊天栏的“连挂”按钮：让刚用扳手开启车钩的那列车驶向前方列车并连挂。 */
+  private void couple(CommandSender sender, String token) {
+    LocaleManager locale = plugin.getLocaleManager();
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(locale.component("coupler.player-only"));
+      return;
+    }
+    Optional<CouplerService> service = plugin.getCouplerService();
+    if (service.isEmpty()) {
+      sender.sendMessage(locale.component("coupler.unavailable"));
+      return;
+    }
+    service.get().coupleSelected(player, token);
   }
 
   private void sendUsage(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("coupler.usage.header"));
-    for (String line : new String[] {"wrench", "toggle", "split", "push", "info"}) {
+    for (String line : new String[] {"wrench", "toggle", "couple", "split", "push", "info"}) {
       sender.sendMessage(locale.component("coupler.usage." + line));
     }
   }

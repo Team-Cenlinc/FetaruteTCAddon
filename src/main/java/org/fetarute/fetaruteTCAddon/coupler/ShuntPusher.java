@@ -7,6 +7,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -159,6 +160,25 @@ final class ShuntPusher {
     push.names.addAll(service.controlNames(target.member().getGroup()));
     push.names.forEach(ShuntingRegistry::begin);
     push.action = group.getActions().addAction(new PushAction(push));
+    BlockFace heading = mover.getDirection();
+    debug(
+        "SHUNT_PUSH_START train="
+            + service.displayName(group)
+            + " target="
+            + service.displayName(target.member().getGroup())
+            + String.format(Locale.ROOT, " gap=%.2f speed=%.3f", target.gap(), speed)
+            + " reversed="
+            + push.reversed
+            + " moverIsHead="
+            + (group.head() == mover)
+            + " heading="
+            + heading
+            + String.format(Locale.ROOT, " outward=(%.2f,%.2f)", outward.getX(), outward.getZ())
+            + String.format(
+                Locale.ROOT,
+                " speedLimit=%.3f->%.3f",
+                push.savedSpeedLimit,
+                properties.getSpeedLimit()));
     active.put(group, push);
     ensureWatchdog();
   }
@@ -252,6 +272,20 @@ final class ShuntPusher {
       return Step.WRONG_WAY;
     }
     double travelled = moverAt.get().distance(push.start);
+    if (push.ticks == STALL_TICKS / 2) {
+      debug(
+          "SHUNT_PUSH_PROGRESS train="
+              + service.displayName(push.group)
+              + " ticks="
+              + push.ticks
+              + String.format(
+                  Locale.ROOT,
+                  " travelled=%.2f gap=%.2f velocity=%.4f moving=%s",
+                  travelled,
+                  gap,
+                  push.group.head().getRealSpeed(),
+                  push.group.isMoving()));
+    }
     if (travelled > push.budget) {
       return Step.OVERRUN;
     }
@@ -259,6 +293,13 @@ final class ShuntPusher {
       return Step.STALLED;
     }
     return Step.CONTINUE;
+  }
+
+  private void debug(String message) {
+    if (plugin instanceof org.fetarute.fetaruteTCAddon.FetaruteTCAddon addon
+        && addon.getLoggerManager() != null) {
+      addon.getLoggerManager().debug(message);
+    }
   }
 
   /** 停车（不再施力、速度归零）。 */
@@ -272,6 +313,17 @@ final class ShuntPusher {
   /** 推车动作结束：等列车停稳后去挂，或直接收尾。 */
   private void finish(Push push, Step step) {
     push.finishing = true;
+    debug(
+        "SHUNT_PUSH_END train="
+            + service.displayName(push.group)
+            + " step="
+            + step
+            + " ticks="
+            + push.ticks
+            + String.format(
+                Locale.ROOT,
+                " travelled=%.2f",
+                CarEnds.center(push.mover).map(at -> at.distance(push.start)).orElse(Double.NaN)));
     halt(push);
     settle(push, step, 0);
   }

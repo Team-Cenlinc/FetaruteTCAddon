@@ -18,6 +18,7 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistDispatchArbiter;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -71,12 +72,18 @@ final class CallPlanner {
    * @param routeId 开进终点的交路
    * @param entry 在那条交路上的生成点
    * @param departSeconds 预计几秒后从终点折返开出；估不出时为空
+   * @param consist 折返车要出的车型（照叫车交路的编组方案挑，开进来正好接得走）；叫车交路没绑方案时为空，照那条交路的编组出车
    */
-  record Turnback(UUID routeId, Entry entry, OptionalInt departSeconds) {
+  record Turnback(UUID routeId, Entry entry, OptionalInt departSeconds, Optional<String> consist) {
     Turnback {
       Objects.requireNonNull(routeId, "routeId");
       Objects.requireNonNull(entry, "entry");
       Objects.requireNonNull(departSeconds, "departSeconds");
+      consist = consist == null ? Optional.empty() : consist;
+    }
+
+    Turnback(UUID routeId, Entry entry, OptionalInt departSeconds) {
+      this(routeId, entry, departSeconds, Optional.empty());
     }
   }
 
@@ -178,7 +185,9 @@ final class CallPlanner {
 
   private final FetaruteTCAddon plugin;
   private final Map<UUID, CachedTiming> timings = new ConcurrentHashMap<>();
-  private final Map<UUID, RouteGeometry> geometries = new ConcurrentHashMap<>();
+
+  /** 按交路与车长各存一份：同一条交路当区间生成车源按自己的编组量，当折返车按叫车交路方案的车型量，两种车长不来回重建。 */
+  private final Map<GeometryKey, RouteGeometry> geometries = new ConcurrentHashMap<>();
 
   /** 各交路的车长（格）：量车长要把编组方案连同各车厢的存档整个解析一遍，站台屏每次判定都要用，按交路记住。 */
   private final Map<UUID, Long> trainLengths = new ConcurrentHashMap<>();
@@ -289,7 +298,10 @@ final class CallPlanner {
         inboundRoutes(cache.entries(), route.routeId())) {
       RouteDefinition definition = inbound.definition();
       Optional<WorldGraph> graph = graphOf(definition);
-      if (graph.isEmpty()) {
+      // 接车只认叫车交路方案里的车型：挑不出两边都认的车型时，这条交路的折返车开进来也没人接
+      ConsistDispatchArbiter.TurnbackConsist consist =
+          turnbackConsist(inbound.routeId(), route.routeId());
+      if (graph.isEmpty() || !consist.possible()) {
         continue;
       }
       int terminal = definition.waypoints().size() - 1;
@@ -300,7 +312,7 @@ final class CallPlanner {
               inbound.stops(),
               terminal,
               graph.get(),
-              trainLengthBlocks(inbound.routeId()));
+              turnbackLength(consist, inbound.routeId()));
       if (entry.isEmpty()) {
         continue;
       }
@@ -325,7 +337,8 @@ final class CallPlanner {
                   Source.TURNBACK,
                   Optional.empty(),
                   eta,
-                  Optional.of(new Turnback(inbound.routeId(), entry.get(), depart))));
+                  Optional.of(
+                      new Turnback(inbound.routeId(), entry.get(), depart, consist.consist()))));
     }
     return Optional.ofNullable(best);
   }
@@ -381,11 +394,32 @@ final class CallPlanner {
       return false;
     }
     for (RouteDefinitionCache.RouteEntry inbound : inboundRoutes(cache.get().entries(), routeId)) {
-      if (entryPossible(inbound.routeId(), inbound.definition().waypoints().size() - 1)) {
+      ConsistDispatchArbiter.TurnbackConsist consist = turnbackConsist(inbound.routeId(), routeId);
+      if (consist.possible()
+          && entryPossible(
+              inbound.routeId(),
+              inbound.definition().waypoints().size() - 1,
+              turnbackLength(consist, inbound.routeId()))) {
         return true;
       }
     }
     return false;
+  }
+
+  /** 折返车要出的车型（见 {@link ConsistDispatchArbiter#turnbackConsist}）；车型裁决还没就绪时照旧不限车型。 */
+  private ConsistDispatchArbiter.TurnbackConsist turnbackConsist(
+      UUID inboundRouteId, UUID callRouteId) {
+    Optional<ConsistDispatchArbiter> arbiter = plugin.getConsistArbiter();
+    return arbiter == null || arbiter.isEmpty()
+        ? ConsistDispatchArbiter.TurnbackConsist.ANY
+        : arbiter.get().turnbackConsist(inboundRouteId, callRouteId);
+  }
+
+  /** 折返车的车长：按挑出的车型量；不限车型或量不出来（TrainCarts 还没读入存档车）时按送车交路的编组。 */
+  private long turnbackLength(ConsistDispatchArbiter.TurnbackConsist consist, UUID inboundRouteId) {
+    OptionalLong measured =
+        consist.consist().map(SpawnPatternLength::of).orElse(OptionalLong.empty());
+    return measured.isPresent() ? measured.getAsLong() : trainLengthBlocks(inboundRouteId);
   }
 
   /**
@@ -481,6 +515,11 @@ final class CallPlanner {
    * @return 交路或调度图查不到时为 false
    */
   boolean entryPossible(UUID routeId, int stopIndex) {
+    return entryPossible(routeId, stopIndex, trainLengthBlocks(routeId));
+  }
+
+  /** 同上，按给定车长量（折返车按叫车交路方案挑的车型量）。 */
+  private boolean entryPossible(UUID routeId, int stopIndex, long trainLength) {
     Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
     Optional<RouteDefinition> definition = cache.flatMap(c -> c.findById(routeId));
     Optional<WorldGraph> graph = definition.flatMap(this::graphOf);
@@ -488,7 +527,7 @@ final class CallPlanner {
       return false;
     }
     List<RouteStop> stops = cache.get().listStops(definition.get().id());
-    return !geometryOf(routeId, definition.get(), stops, graph.get(), trainLengthBlocks(routeId))
+    return !geometryOf(routeId, definition.get(), stops, graph.get(), trainLength)
         .candidatesFor(stopIndex)
         .isEmpty();
   }
@@ -501,18 +540,20 @@ final class CallPlanner {
       WorldGraph worldGraph,
       long trainLength) {
     Instant now = Instant.now();
-    RouteGeometry cached = geometries.get(routeId);
-    if (cached != null
-        && cached.trainLength() == trainLength
-        && now.isBefore(cached.computedAt().plus(TIMING_TTL))) {
+    GeometryKey key = new GeometryKey(routeId, trainLength);
+    RouteGeometry cached = geometries.get(key);
+    if (cached != null && now.isBefore(cached.computedAt().plus(TIMING_TTL))) {
       return cached;
     }
     RouteGeometry computed =
         RouteGeometry.build(
             now, trainLength, definition.waypoints(), stops, worldGraph.graph(), pathFinder);
-    geometries.put(routeId, computed);
+    geometries.put(key, computed);
     return computed;
   }
+
+  /** 几何缓存的键。 */
+  private record GeometryKey(UUID routeId, long trainLength) {}
 
   /**
    * 交路走的图路径上的一个点。

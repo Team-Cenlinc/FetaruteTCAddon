@@ -606,6 +606,12 @@ public final class SimpleOccupancyManager
     coLocationPolicy = policy == null ? CoLocationPolicy.NONE : policy;
   }
 
+  @Override
+  public boolean exemptsCoLocated(
+      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
+    return coLocatedPartner(request, resource, claim);
+  }
+
   /** 这条别的列车的占用是同股道列车对的共用占用、且请求方正背向对方走：不挡请求方。策略出错时按挡处理。 */
   private boolean coLocatedPartner(
       OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
@@ -2719,6 +2725,15 @@ public final class SimpleOccupancyManager
     return Optional.ofNullable(list.get(0));
   }
 
+  @Override
+  public synchronized List<OccupancyClaim> claimsOn(OccupancyResource resource) {
+    if (resource == null) {
+      return List.of();
+    }
+    List<OccupancyClaim> list = claims.get(resource);
+    return list == null || list.isEmpty() ? List.of() : List.copyOf(list);
+  }
+
   /**
    * 获取全部占用快照。
    *
@@ -3825,6 +3840,10 @@ public final class SimpleOccupancyManager
       return false;
     }
     if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+      return false;
+    }
+    // 与 canEnter 同一口径：硬授权放行的同股道列车对、联挂进站的对方，前瞻也不当成前方风险
+    if (coLocatedPartner(request, resource, claim)) {
       return false;
     }
     ClaimRole role = claim.role();

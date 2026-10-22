@@ -21,7 +21,10 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
+import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.scheduler.BukkitTask;
@@ -65,7 +68,28 @@ public final class CouplerWrenchListener implements Listener {
   private final WrenchItem wrench;
   private final ShuntPusher pusher;
   private final Map<UUID, Long> lastClick = new HashMap<>();
+
+  /** 玩家刚用扳手开启、前方有车可挂的那一端：聊天栏的“连挂”按钮（{@code /fta coupler couple <令牌>}）照它开过去。 */
+  private final Map<UUID, Selection> selections = new HashMap<>();
+
   private BukkitTask showTask;
+
+  /** 选中的那一端在聊天栏按钮上留多久（tick）。 */
+  private static final long SELECTION_TICKS = 1200L;
+
+  /** 点“连挂”按钮时离那列车最远多少格。 */
+  private static final double COUPLE_REACH_BLOCKS = 24.0;
+
+  /**
+   * 选中要去连挂的那一端。
+   *
+   * @param token 按钮上的令牌：只认最近一次选中的那个按钮
+   * @param member 端车
+   * @param end 开着车钩的那一端
+   * @param tick 选中时的 tick
+   */
+  private record Selection(
+      String token, MinecartMember<?> member, CouplerState.End end, long tick) {}
 
   public CouplerWrenchListener(FetaruteTCAddon plugin, CouplerService service, WrenchItem wrench) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -99,16 +123,151 @@ public final class CouplerWrenchListener implements Listener {
       return;
     }
     MinecartMember<?> member = MinecartMemberStore.getFromEntity(event.getRightClicked());
-    if (member == null || member.getGroup() == null || !member.getGroup().isValid()) {
+    // 先判车厢还在：刚被移走的车厢取编组 TrainCarts 会抛异常
+    if (member == null
+        || member.isUnloaded()
+        || member.getGroup() == null
+        || !member.getGroup().isValid()) {
       return;
     }
     // 拿着扳手点车厢不上车（副手那一次也要拦）。
     event.setCancelled(true);
-    if (event.getHand() != EquipmentSlot.HAND || debounced(player)) {
+    if (event.getHand() != EquipmentSlot.HAND) {
+      return;
+    }
+    handleClick(player, member);
+  }
+
+  /**
+   * 拿着扳手点到方块或空中：扳手本身是绊线钩，不放下去；按 TrainCarts 自己的命中检测（{@link
+   * MinecartMemberStore#getFromHitTest}）点中了车厢时按点中那节车处理。 不按 Shift 时 TrainCarts 自己就把这种点击换成点车厢；按住
+   * Shift 时它放过不管（好让玩家照常用方块），Shift+右键推车就落到了方块上。
+   */
+  @EventHandler(priority = EventPriority.LOWEST)
+  public void onInteractBlock(PlayerInteractEvent event) {
+    if (event.getAction() != Action.RIGHT_CLICK_BLOCK
+        && event.getAction() != Action.RIGHT_CLICK_AIR) {
+      return;
+    }
+    Player player = event.getPlayer();
+    boolean wrenchInThisHand = wrench.isWrench(event.getItem());
+    boolean wrenchInMainHand = wrench.isWrench(player.getInventory().getItemInMainHand());
+    if (!wrenchInThisHand && !wrenchInMainHand) {
+      return;
+    }
+    if (wrenchInThisHand) {
+      // 扳手不放下去；门、按钮这类方块照常能用，除非点中的是车厢
+      event.setUseItemInHand(org.bukkit.event.Event.Result.DENY);
+    }
+    MinecartMember<?> member = MinecartMemberStore.getFromHitTest(player.getEyeLocation());
+    boolean car =
+        member != null
+            && member.isInteractable()
+            && member.getGroup() != null
+            && member.getGroup().isValid();
+    if (car && wrenchInMainHand) {
+      // 点的是车：方块不触发，另一只手的东西也不用
+      event.setUseInteractedBlock(org.bukkit.event.Event.Result.DENY);
+      event.setUseItemInHand(org.bukkit.event.Event.Result.DENY);
+    }
+    if (event.getAction() == Action.RIGHT_CLICK_BLOCK
+        && event.useItemInHand() == org.bukkit.event.Event.Result.DENY) {
+      // 客户端已经预先放下、把手里的数量减了一：同步回去
+      player.updateInventory();
+    }
+    if (car && wrenchInMainHand && event.getHand() == EquipmentSlot.HAND) {
+      handleClick(player, member);
+    }
+  }
+
+  /** 拿着扳手不放方块（点到方块的交互已经拦下，这里兜底）。 */
+  @EventHandler(priority = EventPriority.LOWEST)
+  public void onPlace(BlockPlaceEvent event) {
+    if (wrench.isWrench(event.getItemInHand())) {
+      event.setCancelled(true);
+    }
+  }
+
+  /**
+   * 聊天栏的“连挂”按钮：让刚用扳手打开车钩的那列车慢慢开向前方的车并挂上（对方相对一端的车钩没开时一并打开）。
+   *
+   * @param player 点按钮的玩家
+   */
+  public void coupleSelected(Player player, String token) {
+    Selection selection = selections.get(player.getUniqueId());
+    if (selection == null || token == null || !selection.token().equals(token)) {
+      player.sendMessage(locale().component("coupler.couple.none"));
+      return;
+    }
+    MinecartMember<?> member = selection.member();
+    // 先判车厢还在：被删掉的车厢取编组 TrainCarts 会抛异常
+    if (Bukkit.getCurrentTick() - selection.tick() > SELECTION_TICKS
+        || !member.isInteractable()
+        || member.getGroup() == null
+        || !member.getGroup().isValid()) {
+      selections.remove(player.getUniqueId(), selection);
+      player.sendMessage(locale().component("coupler.couple.none"));
+      return;
+    }
+    MinecartGroup group = member.getGroup();
+    // 选中以后这一端挂上了别的车、或这节已不是端车：按钮作废
+    if (CarEnds.neighbourAt(member, selection.end()).isPresent()
+        || (group.head() != member && group.tail() != member)) {
+      selections.remove(player.getUniqueId(), selection);
+      player.sendMessage(locale().component("coupler.couple.none"));
+      return;
+    }
+    ConfigManager.CouplerSettings settings = service.settings();
+    if (!player.hasPermission(PERMISSION) || !settings.enabled()) {
+      player.sendMessage(
+          locale().component(settings.enabled() ? "coupler.no-permission" : "coupler.disabled"));
       return;
     }
     if (plugin.getDriveSessionManager() != null
         && plugin.getDriveSessionManager().isProtected(player.getUniqueId())) {
+      return;
+    }
+    Vector at = player.getLocation().toVector();
+    if (group.getWorld() != player.getWorld()
+        || CarEnds.center(member)
+            .map(center -> center.distanceSquared(at) > COUPLE_REACH_BLOCKS * COUPLE_REACH_BLOCKS)
+            .orElse(true)) {
+      player.sendMessage(locale().component("coupler.couple.far"));
+      return;
+    }
+    trace(
+        "WRENCH_COUPLE player="
+            + player.getName()
+            + " train="
+            + service.displayName(group)
+            + " end="
+            + selection.end());
+    // 暂时推不了（对方忙、正在跑别的动作等）时选择留着，过一会儿还能再点
+    if (push(player, member, selection.end(), settings, true)) {
+      selections.remove(player.getUniqueId(), selection);
+    }
+  }
+
+  /** 拿着扳手点中车厢：按点中的位置开闭车钩、解挂、推车或看信息。 */
+  private void handleClick(Player player, MinecartMember<?> member) {
+    String clicked =
+        "player="
+            + player.getName()
+            + " train="
+            + service.displayName(member.getGroup())
+            + " car="
+            + (member.getGroup().indexOf(member) + 1)
+            + "/"
+            + member.getGroup().size()
+            + " sneaking="
+            + player.isSneaking();
+    if (debounced(player)) {
+      trace("WRENCH_CLICK " + clicked + " result=debounced");
+      return;
+    }
+    if (plugin.getDriveSessionManager() != null
+        && plugin.getDriveSessionManager().isProtected(player.getUniqueId())) {
+      trace("WRENCH_CLICK " + clicked + " result=drive-protected");
       return;
     }
     if (!player.hasPermission(PERMISSION)) {
@@ -123,6 +282,7 @@ public final class CouplerWrenchListener implements Listener {
     Optional<Vector> center = CarEnds.center(member);
     Optional<Vector> forward = CarEnds.forward(member);
     if (center.isEmpty() || forward.isEmpty()) {
+      trace("WRENCH_CLICK " + clicked + " result=no-orientation");
       return;
     }
     Location eye = player.getEyeLocation();
@@ -135,28 +295,35 @@ public final class CouplerWrenchListener implements Listener {
             CarEnds.halfLength(member));
     Optional<CouplerState.End> end = spot.end();
     if (end.isEmpty()) {
+      trace("WRENCH_CLICK " + clicked + " result=info");
       showInfo(player, member);
       return;
     }
     Optional<MinecartMember<?>> neighbour = CarEnds.neighbourAt(member, end.get());
+    String at = clicked + " end=" + end.get() + " open=" + CouplerState.isOpen(member, end.get());
     if (neighbour.isPresent()) {
       if (player.isSneaking()) {
+        trace("WRENCH_CLICK " + at + " result=push-at-joint");
         player.sendMessage(locale().component("coupler.push.joint"));
         return;
       }
+      trace("WRENCH_CLICK " + at + " result=split");
       split(player, member, end.get(), neighbour.get());
       return;
     }
     if (player.isSneaking()) {
-      push(player, member, end.get(), settings);
+      trace("WRENCH_CLICK " + at + " result=push");
+      push(player, member, end.get(), settings, false);
       return;
     }
-    toggle(player, member, end.get());
+    trace("WRENCH_CLICK " + at + " result=toggle");
+    toggle(player, member, end.get(), settings);
   }
 
   @EventHandler
   public void onQuit(PlayerQuitEvent event) {
     lastClick.remove(event.getPlayer().getUniqueId());
+    selections.remove(event.getPlayer().getUniqueId());
   }
 
   private boolean debounced(Player player) {
@@ -167,8 +334,12 @@ public final class CouplerWrenchListener implements Listener {
 
   // ---------------------------------------------------------------- 三种操作
 
-  /** 开/锁端车外端的车钩。 */
-  private void toggle(Player player, MinecartMember<?> member, CouplerState.End end) {
+  /** 开/锁端车外端的车钩；打开后这一端前方有车可挂时，在聊天栏给出“连挂”按钮。 */
+  private void toggle(
+      Player player,
+      MinecartMember<?> member,
+      CouplerState.End end,
+      ConfigManager.CouplerSettings settings) {
     MinecartGroup group = member.getGroup();
     if (pusher.involved(group)) {
       player.sendMessage(locale().component("coupler.busy"));
@@ -202,6 +373,33 @@ public final class CouplerWrenchListener implements Listener {
                     String.valueOf(group.indexOf(member) + 1),
                     "end",
                     endLabel(group, end))));
+    Selection selected = selections.get(player.getUniqueId());
+    if (selected != null && selected.member() == member && selected.end() == end) {
+      // 锁上（或重新开启）的正是选中的那一端：旧按钮作废
+      selections.remove(player.getUniqueId(), selected);
+    }
+    if (!open) {
+      return;
+    }
+    PushTargetFinder.Search search = PushTargetFinder.find(member, end, settings.pushMaxBlocks());
+    if (search.target().isEmpty()) {
+      return;
+    }
+    String token =
+        Integer.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextInt(0x1000000));
+    selections.put(
+        player.getUniqueId(), new Selection(token, member, end, Bukkit.getCurrentTick()));
+    player.sendMessage(
+        locale()
+            .component(
+                "coupler.couple.offer",
+                Map.of(
+                    "train",
+                    service.displayName(search.target().get().member().getGroup()),
+                    "gap",
+                    String.format(Locale.ROOT, "%.1f", search.target().get().gap()),
+                    "token",
+                    token)));
   }
 
   /** 在 {@code member} 的 {@code end} 一端（挨着 {@code neighbour}）拆开。 */
@@ -261,78 +459,112 @@ public final class CouplerWrenchListener implements Listener {
                     detachedName)));
   }
 
-  /** 把端车所在列车推向 {@code end} 一侧前方的车并挂上。 */
-  private void push(
+  /**
+   * 把端车所在列车推向 {@code end} 一侧前方的车并挂上。
+   *
+   * @param openTarget 对方相对一端的车钩锁着时一并开启（玩家点了“连挂”按钮，就是要挂这两列；没挂上时锁回去）；否则锁着就不推
+   * @return 开始推了
+   */
+  private boolean push(
       Player player,
       MinecartMember<?> member,
       CouplerState.End end,
-      ConfigManager.CouplerSettings settings) {
+      ConfigManager.CouplerSettings settings,
+      boolean openTarget) {
     MinecartGroup group = member.getGroup();
+    String trainName = service.displayName(group);
     if (!CouplerState.isOpen(member, end)) {
+      pushRefused(trainName, "closed");
       player.sendMessage(locale().component("coupler.push.closed"));
-      return;
+      return false;
     }
     if (pusher.involved(group)) {
+      pushRefused(trainName, "busy");
       player.sendMessage(locale().component("coupler.busy"));
-      return;
+      return false;
     }
     CouplerEligibility.Verdict verdict = service.eligibility(group);
     if (verdict != CouplerEligibility.Verdict.ALLOWED) {
+      pushRefused(trainName, "verdict:" + verdict.key());
       deny(player, group, verdict);
-      return;
+      return false;
     }
     // 停站留下的等待动作推车时清掉（没挂上再补回）；别的动作（发车、居中）在跑时不推。
     if (group.getActions().getScheduledActions().stream()
         .anyMatch(action -> !(action instanceof WaitAction))) {
+      pushRefused(
+          trainName,
+          "actions:"
+              + group.getActions().getScheduledActions().stream()
+                  .map(action -> action.getClass().getSimpleName())
+                  .toList());
       player.sendMessage(
           locale().component("coupler.push.actions", Map.of("train", service.displayName(group))));
-      return;
+      return false;
     }
     PushTargetFinder.Search search = PushTargetFinder.find(member, end, settings.pushMaxBlocks());
     if (search.target().isEmpty()) {
       PushTargetFinder.Failure failure =
           search.failure().orElse(PushTargetFinder.Failure.NOT_FOUND);
+      pushRefused(trainName, "target:" + failure);
       player.sendMessage(
           locale()
               .component(
                   "coupler.push.target."
-                      + failure.name().toLowerCase(Locale.ROOT).replace('_', '-'),
+                      // 前方区块没加载：玩家看得见的范围里没有车，按没找到说
+                      + (failure == PushTargetFinder.Failure.UNLOADED_AHEAD
+                              ? PushTargetFinder.Failure.NOT_FOUND
+                              : failure)
+                          .name()
+                          .toLowerCase(Locale.ROOT)
+                          .replace('_', '-'),
                   Map.of("blocks", String.valueOf(settings.pushMaxBlocks()))));
-      return;
+      return false;
     }
     PushTargetFinder.Target target = search.target().get();
     MinecartGroup other = target.member().getGroup();
     String otherName = service.displayName(other);
     if (pusher.involved(other)) {
+      pushRefused(trainName, "target-busy:" + otherName);
       player.sendMessage(locale().component("coupler.busy"));
-      return;
+      return false;
     }
     CouplerEligibility.Verdict otherVerdict = service.eligibility(other);
     if (otherVerdict != CouplerEligibility.Verdict.ALLOWED) {
+      pushRefused(trainName, "target-verdict:" + otherName + ":" + otherVerdict.key());
       deny(player, other, otherVerdict);
-      return;
+      return false;
     }
     if (service.managed(group) != service.managed(other)) {
+      pushRefused(trainName, "mixed:" + otherName);
       player.sendMessage(locale().component("coupler.push.mixed"));
-      return;
+      return false;
     }
-    if (!CouplerState.isOpen(target.member(), target.end())) {
+    if (!CouplerState.isOpen(target.member(), target.end()) && !openTarget) {
+      pushRefused(trainName, "target-closed:" + otherName);
       player.sendMessage(
           locale().component("coupler.push.target-closed", Map.of("train", otherName)));
-      return;
+      return false;
     }
     if (service.managed(group) && !service.pushPathGuarded(group, other, target.pathCells())) {
+      pushRefused(trainName, "path-unguarded:" + otherName);
       player.sendMessage(locale().component("coupler.push.path-unguarded"));
-      return;
+      return false;
     }
     int cars = group.size() + other.size();
     if (settings.maxCars() > 0 && cars > settings.maxCars()) {
+      pushRefused(trainName, "too-long:" + cars);
       player.sendMessage(
           locale()
               .component(
                   "coupler.push.too-long",
                   Map.of("cars", String.valueOf(cars), "max", String.valueOf(settings.maxCars()))));
-      return;
+      return false;
+    }
+    boolean openedTarget = !CouplerState.isOpen(target.member(), target.end());
+    if (openedTarget) {
+      CarTags.stampOrigins(other);
+      CouplerState.setOpen(target.member(), target.end(), true);
     }
     player.sendMessage(
         locale()
@@ -347,11 +579,59 @@ public final class CouplerWrenchListener implements Listener {
         target,
         settings.pushSpeedBlocksPerSecond(),
         settings.maxCars(),
-        finished -> report(playerId, otherName, finished));
+        finished -> {
+          // 推的途中被 TrainCarts 碰上就挂上了（推车收尾报“列车不在了”）：照挂上告诉玩家
+          boolean joined =
+              finished.outcome() == ShuntPusher.Outcome.LOST
+                  && member.isInteractable()
+                  && target.member().isInteractable()
+                  && member.getGroup() == target.member().getGroup();
+          if (openedTarget
+              && finished.outcome() != ShuntPusher.Outcome.LINKED
+              && !joined
+              && target.member().isInteractable()
+              && CarEnds.neighbourAt(target.member(), target.end()).isEmpty()) {
+            // 替对方开启的车钩没挂上就锁回去
+            CouplerState.setOpen(target.member(), target.end(), false);
+          }
+          if (joined) {
+            reportJoined(playerId, member.getGroup());
+          } else {
+            report(playerId, otherName, finished);
+          }
+        });
+    return true;
+  }
+
+  /** 推的途中两列车已经挂到一起：告诉玩家挂上了。 */
+  private void reportJoined(UUID playerId, MinecartGroup merged) {
+    trace("WRENCH_PUSH_DONE target=" + service.displayName(merged) + " outcome=JOINED");
+    Player player = Bukkit.getPlayer(playerId);
+    if (player == null) {
+      return;
+    }
+    player.playSound(player.getLocation(), Sound.BLOCK_ANVIL_LAND, 0.4f, 1.6f);
+    player.sendMessage(
+        locale()
+            .component(
+                "coupler.push.linked",
+                Map.of(
+                    "train", service.displayName(merged), "cars", String.valueOf(merged.size()))));
+  }
+
+  private void pushRefused(String trainName, String reason) {
+    trace("WRENCH_PUSH_REFUSED train=" + trainName + " reason=" + reason);
+  }
+
+  private void trace(String message) {
+    if (plugin.getLoggerManager() != null) {
+      plugin.getLoggerManager().debug(message);
+    }
   }
 
   /** 推车收尾告诉玩家。 */
   private void report(UUID playerId, String otherName, ShuntPusher.Finished finished) {
+    trace("WRENCH_PUSH_DONE target=" + otherName + " outcome=" + finished.outcome());
     Player player = Bukkit.getPlayer(playerId);
     if (player == null) {
       return;
@@ -485,6 +765,13 @@ public final class CouplerWrenchListener implements Listener {
   }
 
   private void deny(Player player, MinecartGroup group, CouplerEligibility.Verdict verdict) {
+    trace(
+        "WRENCH_DENIED player="
+            + player.getName()
+            + " train="
+            + service.displayName(group)
+            + " verdict="
+            + verdict.key());
     player.sendMessage(
         locale()
             .component(
@@ -510,7 +797,8 @@ public final class CouplerWrenchListener implements Listener {
       for (Entity entity :
           player.getWorld().getNearbyEntities(at, SHOW_RADIUS_BLOCKS, 8.0, SHOW_RADIUS_BLOCKS)) {
         MinecartMember<?> member = MinecartMemberStore.getFromEntity(entity);
-        if (member == null || member.getGroup() == null || member.isUnloaded()) {
+        // 先判车厢还在：刚被移走的车厢取编组 TrainCarts 会抛异常
+        if (member == null || member.isUnloaded() || member.getGroup() == null) {
           continue;
         }
         for (CouplerState.End end : CouplerState.End.values()) {

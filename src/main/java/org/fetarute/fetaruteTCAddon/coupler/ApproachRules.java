@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.coupler;
 
 import java.util.OptionalDouble;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 
 /**
  * 联挂进站每一拍怎么走、什么时候停。纯计算。
@@ -61,6 +62,30 @@ final class ApproachRules {
       int maxTicks,
       double standingMoved) {}
 
+  /**
+   * 推车往前找车时先碰到的别的列车是不是不在计划进路上（找车顺着道岔此刻的开向走岔了）。纯计算。
+   *
+   * @param routeEdges 计划进路经过的区间；为空（算不出）时一律当挡路
+   * @param headEdges 推着的车车头压着的区间；为空表示车头不在任何区间上（例如车库股道尽头）
+   * @param hitEdges 碰到的那节车厢压着的区间；为空（查不到）时当挡路
+   * @return 车头还在计划进路上、而那节车厢压着的区间都不在计划进路上时为 true
+   */
+  static boolean obstacleOffRoute(
+      java.util.Set<EdgeId> routeEdges,
+      java.util.Set<EdgeId> headEdges,
+      java.util.Set<EdgeId> hitEdges) {
+    if (routeEdges == null || routeEdges.isEmpty() || hitEdges == null || hitEdges.isEmpty()) {
+      return false;
+    }
+    if (headEdges != null
+        && !headEdges.isEmpty()
+        && java.util.Collections.disjoint(headEdges, routeEdges)) {
+      // 车头已经压在进路以外：真开进了那一支，那辆车就在前面
+      return false;
+    }
+    return java.util.Collections.disjoint(hitEdges, routeEdges);
+  }
+
   /** 判这一拍。 */
   static Step step(Observation seen) {
     if (seen.otherTrainAhead()) {
@@ -102,5 +127,27 @@ final class ApproachRules {
     double approach = approachBlocksPerTick > 0.0 ? approachBlocksPerTick : 0.05;
     double creep = creepBlocksPerTick > 0.0 ? Math.min(creepBlocksPerTick, approach) : approach;
     return (int) Math.ceil(budgetBlocks / approach + FINAL_BLOCKS / creep) + 200;
+  }
+
+  /**
+   * 对方最近一节车厢离车头（直线）不到这么多格时，前方区块没加载也不再往前推：按 TrainCarts 保持区块半径 1（每节车厢周围保留 3×3 区块），两节车厢这么近时沿途区块本该已加载，
+   * 看不见就是不对劲。
+   */
+  static final double UNLOADED_NEAR_BLOCKS = 32.0;
+
+  /**
+   * 找车没找到时算不算挡路：车头不在轨道上（或车头所在处区块没加载）、先碰到别的列车中间的车厢时不再往前推；距离内没有车只是还没看见对方，
+   * 照常往前推（不超过推车距离与超时的上限）；前方区块没加载时对方还远就照常推，已经很近（{@link #UNLOADED_NEAR_BLOCKS} 以内）就不推。
+   *
+   * @param standingDistance 对方最近一节车厢离车头的直线距离（格；与 {@link #UNLOADED_NEAR_BLOCKS} 同按车厢周围保留的区块推出）；量不出时为
+   *     {@code NaN}（按很近处理）
+   */
+  static boolean finderBlocks(PushTargetFinder.Failure failure, double standingDistance) {
+    if (failure == PushTargetFinder.Failure.NO_TRACK
+        || failure == PushTargetFinder.Failure.MIDDLE_CAR) {
+      return true;
+    }
+    return failure == PushTargetFinder.Failure.UNLOADED_AHEAD
+        && !(standingDistance >= UNLOADED_NEAR_BLOCKS);
   }
 }

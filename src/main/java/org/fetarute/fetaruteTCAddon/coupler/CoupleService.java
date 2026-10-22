@@ -9,6 +9,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -22,7 +23,11 @@ import org.bukkit.Bukkit;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -55,6 +60,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableServi
  *       DynamicPlatformAllocator.CouplingPartners}）。
  *   <li>站外：后到的车照常被对方的占用挡在站台外，停稳一秒、在对方 {@code approach-max-blocks} 以内、驶向对方那条股道、合并后不超节数上限，才开始进站。
  *       车上有驾驶员时先请他让出控制（{@link CoupleCrew}），挂上后再交还。
+ *   <li>出库：按表的主干从车库出来就到联挂站、回程支线车已经停在那儿占着出库要走的资源时，只有那辆回程支线车的占用不挡它出库（{@link
+ *       #admitDepotTrunk}），出车后登记调车中、停在车库股道上（{@link #holdDepotTrunk}），照上一条从车库进站；进站一直开不了头就放弃这次联挂。
  *   <li>进站：后到的车登记调车中（调度让出控制），这一对之间的占用互相不挡（{@link CoLocationPolicy}），调度据此把进路排进站台；授权进了对方的资源后，
  *       由本类的动作以进站速度推它，沿轨道看得见对方后最后几格按推车速度，空隙不超过联挂距离停车（{@link ApproachRules}）。
  *   <li>挂上：主干保留身份（{@link CouplerService#linkInService}）。回程支线车先到时，挂上后对合并的列车重新触发一次那一站的车站牌子，
@@ -81,6 +88,12 @@ public final class CoupleService {
   /** 按表时回程支线车等主干的上限（主干晚太多时时刻表自己会把它换下）。 */
   private static final Duration TIMETABLE_FEEDER_CAP = Duration.ofMinutes(15);
 
+  /** 出库去联挂的主干停在车库股道上多久还没开始进站，就放弃这次联挂。 */
+  private static final Duration DEPOT_TRUNK_APPROACH_LIMIT = Duration.ofSeconds(45);
+
+  /** 登记了出库、迟迟没出车的主干过多久作废。 */
+  private static final Duration DEPOT_TRUNK_ADMIT_TTL = Duration.ofSeconds(30);
+
   /** 进站进行中对方的发车扣留每次续多久。 */
   private static final Duration APPROACH_HOLD = Duration.ofSeconds(30);
 
@@ -96,15 +109,34 @@ public final class CoupleService {
    * @param name 回程支线车
    * @param platform 它停着的股道
    * @param joins 它可以并进的联挂
-   * @param trunk 按表时只等这辆主干；否则为空（任何开往本站的主干）
+   * @param scheduled 按表时表上那一班主干；不按表时为空（任何开往本站的主干）
    * @param deadline 等到这时放手
    */
   private record FeederHold(
       String name,
       NodeId platform,
       List<CouplingIndex.Join> joins,
-      Optional<String> trunk,
-      Instant deadline) {}
+      Optional<TimetableService.JoinTrunk> scheduled,
+      Instant deadline) {
+
+    boolean timetabled() {
+      return scheduled.isPresent();
+    }
+
+    /** 按表时跑那一班的主干车；主干交路还没出车、或不按表时为空。 */
+    Optional<String> trunk() {
+      return scheduled.flatMap(TimetableService.JoinTrunk::train);
+    }
+
+    /** 等的是不是这列主干：按表只认表上那一辆（还没出车时谁都不认），不按表时开往本站的都算。 */
+    boolean awaits(String trainName) {
+      return scheduled.isEmpty() || trunk().filter(t -> sameTrain(t, trainName)).isPresent();
+    }
+
+    FeederHold rescheduled(TimetableService.JoinTrunk next) {
+      return new FeederHold(name, platform, joins, Optional.of(next), deadline);
+    }
+  }
 
   /**
    * 主干先到、在联挂站等回程支线车。
@@ -124,6 +156,22 @@ public final class CoupleService {
 
     TrunkWait withPlatform(NodeId node) {
       return new TrunkWait(name, join, Optional.of(node), feeder, deadline);
+    }
+  }
+
+  /**
+   * 出库去联挂的主干：要挂的回程支线车已经停在联挂站、占着出库要走的资源。
+   *
+   * @param name 主干（出车用的车名）
+   * @param feeder 它要挂的回程支线车
+   * @param admittedAt 最近一次出库预检登记的时刻
+   * @param heldAt 出车后扣在车库股道上（登记调车中）的时刻；还没出车时为空
+   */
+  private record DepotTrunk(
+      String name, String feeder, Instant admittedAt, Optional<Instant> heldAt) {
+
+    DepotTrunk held(Instant now) {
+      return new DepotTrunk(name, feeder, admittedAt, Optional.of(now));
     }
   }
 
@@ -152,6 +200,10 @@ public final class CoupleService {
     final Set<String> controlNames;
     final double budget;
     final Vector standingAnchor;
+
+    /** 进站的计划进路（调度图上从后到的车最后经过的节点到那条股道的最短路）经过的区间；算不出时为空。 */
+    final Set<EdgeId> routeEdges;
+
     Phase phase = Phase.CLAIMING;
     int ticks;
     int pushTicks;
@@ -161,6 +213,10 @@ public final class CoupleService {
     MinecartMember<?> target;
     ApproachRules.Step result = ApproachRules.Step.CONTINUE;
     boolean moved;
+
+    /** 判成挡路时挡着的是什么（日志用）：碰到的列车与车厢，或找车失败的原因。 */
+    String obstacle = "-";
+
     int settleRounds;
     GroupAction action;
 
@@ -176,7 +232,8 @@ public final class CoupleService {
         CouplerState.End leadEnd,
         Set<String> controlNames,
         double budget,
-        Vector standingAnchor) {
+        Vector standingAnchor,
+        Set<EdgeId> routeEdges) {
       this.moverName = moverName;
       this.standingName = standingName;
       this.feederFirst = feederFirst;
@@ -191,6 +248,7 @@ public final class CoupleService {
       this.controlNames = controlNames;
       this.budget = budget;
       this.standingAnchor = standingAnchor;
+      this.routeEdges = Set.copyOf(routeEdges);
     }
   }
 
@@ -204,6 +262,12 @@ public final class CoupleService {
   private final Map<String, FeederHold> feeders = new ConcurrentHashMap<>();
   private final Map<String, TrunkWait> trunks = new ConcurrentHashMap<>();
 
+  /** 出库去联挂的主干（车名键）。 */
+  private final Map<String, DepotTrunk> depotTrunks = new ConcurrentHashMap<>();
+
+  /** 这一次联挂已经放弃的回程支线车（车名键 → 车名）：等满了还没挂上，或主干从车库进不了站。离开待命池以前不再扣它。 */
+  private final Map<String, String> abandonedFeeders = new ConcurrentHashMap<>();
+
   /** 后到的车（车名键，调度名与 TrainCarts 名都记）→ 进站。 */
   private final Map<String, Approach> approaches = new ConcurrentHashMap<>();
 
@@ -212,6 +276,9 @@ public final class CoupleService {
 
   /** 主干车名键 → 已经挂上的那一站：联挂预测不再写这一站。主干离开这一站（进度变了）或不在了就删。 */
   private final Map<String, CoupledAt> joined = new ConcurrentHashMap<>();
+
+  /** 刚在站台上挂上的列车：挂上后车站牌子再触发时只开一个停站（见 {@link LinkedStops}）。 */
+  private final LinkedStops linkedStops = new LinkedStops();
 
   /** 车名键 → 这一站因联挂多停的秒数：车站停站时 AutoStation 取走。 */
   private final Map<String, Integer> stationDwell = new ConcurrentHashMap<>();
@@ -291,6 +358,10 @@ public final class CoupleService {
     for (Approach approach : List.copyOf(distinctApproaches())) {
       fail(approach, "plugin-stop");
     }
+    for (DepotTrunk depot : List.copyOf(depotTrunks.values())) {
+      releaseDepotTrunk(depot, "plugin-stop", false);
+    }
+    abandonedFeeders.clear();
     feeders.clear();
     trunks.clear();
     coupledAt.clear();
@@ -300,6 +371,7 @@ public final class CoupleService {
     deferredUntil.clear();
     joinForecasts = Map.of();
     joined.clear();
+    linkedStops.clear();
   }
 
   /** 这列车前方（或此刻停着的这一站）的联挂预测；不联挂时为空。任意线程可读。 */
@@ -339,7 +411,7 @@ public final class CoupleService {
         .removeIf(
             entry ->
                 entry.getValue().joins().contains(join.get())
-                    && entry.getValue().trunk().map(t -> sameTrain(t, trainName)).orElse(true)
+                    && entry.getValue().awaits(trainName)
                     && !participating(entry.getKey()));
     expectFeeder(trainName, join.get());
     int seconds = RouteCouplingDirectives.coupleSeconds();
@@ -358,18 +430,13 @@ public final class CoupleService {
   private void expectFeeder(String trunkName, CouplingIndex.Join join) {
     Optional<TimetableService.JoinPlan> plan =
         plugin.getTimetableService().map(service -> service.joinPlanOf(trunkName));
-    Optional<String> feeder = Optional.empty();
-    if (plan.isPresent() && plan.get().bound()) {
-      if (plan.get().feeder().isEmpty() || plan.get().feederTrain().isEmpty()) {
-        return;
-      }
-      feeder = plan.get().feederTrain();
-      if (!approachingOnRoute(feeder.get(), join.feederRoute(), join.feederEndIndex())) {
-        return;
-      }
-    } else if (anyApproaching(join.feederRoute(), join.feederEndIndex()).isEmpty()) {
+    if (expectedFeeder(join, plan).isEmpty()) {
       return;
     }
+    // 按表只等表上那一辆；不按表时开往本站的回程支线车都算
+    Optional<String> feeder =
+        plan.filter(TimetableService.JoinPlan::bound)
+            .flatMap(TimetableService.JoinPlan::feederTrain);
     long wait = Math.min(waitSeconds(join), StationStopCoordinator.HOLD_CEILING.toSeconds());
     if (wait <= 0) {
       return;
@@ -396,6 +463,159 @@ public final class CoupleService {
   }
 
   // ---------------------------------------------------------------- 对外判定
+
+  /**
+   * 车站牌子触发时问：这列车是不是刚在这条股道挂上（挂上后 TrainCarts 重新检测牌子、我们重新触发到站都会再触发一次）。只开一个停站：开进来的是主干时第一次停站；
+   * 主干先到时它的停站还没放行（发车许可锁还在）就让它继续，已经放行了第一次重新停站；其余都是重复。
+   *
+   * @param trainName 列车名
+   * @param platform 触发的车站节点
+   */
+  public LinkedStops.Arrival linkedArrival(String trainName, NodeId platform) {
+    return trainName == null
+        ? LinkedStops.Arrival.NONE
+        : linkedStops.take(
+            key(trainName),
+            platform,
+            Bukkit.getCurrentTick(),
+            () ->
+                plugin
+                    .getRuntimeDispatchService()
+                    .map(dispatch -> dispatch.hasDepartureGate(trainName))
+                    .orElse(false));
+  }
+
+  /**
+   * 先到联挂站、停在站台上等对方挂上来。
+   *
+   * @param mergedCars 挂上以后整列几节
+   * @param midpointLeadBlocks 先到那列的第一节车厢中心停在整列中点前方多少格（股道上没有停车位置标时按它对准车站牌子，见 {@link JoinSpan}）；量不出时为
+   *     {@code NaN}
+   */
+  public record AwaitedJoin(int mergedCars, double midpointLeadBlocks) {}
+
+  /**
+   * 先到联挂站、停在站台上等对方挂上来的车：挂上以后整列几节、停在哪。AutoStation 据此按挂上以后的节数选停车位置标，或没有标志时让整列中点对准车站牌子，在身后给后到的车留出位置
+   * （后到的车从后面挂上来，整列的车头就是先到这列的车头）。等不等、等谁与扣车同一口径：回程支线车见 {@link #holdFeeders}，主干见 {@link
+   * #expectFeeder}。 挂上以后超过节数上限（挂不上）的不算。
+   *
+   * @param trainName 列车名
+   * @param routeId 这列车此刻的交路
+   * @param node 停的车站节点
+   * @param own 这列车
+   * @return 这一站它不等谁挂上来、或推不出对方几节时为空
+   */
+  public Optional<AwaitedJoin> awaitedJoin(
+      String trainName, UUID routeId, NodeId node, MinecartGroup own) {
+    if (trainName == null || routeId == null || node == null || own == null || own.isEmpty()) {
+      return Optional.empty();
+    }
+    int ownCars = own.size();
+    Optional<Partner> partner = awaitedPartner(trainName, routeId, node, ownCars);
+    if (partner.isEmpty()) {
+      return Optional.empty();
+    }
+    int merged = ownCars + partner.get().cars();
+    int maxCars = coupler.settings().maxCars();
+    if ((maxCars > 0 && merged > maxCars)
+        || (com.bergerkiller.bukkit.tc.TCConfig.maxCartsPerTrain >= 0
+            && merged > com.bergerkiller.bukkit.tc.TCConfig.maxCartsPerTrain)) {
+      return Optional.empty();
+    }
+    List<JoinSpan.CarSize> ownSizes = new ArrayList<>();
+    for (MinecartMember<?> member : own) {
+      ownSizes.add(new JoinSpan.CarSize(CarEnds.halfLength(member), CarEnds.couplerLength(member)));
+    }
+    List<JoinSpan.CarSize> partnerSizes = new ArrayList<>();
+    partner
+        .get()
+        .group()
+        .filter(group -> group.size() == partner.get().cars())
+        .ifPresent(
+            group -> {
+              for (MinecartMember<?> member : group) {
+                partnerSizes.add(
+                    new JoinSpan.CarSize(
+                        CarEnds.halfLength(member), CarEnds.couplerLength(member)));
+              }
+            });
+    return Optional.of(
+        new AwaitedJoin(
+            merged, JoinSpan.midpointLead(ownSizes, partnerSizes, partner.get().cars())));
+  }
+
+  /**
+   * 等着挂上来的那一列。
+   *
+   * @param cars 几节
+   * @param group 已经出车时是它（车厢次序不一定从挂上的那一端起，只用来量车长）
+   */
+  private record Partner(int cars, Optional<MinecartGroup> group) {}
+
+  /** 先到联挂站的车等着挂上来的那一列（见 {@link #awaitedJoin}）。 */
+  private Optional<Partner> awaitedPartner(
+      String trainName, UUID routeId, NodeId node, int ownCars) {
+    CouplingIndex current = currentIndex();
+    for (CouplingIndex.Join join : current.ofFeeder(routeId)) {
+      if (!join.atStation(node)) {
+        continue;
+      }
+      Optional<TimetableService.JoinTrunk> scheduled =
+          plugin.getTimetableService().flatMap(service -> service.joinTrunkOf(trainName));
+      Optional<String> trunk;
+      if (scheduled.isPresent()) {
+        if (!scheduled.get().coming()) {
+          return Optional.empty();
+        }
+        trunk = scheduled.get().train();
+      } else {
+        trunk = nearestApproaching(join.trunkRoute(), join.stopIndex());
+        if (trunk.isEmpty()) {
+          continue;
+        }
+        if (waitSeconds(join) <= 0) {
+          return Optional.empty();
+        }
+      }
+      Optional<MinecartGroup> trunkGroup = trunk.flatMap(CoupleService::group);
+      int trunkCars = trunkGroup.map(MinecartGroup::size).orElse(0);
+      if (trunkCars <= 0) {
+        // 主干还没出车：整列（主干交路的组合编组）减去本车
+        trunkCars =
+            coupler
+                .decoupling()
+                .plannedPatternOf(join.trunkRoute())
+                .map(pattern -> Math.max(0, pattern.cars() - ownCars))
+                .orElse(0);
+      }
+      return trunkCars > 0 ? Optional.of(new Partner(trunkCars, trunkGroup)) : Optional.empty();
+    }
+    List<CouplingIndex.Join> trunkJoins = current.ofTrunk(routeId);
+    if (trunkJoins.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RouteProgressRegistry.RouteProgressEntry> progress =
+        plugin.getRouteProgressRegistry().flatMap(registry -> registry.get(trainName));
+    CoupledAt done = joined.get(key(trainName));
+    for (CouplingIndex.Join join : trunkJoins) {
+      if (!join.atStation(node)
+          || (progress.isPresent() && progress.get().currentIndex() > join.stopIndex())
+          || (done != null
+              && done.route().equals(join.trunkRoute())
+              && done.index() == join.stopIndex())) {
+        continue;
+      }
+      Optional<String> feeder = expectedFeeder(trainName, join);
+      if (feeder.isEmpty()
+          || Math.min(waitSeconds(join), StationStopCoordinator.HOLD_CEILING.toSeconds()) <= 0) {
+        continue;
+      }
+      Optional<MinecartGroup> feederGroup = group(feeder.get());
+      int feederCars = feederGroup.map(MinecartGroup::size).orElse(0);
+      return feederCars > 0 ? Optional.of(new Partner(feederCars, feederGroup)) : Optional.empty();
+    }
+    return Optional.empty();
+  }
 
   /** 这列车正被联挂进站推着：AutoStation 不处理它（挂上后对合并的列车重新触发）。 */
   public boolean approaching(String trainName) {
@@ -432,9 +652,30 @@ public final class CoupleService {
     return wait == null ? Optional.empty() : Optional.of(wait.deadline());
   }
 
-  /** 进站的这一对之间的占用互相不挡。 */
+  /** 主干先到、停在站台上等回程支线车挂上来（含对方正在进站）：AutoStation 开着门等，挂上了或不等了再关。 */
+  public boolean awaitsFeeder(String trainName) {
+    if (trainName == null) {
+      return false;
+    }
+    String key = key(trainName);
+    for (Approach approach : distinctApproaches()) {
+      if (!approach.feederFirst && key(approach.standingName).equals(key)) {
+        return true;
+      }
+    }
+    TrunkWait wait = trunks.get(key);
+    return wait != null && Instant.now().isBefore(wait.deadline());
+  }
+
+  /** 进站的这一对、出库去联挂的主干与它要挂的回程支线车之间的占用互相不挡。 */
   boolean exempts(OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
-    if (approaches.isEmpty() || request == null || claim == null) {
+    if (request == null || claim == null) {
+      return false;
+    }
+    if (!depotTrunks.isEmpty() && depotPartners(request.trainName(), claim.trainName())) {
+      return true;
+    }
+    if (approaches.isEmpty()) {
       return false;
     }
     Approach approach = approaches.get(key(request.trainName()));
@@ -448,6 +689,225 @@ public final class CoupleService {
       }
     }
     return false;
+  }
+
+  /** 出库预检与出车占用期间（还没扣在车库股道上）的这一对；扣下以后不再豁免，信号照常停车，等进站时登记的豁免。 */
+  private boolean depotPartners(String first, String second) {
+    DepotTrunk depot = depotTrunks.get(key(first));
+    if (depot != null && depot.heldAt().isEmpty() && sameTrain(depot.feeder(), second)) {
+      return true;
+    }
+    depot = depotTrunks.get(key(second));
+    return depot != null && depot.heldAt().isEmpty() && sameTrain(depot.feeder(), first);
+  }
+
+  /**
+   * 车库出车之前（出库预检、出车占用之前）问：这张票开的是不是回程支线车正停在联挂站等着并进的那一班主干。是的话登记下来， 那辆回程支线车的占用不挡它出库（{@link
+   * #exempts}）；别的车照常挡。
+   *
+   * @param trainName 出车用的车名
+   * @param intent 票的交路意图
+   */
+  public void admitDepotTrunk(String trainName, TimetableService.TicketIntent intent) {
+    if (trainName == null || intent == null) {
+      return;
+    }
+    for (FeederHold hold : List.copyOf(feeders.values())) {
+      Optional<TimetableService.JoinTrunk> scheduled =
+          hold.scheduled().filter(trunk -> trunk.runBy(intent));
+      if (scheduled.isEmpty()
+          || !hold.trunk().map(t -> sameTrain(t, trainName)).orElse(true)
+          || !joinsRightOutOfDepot(hold, intent)) {
+        continue;
+      }
+      // 车名先记上：出车前的选台与占用判定就认得出它是搭档
+      feeders.replace(
+          key(hold.name()),
+          hold,
+          hold.rescheduled(
+              new TimetableService.JoinTrunk(
+                  true,
+                  Optional.of(trainName),
+                  scheduled.get().duty(),
+                  scheduled.get().tripIndex())));
+      DepotTrunk previous = depotTrunks.get(key(trainName));
+      depotTrunks.put(
+          key(trainName),
+          new DepotTrunk(
+              trainName,
+              hold.name(),
+              Instant.now(),
+              previous == null ? Optional.empty() : previous.heldAt()));
+      if (previous == null) {
+        debug("COPL_DEPOT_TRUNK_ADMITTED train=" + trainName + " feeder=" + hold.name());
+      }
+      return;
+    }
+  }
+
+  /**
+   * 这张票的主干出库后第一个点就是回程支线车停着的联挂站，且车库离那条股道不超过 {@code approach-max-blocks}（沿调度图）：
+   * 出车后停在车库股道上就能直接开始进站。认不出时为否（不放宽出库）。
+   */
+  private boolean joinsRightOutOfDepot(FeederHold hold, TimetableService.TicketIntent intent) {
+    Optional<UUID> trunkRoute =
+        plugin
+            .getTimetableService()
+            .flatMap(service -> service.plannedJoinOf(intent))
+            .filter(TimetableService.PlannedJoin::trunk)
+            .map(TimetableService.PlannedJoin::trunkRouteId);
+    Optional<NodeId> depot =
+        trunkRoute.flatMap(
+            route ->
+                plugin
+                    .getRouteDefinitionCache()
+                    .flatMap(cache -> cache.findById(route))
+                    .map(RouteDefinition::waypoints)
+                    .filter(waypoints -> !waypoints.isEmpty())
+                    .map(waypoints -> waypoints.get(0)));
+    Optional<UUID> world =
+        group(hold.name()).map(MinecartGroup::getWorld).map(org.bukkit.World::getUID);
+    if (trunkRoute.isEmpty() || depot.isEmpty() || world.isEmpty()) {
+      return false;
+    }
+    boolean firstStop =
+        hold.joins().stream()
+            .anyMatch(join -> join.trunkRoute().equals(trunkRoute.get()) && join.stopIndex() == 1);
+    OptionalDouble distance = pathLength(world.get(), depot.get(), hold.platform());
+    return firstStop
+        && distance.isPresent()
+        && distance.getAsDouble() <= coupler.settings().approachMaxBlocks();
+  }
+
+  /**
+   * 出库去联挂的主干出了车、第一拍信号之前：出车拿到的占用和回程支线车有重叠时登记调车中（调度让出控制，不发车、不刹车）， 停在车库股道上等进站把它推进去；
+   * 没有重叠时照常发车，到站外被挡住再进站。
+   *
+   * @param trainName 出车用的车名
+   */
+  public void holdDepotTrunk(String trainName) {
+    DepotTrunk depot = trainName == null ? null : depotTrunks.get(key(trainName));
+    if (depot == null) {
+      return;
+    }
+    if (coupler.sharedClaimsOf(trainName, depot.feeder()).isEmpty()) {
+      releaseDepotTrunk(depot, "no-overlap", false);
+      return;
+    }
+    if (plugin
+        .getRuntimeDispatchService()
+        .map(dispatch -> dispatch.hasDepartureGate(trainName))
+        .orElse(false)) {
+      // 车库接车、手动提前出车自己扣着车（门控放开后由人或到点发车）：不登记调车，让出与回程支线车共占的资源，照普通出车被对方挡住
+      yieldShared(depot);
+      releaseDepotTrunk(depot, "gated-spawn", false);
+      return;
+    }
+    ShuntingRegistry.begin(trainName);
+    depotTrunks.replace(key(trainName), depot, depot.held(Instant.now()));
+    debug("COPL_DEPOT_TRUNK_HELD train=" + trainName + " feeder=" + depot.feeder());
+  }
+
+  /** 这列车是出库去联挂、出车后停在车库股道上等进站的主干。 */
+  private boolean heldAtDepot(String trainName) {
+    DepotTrunk depot = trainName == null ? null : depotTrunks.get(key(trainName));
+    return depot != null && depot.heldAt().isPresent();
+  }
+
+  /**
+   * 出库去联挂的主干：迟迟没出车、回程支线车不再等它（走了、放手了）或车没了就作废；停在车库股道上 {@link #DEPOT_TRUNK_APPROACH_LIMIT}
+   * 还没开始进站就放弃这次联挂。作废时让出与回程支线车共占的资源、撤销调车登记，交还调度照常被挡。
+   */
+  private void maintainDepotTrunks(Instant now) {
+    for (DepotTrunk depot : List.copyOf(depotTrunks.values())) {
+      FeederHold hold = feeders.get(key(depot.feeder()));
+      boolean awaited =
+          hold != null && hold.trunk().map(t -> sameTrain(t, depot.name())).orElse(true);
+      if (depot.heldAt().isEmpty()) {
+        if (!awaited || now.isAfter(depot.admittedAt().plus(DEPOT_TRUNK_ADMIT_TTL))) {
+          releaseDepotTrunk(depot, awaited ? "not-spawned" : "feeder-released", false);
+          if (awaited) {
+            // 没出成车：先记上的车名撤掉，换一张票出车时照样认
+            forgetAdmittedTrunk(hold, depot.name());
+          }
+        }
+        continue;
+      }
+      if (participating(key(depot.name()))) {
+        // 进站中：推车动作控车，挂上或放弃时各自收尾
+        continue;
+      }
+      if (group(depot.name()).isEmpty()) {
+        releaseDepotTrunk(depot, "trunk-gone", false);
+      } else if (!awaited) {
+        releaseDepotTrunk(depot, "feeder-released", true);
+      } else if (now.isAfter(depot.heldAt().get().plus(DEPOT_TRUNK_APPROACH_LIMIT))) {
+        abandonFeeder(hold, "depot-approach-not-started");
+        releaseDepotTrunk(depot, "approach-not-started", true);
+      }
+    }
+  }
+
+  /** 让出出库主干与回程支线车共占的资源（豁免撤了，这些资源本不该是它的）。 */
+  private void yieldShared(DepotTrunk depot) {
+    if (plugin.getOccupancyManager() == null) {
+      return;
+    }
+    for (OccupancyResource resource : coupler.sharedClaimsOf(depot.name(), depot.feeder())) {
+      plugin.getOccupancyManager().releaseResource(resource, Optional.of(depot.name()));
+    }
+  }
+
+  /** 放弃这次联挂：放掉回程支线车的扣留，离开待命池以前不再扣它。 */
+  private void abandonFeeder(FeederHold hold, String reason) {
+    feeders.remove(key(hold.name()), hold);
+    abandonedFeeders.put(key(hold.name()), hold.name());
+    debug("COPL_FEEDER_RELEASED train=" + hold.name() + " reason=" + reason);
+  }
+
+  private void forgetAdmittedTrunk(FeederHold hold, String trainName) {
+    plugin
+        .getTimetableService()
+        .flatMap(service -> service.joinTrunkOf(hold.name()))
+        .filter(TimetableService.JoinTrunk::coming)
+        .filter(fresh -> fresh.train().isEmpty())
+        .ifPresent(
+            fresh ->
+                feeders.computeIfPresent(
+                    key(hold.name()),
+                    (name, current) ->
+                        current.trunk().filter(t -> sameTrain(t, trainName)).isPresent()
+                            ? current.rescheduled(fresh)
+                            : current));
+  }
+
+  /**
+   * 作废一次出库联挂：撤销车库扣车的调车登记，重算信号。
+   *
+   * @param yieldShared 先让出与回程支线车共占的资源（没进过站时；豁免撤了，这些资源本不该是它的）
+   */
+  private void releaseDepotTrunk(DepotTrunk depot, String reason, boolean yieldShared) {
+    if (!depotTrunks.remove(key(depot.name()), depot)) {
+      return;
+    }
+    if (depot.heldAt().isPresent()) {
+      if (yieldShared) {
+        yieldShared(depot);
+      }
+      if (!participating(key(depot.name()))) {
+        ShuntingRegistry.end(depot.name());
+      }
+      plugin
+          .getRuntimeDispatchService()
+          .ifPresent(dispatch -> group(depot.name()).ifPresent(dispatch::refreshSignal));
+    }
+    debug(
+        "COPL_DEPOT_TRUNK_RELEASED train="
+            + depot.name()
+            + " feeder="
+            + depot.feeder()
+            + " reason="
+            + reason);
   }
 
   /** 选台：后到的车开进搭档停着的股道。 */
@@ -480,8 +940,7 @@ public final class CoupleService {
       return false;
     }
     for (FeederHold hold : feeders.values()) {
-      if (hold.joins().contains(join.get())
-          && hold.trunk().map(t -> sameTrain(t, trainName)).orElse(true)) {
+      if (hold.joins().contains(join.get()) && hold.awaits(trainName)) {
         // 回程支线车已经到了：选它那条股道（platformOf）
         return false;
       }
@@ -525,8 +984,7 @@ public final class CoupleService {
     Optional<CouplingIndex.Join> asTrunk = currentIndex().atTrunkStop(routeId, stopIndex);
     if (asTrunk.isPresent()) {
       for (FeederHold hold : feeders.values()) {
-        if (hold.joins().contains(asTrunk.get())
-            && hold.trunk().map(t -> sameTrain(t, trainName)).orElse(true)) {
+        if (hold.joins().contains(asTrunk.get()) && hold.awaits(trainName)) {
           return Optional.of(hold.platform());
         }
       }
@@ -556,8 +1014,8 @@ public final class CoupleService {
     }
     FeederHold hold = feeders.get(key(claimant));
     if (hold != null) {
-      return hold.trunk().isPresent()
-          ? sameTrain(hold.trunk().get(), trainName)
+      return hold.timetabled()
+          ? hold.awaits(trainName)
           : runningAnyOf(trainName, hold.joins(), true);
     }
     TrunkWait wait = trunks.get(key(claimant));
@@ -595,7 +1053,11 @@ public final class CoupleService {
       joinForecastCountdown = JOIN_FORECAST_ROUNDS;
       refreshJoinForecasts(current);
     }
-    if (current.isEmpty() && feeders.isEmpty() && trunks.isEmpty() && approaches.isEmpty()) {
+    if (current.isEmpty()
+        && feeders.isEmpty()
+        && trunks.isEmpty()
+        && approaches.isEmpty()
+        && depotTrunks.isEmpty()) {
       return;
     }
     Instant now = Instant.now();
@@ -604,6 +1066,7 @@ public final class CoupleService {
     }
     holdFeeders(current, now);
     expire(now);
+    maintainDepotTrunks(now);
     startApproaches(now);
   }
 
@@ -780,10 +1243,7 @@ public final class CoupleService {
     String trunkName = entry.trainName();
     Optional<FeederHold> held =
         feeders.values().stream()
-            .filter(
-                hold ->
-                    hold.joins().contains(join)
-                        && hold.trunk().map(t -> sameTrain(t, trunkName)).orElse(true))
+            .filter(hold -> hold.joins().contains(join) && hold.awaits(trunkName))
             .findFirst();
     TimetableService.JoinPlan plan =
         plans.getOrDefault(key(trunkName), TimetableService.JoinPlan.UNBOUND);
@@ -931,6 +1391,7 @@ public final class CoupleService {
     for (LayoverRegistry.LayoverCandidate candidate : registry.get().snapshot()) {
       String key = key(candidate.trainName());
       if (feeders.containsKey(key)
+          || abandonedFeeders.containsKey(key)
           || candidate.dispatchAttempt().isPresent()
           || candidate.locationNodeId() == null) {
         continue;
@@ -948,13 +1409,13 @@ public final class CoupleService {
       if (joins.isEmpty()) {
         continue;
       }
-      Optional<String> trunk =
+      Optional<TimetableService.JoinTrunk> trunk =
           plugin
               .getTimetableService()
               .flatMap(service -> service.joinTrunkOf(candidate.trainName()));
       Optional<FeederHold> hold = Optional.empty();
       if (trunk.isPresent()) {
-        if (!trunk.get().isEmpty()) {
+        if (trunk.get().coming()) {
           hold =
               Optional.of(
                   new FeederHold(
@@ -991,7 +1452,7 @@ public final class CoupleService {
                     + " platform="
                     + held.platform().value()
                     + " trunk="
-                    + held.trunk().orElse("*"));
+                    + (held.timetabled() ? held.trunk().orElse("pending") : "*"));
           });
     }
   }
@@ -1001,6 +1462,26 @@ public final class CoupleService {
     deferredUntil.values().removeIf(until -> now.isAfter(until.plus(Duration.ofMinutes(5))));
     retryAfter.values().removeIf(until -> now.isAfter(until.plus(Duration.ofMinutes(5))));
     Optional<LayoverRegistry> registry = plugin.getLayoverRegistry();
+    for (Map.Entry<String, FeederHold> entry : List.copyOf(feeders.entrySet())) {
+      FeederHold hold = entry.getValue();
+      if (!hold.timetabled() || participating(entry.getKey())) {
+        continue;
+      }
+      // 主干交路出了车，车名才知道
+      Optional<TimetableService.JoinTrunk> next =
+          plugin
+              .getTimetableService()
+              .flatMap(service -> service.joinTrunkOf(hold.name()))
+              .filter(TimetableService.JoinTrunk::coming);
+      if (next.flatMap(TimetableService.JoinTrunk::train).isPresent()
+          && !next.equals(hold.scheduled())) {
+        feeders.replace(entry.getKey(), hold, hold.rescheduled(next.get()));
+        next.get()
+            .train()
+            .ifPresent(
+                train -> debug("COPL_FEEDER_TRUNK train=" + hold.name() + " trunk=" + train));
+      }
+    }
     feeders
         .entrySet()
         .removeIf(
@@ -1011,13 +1492,17 @@ public final class CoupleService {
               FeederHold hold = entry.getValue();
               boolean gone = registry.flatMap(r -> r.get(hold.name())).isEmpty();
               boolean trunkGone =
-                  hold.trunk().isPresent()
-                      && plugin
+                  hold.timetabled()
+                      && !plugin
                           .getTimetableService()
                           .flatMap(service -> service.joinTrunkOf(hold.name()))
-                          .map(String::isEmpty)
-                          .orElse(true);
+                          .map(TimetableService.JoinTrunk::coming)
+                          .orElse(false);
               if (gone || trunkGone || now.isAfter(hold.deadline())) {
+                if (!gone && !trunkGone && hold.timetabled()) {
+                  // 按表等满了：离开待命池以前不再为这一次联挂扣它（主干交路还算会来，不记下就会马上又扣上）
+                  abandonedFeeders.put(entry.getKey(), hold.name());
+                }
                 debug(
                     "COPL_FEEDER_RELEASED train="
                         + hold.name()
@@ -1027,6 +1512,9 @@ public final class CoupleService {
               }
               return false;
             });
+    abandonedFeeders
+        .entrySet()
+        .removeIf(abandoned -> registry.flatMap(r -> r.get(abandoned.getValue())).isEmpty());
     for (Map.Entry<String, TrunkWait> entry : List.copyOf(trunks.entrySet())) {
       if (participating(entry.getKey())) {
         continue;
@@ -1113,8 +1601,8 @@ public final class CoupleService {
   }
 
   private List<String> trunkCandidates(FeederHold hold) {
-    if (hold.trunk().isPresent()) {
-      return List.of(hold.trunk().get());
+    if (hold.timetabled()) {
+      return hold.trunk().map(List::of).orElse(List.of());
     }
     List<String> out = new ArrayList<>();
     for (CouplingIndex.Join join : hold.joins()) {
@@ -1180,7 +1668,12 @@ public final class CoupleService {
     if (still < STILL_TICKS) {
       return false;
     }
-    if (ShuntingRegistry.isShunting(moverName) || !headingTo(mover.get(), entry.get(), platform)) {
+    if ((ShuntingRegistry.isShunting(moverName) && !heldAtDepot(moverName))
+        || !headingTo(mover.get(), entry.get(), platform)) {
+      return false;
+    }
+    if (heldAtDepot(moverName) && !boundAsTrunkOf(moverName, standingName)) {
+      // 出车事务还没落定（交路还没绑上这辆车）：等它落定再推，免得出车回滚时车已在咽喉里
       return false;
     }
     int maxCars = coupler.settings().maxCars();
@@ -1235,7 +1728,8 @@ public final class CoupleService {
             leadEnd.get(),
             names,
             distance.getAsDouble() + bodyLength(standing) + 8.0,
-            standingCenter.get());
+            standingCenter.get(),
+            routeEdges(mover.get(), entry.get(), platform));
     for (String name : names) {
       approaches.put(key(name), approach);
       ShuntingRegistry.begin(name);
@@ -1253,6 +1747,16 @@ public final class CoupleService {
     // 让调度立即按新的豁免重排进路
     plugin.getRuntimeDispatchService().ifPresent(dispatch -> dispatch.refreshSignal(mover.get()));
     return true;
+  }
+
+  /** 时刻表上回程支线车等着的那一班主干此刻由这辆车跑（交路已经绑上它）。 */
+  private boolean boundAsTrunkOf(String trunkName, String feederName) {
+    return plugin
+        .getTimetableService()
+        .flatMap(service -> service.joinTrunkOf(feederName))
+        .flatMap(TimetableService.JoinTrunk::train)
+        .filter(train -> sameTrain(train, trunkName))
+        .isPresent();
   }
 
   /** 后到的车正驶向对方的股道：交路下一个目标或 TrainCarts 目的地就是它。 */
@@ -1278,22 +1782,86 @@ public final class CoupleService {
     if (graphs == null || group.getWorld() == null || entry.lastPassedGraphNode().isEmpty()) {
       return OptionalDouble.empty();
     }
-    NodeId from = entry.lastPassedGraphNode().get();
-    if (from.equals(platform)) {
+    return pathLength(group.getWorld().getUID(), entry.lastPassedGraphNode().get(), platform);
+  }
+
+  /** 后到的车进站的计划进路经过的区间（与 {@link #graphDistance} 同一条最短路）；算不出时为空。 */
+  private Set<EdgeId> routeEdges(
+      MinecartGroup group, RouteProgressRegistry.RouteProgressEntry entry, NodeId platform) {
+    if (group.getWorld() == null || entry.lastPassedGraphNode().isEmpty()) {
+      return Set.of();
+    }
+    Set<EdgeId> edges = new HashSet<>();
+    shortestPath(group.getWorld().getUID(), entry.lastPassedGraphNode().get(), platform)
+        .ifPresent(path -> path.edges().forEach(edge -> edges.add(edge.id())));
+    return edges;
+  }
+
+  /** 调度图上两点间最短路的长度（格）；图没建好或不连通时为空。 */
+  private OptionalDouble pathLength(UUID worldId, NodeId from, NodeId to) {
+    if (from != null && from.equals(to)) {
       return OptionalDouble.of(0.0);
     }
-    Optional<RailGraphPath> path =
-        graphs
-            .getSnapshot(group.getWorld().getUID())
-            .flatMap(
-                snapshot ->
-                    new RailGraphPathFinder()
-                        .shortestPath(
-                            snapshot.graph(),
-                            from,
-                            platform,
-                            RailGraphPathFinder.Options.shortestDistance()));
-    return path.map(p -> OptionalDouble.of(p.totalLengthBlocks())).orElse(OptionalDouble.empty());
+    return shortestPath(worldId, from, to)
+        .map(p -> OptionalDouble.of(p.totalLengthBlocks()))
+        .orElse(OptionalDouble.empty());
+  }
+
+  /** 调度图上两点间的最短路；图没建好或不连通时为空。 */
+  private Optional<RailGraphPath> shortestPath(UUID worldId, NodeId from, NodeId to) {
+    RailGraphService graphs = plugin.getRailGraphService();
+    if (graphs == null || worldId == null || from == null || to == null) {
+      return Optional.empty();
+    }
+    return graphs
+        .getSnapshot(worldId)
+        .flatMap(
+            snapshot ->
+                new RailGraphPathFinder()
+                    .shortestPath(
+                        snapshot.graph(),
+                        from,
+                        to,
+                        RailGraphPathFinder.Options.shortestDistance()));
+  }
+
+  /**
+   * 推车往前找车时先碰到的别的列车其实不在进站的计划进路上：找车顺着道岔此刻的开向走，别的车刚把前方道岔扳向另一支（例如回库车刚开过）时， 会拐进那一支、碰到那里的车。车开到道岔前
+   * TrainCarts 会按目的地把道岔扳过来，那辆车不挡路。
+   *
+   * <p>只在两头都对得上时才这样判：挡路那节车厢压着的区间都不在计划进路上，而推着的车车头还在计划进路上（车头压着的区间与进路相交，或车头不在任何区间上，
+   * 例如还在车库股道尽头）。车头已经压到进路以外的区间（真开进了那一支）、计划进路算不出、图的足迹索引不可用或查不到那节车厢压着哪一段时，照旧当前面有车。
+   */
+  private boolean offRouteObstacle(Approach approach, MinecartMember<?> hit) {
+    if (approach.routeEdges.isEmpty() || approach.mover.getWorld() == null) {
+      return false;
+    }
+    RailGraphService graphs = plugin.getRailGraphService();
+    Optional<RailInterlockingState> interlocking =
+        graphs == null
+            ? Optional.empty()
+            : graphs
+                .getSnapshot(approach.mover.getWorld().getUID())
+                .map(RailGraphService.RailGraphSnapshot::graph)
+                .filter(RailGraphInterlockingSupport.class::isInstance)
+                .map(graph -> ((RailGraphInterlockingSupport) graph).interlockingState())
+                .filter(RailInterlockingState::cellCoverageAvailable);
+    if (interlocking.isEmpty()) {
+      return false;
+    }
+    return ApproachRules.obstacleOffRoute(
+        approach.routeEdges,
+        edgesUnder(interlocking.get(), approach.lead),
+        edgesUnder(interlocking.get(), hit));
+  }
+
+  /** 车厢此刻压着的轨道方块所在的区间；车厢不在轨道上或方块不在任何区间上时为空。 */
+  private static Set<EdgeId> edgesUnder(
+      RailInterlockingState interlocking, MinecartMember<?> member) {
+    org.bukkit.block.Block rail = member == null || member.isUnloaded() ? null : member.getBlock();
+    return rail == null
+        ? Set.of()
+        : interlocking.edgesForCell(new RailFootprintCell(rail.getX(), rail.getY(), rail.getZ()));
   }
 
   /** 列车车身长度（格）：各节车长加车钩。 */
@@ -1344,9 +1912,13 @@ public final class CoupleService {
     }
     switch (approach.phase) {
       case CLAIMING -> {
-        // 调度按豁免把进路排进了对方的资源，或已经排到对方那条股道：开推
-        if (!coupler.sharedClaimsOf(approach.moverName, approach.standingName).isEmpty()
-            || coupler.claims(approach.moverName, OccupancyResource.forNode(approach.platform))) {
+        // 调度按豁免把进路排进了对方的资源，或已经排到对方那条股道：开推。从车库出来的要穿过咽喉，须排到那条股道
+        boolean toPlatform =
+            coupler.claims(approach.moverName, OccupancyResource.forNode(approach.platform));
+        boolean fromDepot = depotTrunks.containsKey(key(approach.moverName));
+        if (toPlatform
+            || (!fromDepot
+                && !coupler.sharedClaimsOf(approach.moverName, approach.standingName).isEmpty())) {
           beginPush(approach);
         } else if (approach.ticks > CLAIM_TICKS) {
           fail(approach, "route-not-granted");
@@ -1416,21 +1988,36 @@ public final class CoupleService {
         if (hit.getGroup() == approach.standing) {
           approach.target = hit;
           approach.lastGap = OptionalDouble.of(search.target().get().gap());
+        } else if (offRouteObstacle(approach, hit)) {
+          // 找车走岔了（道岔还没扳到）：当作这一眼没看见对方，照常往前推；已经看见过的留着上一次的空隙
+          if (approach.target == null) {
+            approach.lastGap = OptionalDouble.empty();
+          }
         } else {
           other = true;
+          approach.obstacle =
+              "hit:"
+                  + coupler.displayName(hit.getGroup())
+                  + "#"
+                  + (hit.getGroup().indexOf(hit) + 1)
+                  + "/"
+                  + hit.getGroup().size();
         }
       } else if (search
           .failure()
           .filter(
-              f ->
-                  f == PushTargetFinder.Failure.MIDDLE_CAR
-                      || f == PushTargetFinder.Failure.NO_TRACK)
+              failure ->
+                  ApproachRules.finderBlocks(
+                      failure, nearestCarDistance(leadAt.get(), approach.standing)))
           .isPresent()) {
-        // 先碰到车厢中间，或车头不在轨道上、区块没加载：都不再往前推
+        // 先碰到车厢中间，或车头不在轨道上、车头所在处区块没加载、对方已经很近却看不见：都不再往前推
         other = true;
-      } else {
+        approach.obstacle = "finder:" + search.failure().get();
+      } else if (approach.target == null) {
+        // 距离内没有车，或前方区块没加载、对方还远：还没看见对方
         approach.lastGap = OptionalDouble.empty();
       }
+      // 已经看见过对方、这一眼偶尔没找到：留着上一次量的空隙，照旧慢速对位，不跳回进站速度
     }
     double travelled = leadAt.get().distance(approach.start);
     if (travelled > ApproachRules.STALL_BLOCKS) {
@@ -1447,6 +2034,21 @@ public final class CoupleService {
             approach.pushTicks,
             ApproachRules.maxTicks(approach.budget, speed, creep),
             standingAt.get().distance(approach.standingAnchor)));
+  }
+
+  /** 推着的车车头到对方最近一节车厢（实体位置）的直线距离；量不出时为 {@code NaN}。 */
+  private static double nearestCarDistance(Vector from, MinecartGroup standing) {
+    double nearest = Double.NaN;
+    for (MinecartMember<?> member : standing) {
+      Optional<Vector> at = CarEnds.center(member);
+      if (at.isPresent()) {
+        double distance = from.distance(at.get());
+        if (Double.isNaN(nearest) || distance < nearest) {
+          nearest = distance;
+        }
+      }
+    }
+    return nearest;
   }
 
   private double pushSpeed(Approach approach) {
@@ -1478,10 +2080,22 @@ public final class CoupleService {
     }
     feeders.remove(key(approach.feederName));
     trunks.remove(key(approach.trunkName));
+    // 从车库进站的主干：调车登记已随进站撤销
+    depotTrunks.remove(key(approach.trunkName));
     joined.put(
         key(approach.trunkName),
         new CoupledAt(approach.join.trunkRoute(), approach.join.stopIndex()));
     MinecartGroup merged = result.get().merged().orElse(null);
+    // 挂上后车站牌子还会再触发：只开一个停站
+    long tick = Bukkit.getCurrentTick();
+    linkedStops.record(key(approach.trunkName), approach.platform, !approach.feederFirst, tick);
+    if (merged != null) {
+      linkedStops.record(
+          key(merged.getProperties().getTrainName()),
+          approach.platform,
+          !approach.feederFirst,
+          tick);
+    }
     warnInfo(
         "COPL_LINKED trunk="
             + approach.trunkName
@@ -1549,10 +2163,17 @@ public final class CoupleService {
       }
       feeders.remove(key(approach.feederName));
       trunks.remove(key(approach.trunkName));
+      // 开动过：两车已经登记成同股道列车对，共占的资源归它管
+      Optional.ofNullable(depotTrunks.get(key(approach.trunkName)))
+          .ifPresent(depot -> releaseDepotTrunk(depot, "approach-failed", false));
     } else {
       retryAfter.put(
           key(approach.moverName) + "|" + key(approach.standingName),
           Instant.now().plus(RETRY_AFTER));
+      if (heldAtDepot(approach.moverName)) {
+        // 还停在车库股道上：进站撤销了调车登记，接着扣住（不让调度把它放进对方的股道）
+        ShuntingRegistry.begin(approach.moverName);
+      }
     }
     warn(
         "COPL_APPROACH_FAILED mover="
@@ -1562,7 +2183,9 @@ public final class CoupleService {
             + " reason="
             + reason
             + " moved="
-            + approach.moved);
+            + approach.moved
+            + " obstacle="
+            + approach.obstacle);
   }
 
   private static void restoreControl(Approach approach) {
@@ -1640,6 +2263,45 @@ public final class CoupleService {
     return join.waitSeconds().isPresent()
         ? join.waitSeconds().getAsInt()
         : coupler.settings().coupleWaitSeconds();
+  }
+
+  /** 主干在联挂站会等的回程支线车（见 {@link #expectFeeder}）。 */
+  private Optional<String> expectedFeeder(String trunkName, CouplingIndex.Join join) {
+    return expectedFeeder(
+        join, plugin.getTimetableService().map(service -> service.joinPlanOf(trunkName)));
+  }
+
+  /**
+   * 主干在联挂站会等的回程支线车：按表时是表上那一班（正开往联挂站时才等），否则是开往联挂站、离得最近的一辆。
+   *
+   * @param plan 主干这一班按表挂不挂、挂哪辆；没有时刻表服务时为空
+   */
+  private Optional<String> expectedFeeder(
+      CouplingIndex.Join join, Optional<TimetableService.JoinPlan> plan) {
+    if (plan.isPresent() && plan.get().bound()) {
+      if (plan.get().feeder().isEmpty()) {
+        return Optional.empty();
+      }
+      return plan.get()
+          .feederTrain()
+          .filter(feeder -> approachingOnRoute(feeder, join.feederRoute(), join.feederEndIndex()));
+    }
+    return nearestApproaching(join.feederRoute(), join.feederEndIndex());
+  }
+
+  /** 正跑着这条交路、还没到第 {@code target} 个节点的车里离它最近的一辆。 */
+  private Optional<String> nearestApproaching(UUID route, int target) {
+    return plugin
+        .getRouteProgressRegistry()
+        .flatMap(
+            registry ->
+                registry.snapshot().values().stream()
+                    .filter(
+                        entry -> route.equals(entry.routeUuid()) && entry.currentIndex() < target)
+                    .max(
+                        java.util.Comparator.comparingInt(
+                            RouteProgressRegistry.RouteProgressEntry::currentIndex))
+                    .map(RouteProgressRegistry.RouteProgressEntry::trainName));
   }
 
   /** 正跑着这条交路、还没到第 {@code target} 个节点的车。 */

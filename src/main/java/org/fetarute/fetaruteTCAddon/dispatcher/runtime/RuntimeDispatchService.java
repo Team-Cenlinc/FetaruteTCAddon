@@ -1942,6 +1942,26 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 续上发车许可锁：同一会话的锁还在时把持锁时刻重置为现在；锁已不在、或已换成别的会话时什么也不做（不会重新挂上）。
+   *
+   * <p>持锁超时只为收回没人还的锁。停站任务还活着、还没放行（等车掌发车信号、等联挂、解下的车等下一班）时由它定期续上， 停得久的车不会被超时清掉门锁、再被信号 tick 放走。
+   *
+   * @param trainName 列车名
+   * @param sessionId 持锁时的会话 ID
+   */
+  public void renewDepartureGate(String trainName, String sessionId) {
+    String key = normalizeTrainKey(trainName);
+    if (key.isEmpty() || sessionId == null || sessionId.isBlank()) {
+      return;
+    }
+    DepartureGate gate = departureGates.get(key);
+    if (gate != null && gate.sessionId().equals(sessionId.trim())) {
+      departureGates.replace(
+          key, gate, new DepartureGate(gate.sessionId(), clockNow(), gate.reason()));
+    }
+  }
+
+  /**
    * 释放列车的发车许可锁。
    *
    * <p>当传入 sessionId 时，只有会话匹配才会释放；用于防止旧停站任务误释放新会话的锁。 传入空 sessionId 时会无条件释放该列车锁。
@@ -15076,6 +15096,7 @@ public final class RuntimeDispatchService {
             currentIndex,
             graph,
             forwardScanPlan,
+            advisoryContext.request(),
             baseAspect,
             train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
             trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
@@ -16439,6 +16460,18 @@ public final class RuntimeDispatchService {
             + terminalKey
             + " station="
             + TerminalKeyResolver.extractStationName(location));
+    // 从出站门控登记（终到停站结束）时车可能没有停因：巡检不再唤醒静止又没有停因的车，待命保持（只保持车身）就一直跑不到。
+    // 补记与待命 tick 同样的停因，巡检随即照常复查；已有停因的不动，由下一拍待命 tick 接着改写。
+    if (!activeStopStates.containsKey(normalizeTrainKey(trainName))) {
+      recordStopState(
+          RuntimeStopState.plannedStop(
+              trainName,
+              HardStopReason.LAYOVER_HOLD.name(),
+              "layover-ready-check-pending",
+              RuntimeStopState.ReleaseCondition.LAYOVER_READY_AND_AUTHORITY_REISSUED,
+              RuntimeStopState.RetryTrigger.LAYOVER_RECHECK,
+              clockNow()));
+    }
     layoverRegistry.get(trainName).ifPresent(layoverListener);
   }
 
@@ -16667,16 +16700,30 @@ public final class RuntimeDispatchService {
     regeneratedTrainName = dispatchAttempt.get().targetTrainName();
     Set<OccupancyResource> turnbackFootprintBeforeHandoff =
         snapshotTurnbackFootprintResources(trainName);
+    LaunchAuthorizationService.AuthorizationPlan handoffPlan =
+        new LaunchAuthorizationService.AuthorizationPlan(
+            request,
+            "layover-turnback",
+            false,
+            true,
+            false,
+            true,
+            LaunchAuthorizationService.LaunchActions.none());
     LaunchAuthorizationService.AuthorizationResult authorization =
-        launchAuthorizationService.authorizeHandoff(
-            new LaunchAuthorizationService.AuthorizationPlan(
-                request,
-                "layover-turnback",
-                false,
-                true,
-                false,
-                true,
-                LaunchAuthorizationService.LaunchActions.none()));
+        launchAuthorizationService.authorizeHandoff(handoffPlan);
+    // 只被排队位挡着、而排队的车正被本车挡着（证实的等待环）：割掉那条排队位，当场再交接一次。
+    // 待命折返车不在健康层的巡检里，割环这一步只能在这里做；割完不当场重试，排队的车下一拍就会重新排回来。
+    boolean queueOnlyBlocked =
+        !authorization.allowed() && !authorization.effectiveDecision().blockers().isEmpty();
+    for (OccupancyClaim blocker : authorization.effectiveDecision().blockers()) {
+      queueOnlyBlocked &= blocker != null && blocker.role() == ClaimRole.QUEUE_POSITION;
+    }
+    if (queueOnlyBlocked
+        && applySmartQueuePositionYield(
+                smartRecoveryInput(trainName, Duration.ZERO, SignalAspect.STOP))
+            .applied()) {
+      authorization = launchAuthorizationService.authorizeHandoff(handoffPlan);
+    }
     if (!authorization.allowed()) {
       debugLogger.accept(
           "Layover 发车受阻: train="
@@ -16776,6 +16823,7 @@ public final class RuntimeDispatchService {
       // 与 migrateRuntimeOwner 的手动改名共用同一个迁移；marker 只认物理 identity，换了编组照样隔离。
       migrateStartupPhysicalHydrationOwner(
           normalizeTrainKey(previousTrainName), normalizeTrainKey(regeneratedTrainName));
+      couplingRuntime.renamed(previousTrainName, regeneratedTrainName);
       trainName = regeneratedTrainName;
       request = request.withTrainName(trainName);
       // 旧名的停因必须随改名一并退休。
@@ -16796,6 +16844,7 @@ public final class RuntimeDispatchService {
           && rollbackSupport.migrateAuthorityOwner(trainName, previousTrainName)) {
         migrateStartupPhysicalHydrationOwner(
             normalizeTrainKey(trainName), normalizeTrainKey(previousTrainName));
+        couplingRuntime.renamed(trainName, previousTrainName);
         turnbackFootprintGuards.rename(trainName, previousTrainName);
         migrateEffectiveNodeOverrides(trainName, previousTrainName);
         layoverRegistry.rename(trainName, previousTrainName);
@@ -17189,6 +17238,7 @@ public final class RuntimeDispatchService {
       int currentIndex,
       RailGraph graph,
       MovementPlanSnapshot plan,
+      OccupancyRequest scanRequest,
       SignalAspect baseAspect,
       double currentSpeedBps,
       double decelBps2,
@@ -17215,19 +17265,21 @@ public final class RuntimeDispatchService {
 
       // 检查目标节点是否被其他列车占用
       if (toNode != null) {
-        Optional<OccupancyClaim> nodeClaim =
-            occupancyManager.getClaim(OccupancyResource.forNode(toNode));
+        OccupancyResource nodeResource = OccupancyResource.forNode(toNode);
+        Optional<OccupancyClaim> nodeClaim = occupancyManager.getClaim(nodeResource);
         if (nodeClaim.isPresent()
-            && !shouldIgnoreForwardScanClaim(trainName, route, currentIndex, nodeClaim.get())) {
+            && !shouldIgnoreForwardScanClaim(
+                trainName, route, currentIndex, scanRequest, nodeResource, nodeClaim.get())) {
           return distanceToForwardTrainSignal(
               distanceBlocks, currentSpeedBps, decelBps2, runtimeSettings, baseAspect);
         }
       }
 
-      Optional<OccupancyClaim> edgeClaim =
-          occupancyManager.getClaim(OccupancyResource.forEdge(directedEdge.edgeId()));
+      OccupancyResource edgeResource = OccupancyResource.forEdge(directedEdge.edgeId());
+      Optional<OccupancyClaim> edgeClaim = occupancyManager.getClaim(edgeResource);
       if (edgeClaim.isPresent()
-          && !shouldIgnoreForwardScanClaim(trainName, route, currentIndex, edgeClaim.get())) {
+          && !shouldIgnoreForwardScanClaim(
+              trainName, route, currentIndex, scanRequest, edgeResource, edgeClaim.get())) {
         return distanceToForwardTrainSignal(
             distanceBlocks, currentSpeedBps, decelBps2, runtimeSettings, baseAspect);
       }
@@ -17288,15 +17340,37 @@ public final class RuntimeDispatchService {
    *
    * <ul>
    *   <li>同一列车的占用（自占用）
+   *   <li>占用判定也不挡的同股道列车对、联挂进站的对方（与 canEnter 同一份豁免）：拆开后背离对方开走的一列，不把留在身后的另一列当前车
    *   <li>同线路且进度索引落后当前列车（后车 lookahead）
    * </ul>
+   *
+   * @param scanRequest 本拍的前瞻请求，判豁免用（与 canEnter 同一个请求方与有向路径）；为空时不豁免
    */
   private boolean shouldIgnoreForwardScanClaim(
-      String currentTrainName, RouteDefinition route, int currentIndex, OccupancyClaim claim) {
+      String currentTrainName,
+      RouteDefinition route,
+      int currentIndex,
+      OccupancyRequest scanRequest,
+      OccupancyResource resource,
+      OccupancyClaim claim) {
     if (claim == null || route == null) {
       return false;
     }
     if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), currentTrainName)) {
+      return true;
+    }
+    if (scanRequest != null
+        && occupancyManager != null
+        && occupancyManager.exemptsCoLocated(scanRequest, resource, claim)) {
+      // 豁免的只是这一条（getClaim 只给排第一的）：同一资源上还有别的车，既不是本车也不豁免，照样算前车
+      for (OccupancyClaim other : occupancyManager.claimsOn(resource)) {
+        if (other != null
+            && !TrainNameNormalizer.sameLogicalTrain(other.trainName(), currentTrainName)
+            && !TrainNameNormalizer.sameLogicalTrain(other.trainName(), claim.trainName())
+            && !occupancyManager.exemptsCoLocated(scanRequest, resource, other)) {
+          return false;
+        }
+      }
       return true;
     }
     Optional<RouteId> claimRouteIdOpt = claim.routeId();
@@ -21372,6 +21446,7 @@ public final class RuntimeDispatchService {
       }
 
       migrateStartupPhysicalHydrationOwner(previousKey, currentKey);
+      couplingRuntime.renamed(previousTrainName, currentTrainName);
       dynamicCapacityWaits.rename(previousTrainName, currentTrainName);
 
       movementAuthorizationTokens.remove(previousKey);
@@ -23861,7 +23936,7 @@ public final class RuntimeDispatchService {
     }
     Optional<OccupancyClaim> occupiedClaim =
         firstExternalThroatSectionClaim(
-            resources, claimSnapshot, trainName, bypassableSwitcherConflicts);
+            resources, claimSnapshot, context.request(), trainName, bypassableSwitcherConflicts);
     if (occupiedClaim.isPresent()) {
       return ThroatSectionAtomicCheck.blockedByClaim(
           "throat-section-resource-occupied", entry, exit, occupiedClaim.get(), resources);
@@ -23952,6 +24027,7 @@ public final class RuntimeDispatchService {
   private Optional<OccupancyClaim> firstExternalThroatSectionClaim(
       Collection<OccupancyResource> resources,
       Collection<OccupancyClaim> claims,
+      OccupancyRequest request,
       String trainName,
       Set<OccupancyResource> bypassableSwitcherConflicts) {
     if (resources == null || resources.isEmpty()) {
@@ -23966,6 +24042,12 @@ public final class RuntimeDispatchService {
           || claim.resource() == null
           || !resourceSet.contains(claim.resource())
           || TrainNameNormalizer.sameLogicalTrain(trainName, claim.trainName())) {
+        continue;
+      }
+      // 与占用判定同一口径：同股道列车对、联挂进站与出库去联挂的对方不挡
+      if (request != null
+          && occupancyManager != null
+          && occupancyManager.exemptsCoLocated(request, claim.resource(), claim)) {
         continue;
       }
       if (bypassableSwitcherConflicts != null

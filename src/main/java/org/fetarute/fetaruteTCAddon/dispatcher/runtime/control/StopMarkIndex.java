@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -185,6 +186,23 @@ public final class StopMarkIndex {
       return Optional.empty();
     }
     return StopMarks.select(around(stationRail), stationPoint, direction, carriages);
+  }
+
+  /**
+   * 同 {@link #select}，但先按挂上以后整列的节数选（见 {@link StopMarks#select(List, Vector, Vector, int,
+   * OptionalInt)}）。
+   */
+  public Optional<StopMarks.Selected> select(
+      Block stationRail,
+      Vector stationPoint,
+      Vector direction,
+      int carriages,
+      OptionalInt preferredCarriages) {
+    if (stationPoint == null || direction == null) {
+      return Optional.empty();
+    }
+    return StopMarks.select(
+        around(stationRail), stationPoint, direction, carriages, preferredCarriages);
   }
 
   /** 同 {@link #select}，但只看缓存、不阻塞，见 {@link #cached}。 */

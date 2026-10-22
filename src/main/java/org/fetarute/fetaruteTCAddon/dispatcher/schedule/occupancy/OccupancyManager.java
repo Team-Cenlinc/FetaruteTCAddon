@@ -22,6 +22,16 @@ public interface OccupancyManager {
   /** 获取占用快照（只读）。 */
   List<OccupancyClaim> snapshotClaims();
 
+  /**
+   * 某个资源上的全部占用（{@link #getClaim} 只给第一条）。默认只给第一条，账本实现给全部。
+   *
+   * @param resource 资源
+   * @return 占用，先到的在前；没有时为空列表
+   */
+  default List<OccupancyClaim> claimsOn(OccupancyResource resource) {
+    return getClaim(resource).map(List::of).orElse(List.of());
+  }
+
   /** 按列车名称释放所有占用记录。 */
   int releaseByTrain(String trainName);
 
@@ -120,6 +130,16 @@ public interface OccupancyManager {
    * <p>默认实现不启用让行，由具体占用实现决定是否支持。
    */
   default boolean shouldYield(OccupancyRequest request) {
+    return false;
+  }
+
+  /**
+   * 别的列车的这条占用是否不挡请求方（同股道列车对、联挂进站与出库去联挂，见 {@link CoLocationPolicy}）。
+   *
+   * <p>占用判定本身已经按它放行；占用之外另看现场占用的判据（如咽喉原子准入）须用同一口径。默认没有豁免。
+   */
+  default boolean exemptsCoLocated(
+      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
     return false;
   }
 }

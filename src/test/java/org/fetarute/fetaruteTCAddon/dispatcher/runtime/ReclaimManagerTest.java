@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -1587,6 +1588,100 @@ class ReclaimManagerTest {
     when(configManager.current()).thenReturn(view);
     when(view.reclaimSettings()).thenReturn(new ConfigManager.ReclaimSettings(true, 3600, 100, 60));
     return configManager;
+  }
+
+  /** 回库线路按编组方案分流：终点有接这个车型的回库线路时只派它，排在前面的不接的那条不派。 */
+  @Test
+  void reclaimPrefersAReturnRouteWhosePlanTakesTheConsist() {
+    Fixture fixture = new Fixture();
+    when(fixture.ticketAssigner.acceptsConsist(eq(fixture.second), any())).thenReturn(true);
+
+    fixture.manager.performReclaimCheck();
+
+    verify(fixture.ticketAssigner, times(1))
+        .forceAssign(
+            eq(fixture.provider),
+            eq("train-a"),
+            argThat(ticket -> fixture.second.equals(ticket.routeId())));
+    verify(fixture.ticketAssigner, never())
+        .forceAssign(any(), any(), argThat(ticket -> fixture.first.equals(ticket.routeId())));
+  }
+
+  /** 一条接这个车型的回库线路都没有：照样派回库，车不搁在线上。 */
+  @Test
+  void reclaimStillReturnsATrainNoReturnRouteTakes() {
+    Fixture fixture = new Fixture();
+
+    fixture.manager.performReclaimCheck();
+
+    verify(fixture.ticketAssigner, times(1))
+        .forceAssign(eq(fixture.provider), eq("train-a"), any());
+  }
+
+  /** 同一终点出发的两条回库线路，一辆在 PPK:1 待命多时的车。 */
+  private static final class Fixture {
+    final UUID first = UUID.randomUUID();
+    final UUID second = UUID.randomUUID();
+    final StorageProvider provider;
+    final TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    final ReclaimManager manager;
+
+    Fixture() {
+      UUID stationId = UUID.randomUUID();
+      provider = mockProvider(first, stationId);
+      Route firstRoute = provider.routes().findById(first).orElseThrow();
+      Route secondRoute =
+          new Route(
+              second,
+              "MT-RET2",
+              firstRoute.lineId(),
+              "Return 2",
+              Optional.empty(),
+              RoutePatternType.LOCAL,
+              RouteOperationType.RETURN,
+              Optional.empty(),
+              Optional.empty(),
+              Map.of(),
+              firstRoute.createdAt(),
+              firstRoute.updatedAt());
+      RouteStop firstStop = provider.routeStops().listByRoute(first).get(0);
+      RouteStop secondStop =
+          new RouteStop(
+              second,
+              firstStop.sequence(),
+              firstStop.stationId(),
+              firstStop.waypointNodeId(),
+              firstStop.dwellSeconds(),
+              firstStop.passType(),
+              firstStop.notes());
+      when(provider.routes().listByLine(firstRoute.lineId()))
+          .thenReturn(List.of(firstRoute, secondRoute));
+      when(provider.routes().findById(second)).thenReturn(Optional.of(secondRoute));
+      when(provider.routeStops().listByRoute(second)).thenReturn(List.of(secondStop));
+
+      FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+      StorageManager storageManager = mock(StorageManager.class);
+      when(plugin.getStorageManager()).thenReturn(storageManager);
+      when(storageManager.provider()).thenReturn(Optional.of(provider));
+      when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+      when(ticketAssigner.forceAssign(eq(provider), eq("train-a"), any())).thenReturn(true);
+      LayoverRegistry layoverRegistry = new LayoverRegistry();
+      layoverRegistry.register(
+          "train-a",
+          "surc:s:ppk:1",
+          NodeId.of("SURC:S:PPK:1"),
+          Instant.now().minusSeconds(400),
+          Map.of("FTA_OPERATOR_CODE", "SURC"));
+      layoverRegistry.register(
+          "train-b",
+          "surc:s:ppk:2",
+          NodeId.of("SURC:S:PPK:2"),
+          Instant.now().minusSeconds(300),
+          Map.of("FTA_OPERATOR_CODE", "SURC"));
+      manager =
+          new ReclaimManager(
+              plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 0);
+    }
   }
 
   private static StorageProvider mockProvider(UUID routeId, UUID stationId) {

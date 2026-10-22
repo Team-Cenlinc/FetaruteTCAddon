@@ -1113,6 +1113,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return Optional.ofNullable(consistPlanService);
   }
 
+  /** 车型裁决（出车选车型、复用与回收按方案筛车）；插件未完成初始化时为空。 */
+  public Optional<org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistDispatchArbiter>
+      getConsistArbiter() {
+    return Optional.ofNullable(consistArbiter);
+  }
+
   /** 车站目录（车站、车站组、停靠线路的内存索引）；插件未完成初始化时为空。 */
   public Optional<StationDirectory> getStationDirectory() {
     return Optional.ofNullable(stationDirectory);
@@ -2180,6 +2186,35 @@ public final class FetaruteTCAddon extends JavaPlugin {
                   && couplerAllowsLayoverDispatch(ticket, trainName));
       simpleAssigner.setDepotSpawnHold(
           (ticket, trainName) -> driverPickupHoldsDepotSpawn(scheduled, ticket, trainName));
+      // 出库去联挂：回程支线车已经停在联挂站时只有它不挡出库，出车后扣在车库股道上等进站
+      simpleAssigner.setDepotTrunkHook(
+          new org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .schedule
+              .spawn
+              .SimpleTicketAssigner
+              .DepotTrunkHook() {
+            @Override
+            public void admit(
+                org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket,
+                String trainName) {
+              scheduled
+                  .ticketIntentOf(ticket)
+                  .ifPresent(
+                      intent ->
+                          getCouplerService()
+                              .ifPresent(
+                                  coupler ->
+                                      coupler.coupling().admitDepotTrunk(trainName, intent)));
+            }
+
+            @Override
+            public void spawned(String trainName) {
+              getCouplerService()
+                  .ifPresent(coupler -> coupler.coupling().holdDepotTrunk(trainName));
+            }
+          });
       simpleAssigner.setTicketExpiry(scheduled::expiryOf);
       simpleAssigner.setDispatchListener(scheduled::onDispatched);
       // 提前出车在车库等候：交路意图写进列车标签，重启后据此绑回交路，到点不会再出一辆。

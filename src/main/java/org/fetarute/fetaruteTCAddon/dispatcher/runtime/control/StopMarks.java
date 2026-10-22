@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -243,6 +244,28 @@ public final class StopMarks {
   }
 
   /**
+   * 同 {@link #select}，但先按 {@code preferredCarriages} 选：先到联挂站、要停着等对方挂上来的车按挂上以后整列的节数停，在身后给后到的车留出位置；
+   * 没有对得上这个节数的标志时照列车节数选。
+   *
+   * @param preferredCarriages 挂上以后整列几节；为空或不比 {@code carriages} 多时同 {@link #select}
+   */
+  public static Optional<Selected> select(
+      List<Mark> marks,
+      Vector stationPoint,
+      Vector direction,
+      int carriages,
+      OptionalInt preferredCarriages) {
+    if (preferredCarriages.isPresent() && preferredCarriages.getAsInt() > carriages) {
+      Optional<Selected> preferred =
+          select(marks, stationPoint, direction, preferredCarriages.getAsInt());
+      if (preferred.isPresent()) {
+        return preferred;
+      }
+    }
+    return select(marks, stationPoint, direction, carriages);
+  }
+
+  /**
    * 列车在车站股道上的行进方向：车站轨道的走向按列车走向定正反。列车还在弯道上时，它此刻的走向与站台轨道差得很远，直接拿来判前后会判错。
    *
    * @param stationAxis 车站轨道的走向（不分正反）；为空或水平分量为零时直接用列车走向
@@ -277,8 +300,13 @@ public final class StopMarks {
       return new Approach(0.0, hold, distanceBlocks, (int) Math.ceil(2.0 * distanceBlocks / hold));
     }
     double holdBlocks = distanceBlocks - brake;
+    // 比保持速度慢（从停着起步）时先要加速：这一段平均速度按起步速度与保持速度的平均估
+    double start = Math.max(0.0, Math.min(currentBpt, hold));
     return new Approach(
-        holdBlocks, hold, brake, (int) Math.ceil(holdBlocks / hold + 2.0 * brake / hold));
+        holdBlocks,
+        hold,
+        brake,
+        (int) Math.ceil(2.0 * holdBlocks / (start + hold) + 2.0 * brake / hold));
   }
 
   private static boolean better(Mark mark, double ahead, Selected best) {

@@ -312,12 +312,15 @@ public final class AutoStationDoorController {
    * @param sign 本站选中的停车位置标；没有标志时为 {@code null}（全车开门）
    */
   public static DoorCars doorCars(MinecartGroup group, StopMarkSign sign) {
-    if (group == null || sign == null || sign.allDoors()) {
+    if (sign == null || (group == null && !sign.allDoors())) {
       return DoorCars.ALL;
     }
-    List<UUID> carts = new ArrayList<>(group.size());
-    for (MinecartMember<?> member : group) {
-      carts.add(cartId(member));
+    // 没写 door: 的标志也交给 select：全车开门，但记下对准的是哪块标志（停站中挂上来的车厢按它判）
+    List<UUID> carts = new ArrayList<>(group == null ? 0 : group.size());
+    if (group != null) {
+      for (MinecartMember<?> member : group) {
+        carts.add(cartId(member));
+      }
     }
     return DoorCars.select(sign, carts);
   }

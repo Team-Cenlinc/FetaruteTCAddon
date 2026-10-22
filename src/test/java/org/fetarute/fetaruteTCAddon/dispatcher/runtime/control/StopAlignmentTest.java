@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime.control;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -27,6 +28,21 @@ class StopAlignmentTest {
         StopAlignment.signedOffset(new Vector(101.5, 64.0, 201.5), stop, diagonal),
         1e-9);
     assertTrue(Double.isNaN(StopAlignment.signedOffset(stop, stop, new Vector(0, 1, 0))));
+  }
+
+  @Test
+  @DisplayName("停着的车中心已越过车站牌子：按牌子居中要往回开（拆开后解下的前一段在牌子前方）；未到、正对、量不出时照常居中")
+  void centerPastTheSignNeedsBackingUp() {
+    org.bukkit.util.Vector sign = new org.bukkit.util.Vector(447.5, 64.0, 1028.5);
+    org.bukkit.util.Vector detachedFront = new org.bukkit.util.Vector(453.8, 64.0, 1028.5);
+    double ahead =
+        StopAlignment.signedOffset(detachedFront, sign, new org.bukkit.util.Vector(1, 0, 0));
+    assertTrue(StopAlignment.centerPastStopPoint(ahead), "往东开、车在牌子东边 6.3 格");
+    double behind =
+        StopAlignment.signedOffset(detachedFront, sign, new org.bukkit.util.Vector(-1, 0, 0));
+    assertFalse(StopAlignment.centerPastStopPoint(behind), "往西开时它还没到牌子：往前居中");
+    assertFalse(StopAlignment.centerPastStopPoint(0.0));
+    assertFalse(StopAlignment.centerPastStopPoint(Double.NaN));
   }
 
   @Test

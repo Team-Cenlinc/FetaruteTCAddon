@@ -2564,7 +2564,11 @@ public final class GuardSessionManager {
       return session != null;
     }
     MinecartMember<?> member = MinecartMemberStore.getFromEntity(clicked);
-    MinecartGroup group = member == null ? null : member.getGroup();
+    // 车厢刚被移走（存车、拆挂、销毁）的同一拍里也会点到：这时取编组 TrainCarts 会抛异常
+    MinecartGroup group =
+        member == null || member.isUnloaded() || clicked.isDead() || !clicked.isValid()
+            ? null
+            : member.getGroup();
     Optional<MinecartGroup> own = findGroup(session);
     if (group == null || own.isEmpty() || own.get() != group) {
       return true;

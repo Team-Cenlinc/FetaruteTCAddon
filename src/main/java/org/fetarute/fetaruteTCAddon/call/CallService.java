@@ -45,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -1236,15 +1237,17 @@ public final class CallService {
       if (inbound.isEmpty()) {
         return Optional.empty();
       }
+      // 车型照叫车交路的编组方案挑（见 CallPlanner.Turnback#consist）：接车只认方案里的车型。票上按约定存归一后的车型键
       turnback =
           Optional.of(
               onDemandTicket(
-                  UUID.randomUUID(),
-                  inbound.get(),
-                  OnDemandTrip.format(
-                      tag, Optional.of(plan.turnback().get().entry().ticketEntry()), true),
-                  now,
-                  now));
+                      UUID.randomUUID(),
+                      inbound.get(),
+                      OnDemandTrip.format(
+                          tag, Optional.of(plan.turnback().get().entry().ticketEntry()), true),
+                      now,
+                      now)
+                  .withConsist(plan.turnback().get().consist().flatMap(ConsistKey::of)));
     }
     // 折返这一单：票面时刻写折返车预计开出终点的时刻（站台屏按它估，不显示成马上就开），发车侧照常随时可接
     Instant due =

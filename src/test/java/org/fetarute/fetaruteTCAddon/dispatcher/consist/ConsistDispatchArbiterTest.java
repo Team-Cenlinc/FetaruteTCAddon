@@ -45,6 +45,7 @@ class ConsistDispatchArbiterTest {
   private final Operator operator = operator();
   private final UUID boundRoute = UUID.randomUUID();
   private final UUID freeRoute = UUID.randomUUID();
+  private final UUID dmuRoute = UUID.randomUUID();
   private final Set<String> overLimit = new HashSet<>();
   private final Map<String, String> consistOfTrain = new HashMap<>();
   private ConsistPlanService plans;
@@ -55,10 +56,12 @@ class ConsistDispatchArbiterTest {
     ConsistPlan plan =
         new ConsistPlan(
             UUID.randomUUID(), operator.id(), "WS", "3 SH_A6\n1 SH_A8 | type=emu", NOW, NOW);
+    ConsistPlan dmuPlan =
+        new ConsistPlan(UUID.randomUUID(), operator.id(), "DMU", "1 DMU_3", NOW, NOW);
     StorageProvider provider = mock(StorageProvider.class);
     ConsistPlanRepository repository = mock(ConsistPlanRepository.class);
     when(provider.consistPlans()).thenReturn(repository);
-    when(repository.listAll()).thenReturn(List.of(plan));
+    when(repository.listAll()).thenReturn(List.of(plan, dmuPlan));
     ConsistInspector inspector =
         new ConsistInspector() {
           @Override
@@ -81,7 +84,8 @@ class ConsistDispatchArbiterTest {
     Map<UUID, RouteDefinitionCache.RouteRecord> records =
         Map.of(
             boundRoute, record(boundRoute, Map.of(ConsistPlanService.ROUTE_METADATA_KEY, "ws")),
-            freeRoute, record(freeRoute, Map.of()));
+            freeRoute, record(freeRoute, Map.of()),
+            dmuRoute, record(dmuRoute, Map.of(ConsistPlanService.ROUTE_METADATA_KEY, "dmu")));
     plans.attachRoutes(id -> Optional.ofNullable(records.get(id)));
     plans.reload();
     arbiter =
@@ -153,6 +157,36 @@ class ConsistDispatchArbiterTest {
         List.of(a8, a6, a6Later),
         arbiter.orderReuseCandidates(ticket(boundRoute, false), arrived),
         "跑了两班 SH_A6 之后轮到 SH_A8");
+  }
+
+  /** 叫车折返车：接续交路没绑方案时不限车型，照送车交路的编组出车。 */
+  @Test
+  void turnbackOntoAnUnboundRouteKeepsTheInboundConsist() {
+    assertEquals(
+        ConsistDispatchArbiter.TurnbackConsist.ANY, arbiter.turnbackConsist(dmuRoute, freeRoute));
+  }
+
+  /** 接续交路绑了方案：照它的方案挑车型（与出车同一套排名），送车交路没绑方案时不受限；到了出车上限的往后排，都到了仍出排第一的。 */
+  @Test
+  void turnbackSpawnsWhatTheOnwardPlanTakes() {
+    assertEquals(Optional.of("SH_A6"), arbiter.turnbackConsist(freeRoute, boundRoute).consist());
+
+    overLimit.add("SH_A6");
+    assertEquals(Optional.of("SH_A8"), arbiter.turnbackConsist(freeRoute, boundRoute).consist());
+
+    overLimit.add("SH_A8");
+    ConsistDispatchArbiter.TurnbackConsist atLimit = arbiter.turnbackConsist(freeRoute, boundRoute);
+    assertTrue(atLimit.possible(), "都到了出车上限：票留着等，不算接不上");
+    assertEquals(Optional.of("SH_A6"), atLimit.consist());
+  }
+
+  /** 送车交路也绑了方案：只挑它也认的车型；两边没有共同车型就接不上。 */
+  @Test
+  void turnbackNeedsAConsistBothPlansTake() {
+    assertEquals(Optional.of("SH_A6"), arbiter.turnbackConsist(boundRoute, boundRoute).consist());
+    ConsistDispatchArbiter.TurnbackConsist none = arbiter.turnbackConsist(dmuRoute, boundRoute);
+    assertFalse(none.possible());
+    assertEquals(Optional.empty(), none.consist());
   }
 
   @Test

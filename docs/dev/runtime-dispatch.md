@@ -249,6 +249,8 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
   从节点量会多盖半个车长，双站台终点的共用入口道岔正好落在里面，另一个站台就进不去（2026-09-27 实服 PPK：停 PPK:1 按表等约 5 分钟折返，
   分到 PPK:2 的后车在 RVS:1 一直等到它开走）。待命车只会原地等票或折返，身后的轨道对它没有用；车身区间的端点仍在保持范围内，同线开往同一站台的
   后车照样进不来。没停稳、覆盖不完整时保持原有的尾部保护；已有折返交接（dispatch attempt）时整条进路原样保持，不走这条收窄。
+- 这条收窄要靠待命 tick 跑起来。巡检对静止的车只在“由动转停”那一拍跑一次完整 tick，之后只复查有停因的车；AutoStation 要稳定几拍才停妥、挂发车门控，门控常常晚于那一拍，车身上就没有停因，终到停站结束由出站门控登记成待命车后再也没人给它跑 tick，尾部保护一直留着。所以 AutoStation 挂上门控后下一拍补一次 `refreshSignal`，待命登记时车身上没有停因的补记与待命 tick 同样的 `LAYOVER_HOLD` 停因（已有停因的不动，由下一拍待命 tick 改写），见 `LayoverRegistrationRecheckTest`。
+- 折返交接只被排队位挡住时（`LaunchAuthorizationService#authorizeHandoff` 的阻挡全是 `QUEUE_POSITION`），先按割排队边的同一套证据（`applySmartQueuePositionYield`：本车只被排队位挡、排队的车正被本车持有的资源挡着，两份阻挡快照都新鲜）割掉那条排队位，割成了当场再交接一次。健康层不巡检待命车，这一步只能在交接里做；不当场重试，排队的车下一拍就重新排回来。典型形态：尽头式终点待命车身后的咽喉还占着，去另一个站台的后车先在出站渡线上排了队、又被这段占用挡在站外。见 `LayoverTurnbackQueueYieldTest`。
 - 即时复用只有在 `readyAt` 已到、TrainCarts 句柄确认列车停稳、Waypoint 居中状态已结束且 `DwellRegistry` 不再有真实停站窗口时才进入折返授权；否则保留 Layover 候选，等待后续 spawn tick 重试。Waypoint TERM 的候选会在触牌时登记，实际 dwell 在居中完成后才启动，因此不能只相信预估的 `readyAt`。
 - 下一条交路的 DYNAMIC 站台没有空闲容量时，Layover 不领取 ticket、不执行 authority handoff，也不申请前向进路；候选保持可重试，待站台容量释放后再派发。
 - 同一 `ticketId` 在 `LayoverRegistry` 内最多只有一个 dispatch attempt owner。handoff 前被拒绝会释放 attempt，分配器仍可尝试下一辆 READY 候选；一旦 handoff 留下 attempt，当前 tick 与后续 tick 都只重试该 owner，不能把同一票据同时交给第二辆折返车。pending 的超时、fallback 与人工清理也不能删除 active attempt 对应票据。
@@ -422,6 +424,8 @@ javap -p <class> | grep -cE '\(.*\)( throws [^;]*)?;$'
    早到的车等到表定时刻再走；扣留期间它对别的车完全透明。
    已到点/已晚点一律放行，扣留时长被 `HOLD_CEILING`（150 秒）硬封顶——必须低于发车门锁自身
    180 秒的回收时限，否则列车会进入"自己不动、也不再为别人排队"的状态。
+   回收时限只收回没人还的锁：AutoStation 停站任务还活着、还没放行时每秒用同一会话续锁（`renewDepartureGate`，锁已不在或换了会话时不动），
+   停得久的车（等车掌发车信号、等联挂、解下的车等下一班）不会被超时清掉门锁、再被信号 tick 放走。
 
 另有一处与车辆生命周期相关的接入点：`SimpleTicketAssigner#setLayoverReuseGate`。
 时刻表层通过它否决"交路额度已用完"的列车继续接运营班次，被否决的车留在 layover 闲置，

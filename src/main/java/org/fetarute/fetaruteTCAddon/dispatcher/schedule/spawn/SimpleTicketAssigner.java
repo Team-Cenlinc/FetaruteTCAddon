@@ -239,6 +239,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   private volatile EarlySpawnBinding earlySpawnBinding = EarlySpawnBinding.NONE;
 
+  /** 出库去联挂的主干：要挂的回程支线车已经停在联挂站、占着出库要走的资源时，只有那辆车不挡它出库，出车后扣在车库股道上等联挂进站。 默认没有。 */
+  public interface DepotTrunkHook {
+    /** 没有出库联挂。 */
+    DepotTrunkHook NONE =
+        new DepotTrunkHook() {
+          @Override
+          public void admit(SpawnTicket ticket, String trainName) {}
+
+          @Override
+          public void spawned(String trainName) {}
+        };
+
+    /** 出库预检之前：这张票开的是回程支线车正等着并进的那一班主干时登记下来，那辆车的占用不挡它出库。 */
+    void admit(SpawnTicket ticket, String trainName);
+
+    /** 出车拿到占用以后、第一拍信号之前：占用和回程支线车有重叠时扣在车库股道上。 */
+    void spawned(String trainName);
+  }
+
+  private volatile DepotTrunkHook depotTrunkHook = DepotTrunkHook.NONE;
+
   /** 当前所有已加载的列车，用于重启后找回在车库等候的提前出车。默认没有。 */
   private volatile java.util.function.Supplier<? extends java.util.Collection<RuntimeTrainHandle>>
       liveTrains = List::of;
@@ -637,11 +658,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
 
+    // 车型按方案分流在挑回库线路时已经做过（ReclaimManager）：这里不再拒，否则没有一条回库线路接这个车型的车会一直搁在线上
     LayoverRegistry.LayoverCandidate candidate = candidateOpt.get();
-    if (!acceptsConsist(ticket.routeId(), candidate)) {
-      debugLogger.accept("强制分配跳过: 车型不在线路的编组方案里 train=" + trainName + " route=" + ticket.routeId());
-      return false;
-    }
     SpawnControl.Lease lease =
         tryAcquireSpawnControlForLayover(
                 Optional.ofNullable(provider),
@@ -950,7 +968,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /** 回收派 RETURN：车库只收方案里的车型。裁决出错时放行，不让车滞留在终点。 */
-  private boolean acceptsConsist(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
+  @Override
+  public boolean acceptsConsist(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
     try {
       return consistArbiter.acceptsForRoute(routeId, candidate);
     } catch (RuntimeException failure) {
@@ -3114,6 +3133,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.depotSpawnHold = hold == null ? (ticket, trainName) -> false : hold;
   }
 
+  /** 注册出库去联挂的主干的登记与扣车（见 {@link DepotTrunkHook}）。传入 {@code null} 恢复"没有"。 */
+  public void setDepotTrunkHook(DepotTrunkHook hook) {
+    this.depotTrunkHook = hook == null ? DepotTrunkHook.NONE : hook;
+  }
+
   /** 注册提前出车与交路的绑定（见 {@link EarlySpawnBinding}）。传入 {@code null} 恢复"不记、不绑"。 */
   public void setEarlySpawnBinding(EarlySpawnBinding binding) {
     this.earlySpawnBinding = binding == null ? EarlySpawnBinding.NONE : binding;
@@ -3140,6 +3164,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
               + trainName
               + " error="
               + failure.getMessage());
+    }
+  }
+
+  private void admitDepotTrunk(SpawnTicket ticket, String trainName) {
+    try {
+      depotTrunkHook.admit(ticket, trainName);
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "出库联挂登记回调异常: ticket="
+              + ticket.id()
+              + " train="
+              + trainName
+              + " error="
+              + failure.getMessage());
+    }
+  }
+
+  private void holdDepotTrunk(String trainName) {
+    try {
+      depotTrunkHook.spawned(trainName);
+    } catch (RuntimeException failure) {
+      debugLogger.accept("出库联挂扣车回调异常: train=" + trainName + " error=" + failure.getMessage());
     }
   }
 
@@ -4008,6 +4054,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       deferWithoutAttempt(effectiveTicket, now, "materialized-rollback-identity-live");
       return Optional.empty();
     }
+    if (entry.isEmpty()) {
+      admitDepotTrunk(effectiveTicket, trainName);
+    }
 
     Optional<java.util.UUID> worldIdOpt =
         entry.isPresent()
@@ -4329,6 +4378,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
       holdDepotSpawnIfRequested(context.ticket(), context.trainName());
       holdEarlySpawnUntilDue(context.ticket(), context.trainName(), train, context.now());
+      holdDepotTrunk(context.trainName());
       if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
           runtimeDispatchService,
           train,

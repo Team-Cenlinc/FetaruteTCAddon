@@ -20283,7 +20283,7 @@ class RuntimeDispatchServiceTest {
       OccupancyRequestContext context,
       List<String> debugMessages) {}
 
-  private record ThroatFixture(
+  record ThroatFixture(
       NodeId entry,
       NodeId throat,
       NodeId switcher,
@@ -20294,7 +20294,7 @@ class RuntimeDispatchServiceTest {
       OccupancyResource conflict,
       ThroatConflictGraph graph) {
 
-    private OccupancyRequestContext context(
+    OccupancyRequestContext context(
         String trainName, CorridorDirection direction, boolean reverse) {
       if (reverse) {
         return singleConflictPathContext(
@@ -20413,7 +20413,7 @@ class RuntimeDispatchServiceTest {
     return new RailEdge(id, from, to, 10, 8.0, true, Optional.empty());
   }
 
-  private static ThroatFixture ppkThroatFixture() {
+  static ThroatFixture ppkThroatFixture() {
     NodeId entry = NodeId.of("OP:S:PPK:1");
     NodeId throat = NodeId.of("OP:S:PPK:1:001");
     NodeId switcher = NodeId.of("SWITCHER:-583:65:650");
@@ -21013,7 +21013,7 @@ class RuntimeDispatchServiceTest {
         debugMessages);
   }
 
-  private RuntimeDispatchService createMinimalService(
+  RuntimeDispatchService createMinimalService(
       OccupancyManager occupancyManager, List<String> debugMessages, SmartDispatcherMode mode) {
     return createMinimalService(
         occupancyManager,

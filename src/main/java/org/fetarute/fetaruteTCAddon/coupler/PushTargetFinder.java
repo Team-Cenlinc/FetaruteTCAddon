@@ -18,7 +18,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintC
 
 /**
  * 推车前沿轨道找前方的车：从端车中心朝开着的那一端沿轨道走（弯道、坡道照走，道岔按此刻的开向），碰到的第一节别的列车的车厢就是对方。
- * 对方须是它那列车的端车；中间隔着别的车、轨道走到头或超出距离都算没找到。只在服务器主线程使用。
+ * 对方须是它那列车的端车；中间隔着别的车、轨道走到头或超出距离都算没找到。只走已加载的区块：走到没加载的区块就停（不让走行点去加载它）， 记为前方区块没加载。只在服务器主线程使用。
  */
 final class PushTargetFinder {
 
@@ -38,13 +38,18 @@ final class PushTargetFinder {
 
   /** 没找到的原因。 */
   enum Failure {
-    /** 端车不在轨道上，或附近区块没加载。 */
+    /** 端车不在轨道上，或端车所在处的区块没加载。 */
     NO_TRACK,
     /** 距离内没有车，或轨道走到了头、道岔没开向对方。 */
     NOT_FOUND,
     /** 先碰到的是别的列车中间的车厢。 */
-    MIDDLE_CAR
+    MIDDLE_CAR,
+    /** 沿轨道走到了没加载的区块，走到那里为止没碰到车（没有玩家在附近时，远处没有车的区块常常没加载）。 */
+    UNLOADED_AHEAD
   }
+
+  /** 区块是否加载按走行点周围这么多格查。 */
+  private static final int LOADED_CHECK_BLOCKS = 2;
 
   /**
    * 找到的对方。
@@ -102,7 +107,7 @@ final class PushTargetFinder {
         world,
         (int) Math.floor(center.get().getX()),
         (int) Math.floor(center.get().getZ()),
-        (int) Math.ceil(reach + 2.0))) {
+        LOADED_CHECK_BLOCKS)) {
       return Search.failed(Failure.NO_TRACK);
     }
     List<Candidate> candidates = nearbyCars(world, center.get(), reach + 2.0, group);
@@ -128,7 +133,20 @@ final class PushTargetFinder {
     Set<RailFootprintCell> cells = new TreeSet<>();
     try {
       addCell(cells, point);
+      long checkedArea = Long.MIN_VALUE;
       while (walked < reach) {
+        Vector at = point.state.positionLocation().toVector();
+        long area = chunkArea(at);
+        if (area != checkedArea) {
+          if (!WorldUtil.areBlocksLoaded(
+              world,
+              (int) Math.floor(at.getX()),
+              (int) Math.floor(at.getZ()),
+              LOADED_CHECK_BLOCKS)) {
+            return Search.failed(Failure.UNLOADED_AHEAD);
+          }
+          checkedArea = area;
+        }
         boolean full = point.move(STEP_BLOCKS);
         walked += full ? STEP_BLOCKS : point.moved;
         addCell(cells, point);
@@ -168,6 +186,20 @@ final class PushTargetFinder {
       return Search.failed(Failure.NOT_FOUND);
     }
     return Search.found(new Target(hit, facing.get(), Math.max(0.0, gap), cells));
+  }
+
+  /** 走行点周围 {@link #LOADED_CHECK_BLOCKS} 格涉及的区块范围（四个区块坐标拼成一个键）：变了才重查加载。 */
+  private static long chunkArea(Vector at) {
+    int x = (int) Math.floor(at.getX());
+    int z = (int) Math.floor(at.getZ());
+    long minX = (x - LOADED_CHECK_BLOCKS) >> 4;
+    long maxX = (x + LOADED_CHECK_BLOCKS) >> 4;
+    long minZ = (z - LOADED_CHECK_BLOCKS) >> 4;
+    long maxZ = (z + LOADED_CHECK_BLOCKS) >> 4;
+    return ((minX & 0xFFFFL) << 48)
+        | ((maxX & 0xFFFFL) << 32)
+        | ((minZ & 0xFFFFL) << 16)
+        | (maxZ & 0xFFFFL);
   }
 
   /** 记下走到的这一步所在的轨道方块。 */

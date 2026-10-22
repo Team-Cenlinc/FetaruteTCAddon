@@ -38,7 +38,19 @@ public final class StopAlignment {
     SKIPPED
   }
 
+  /** 按车站牌子居中时认作已经对上的偏移（格）：越过更多就要往回开。 */
+  public static final double CENTERED_BLOCKS = 0.01;
+
   private StopAlignment() {}
+
+  /**
+   * 停着的列车中心沿前进方向已越过车站牌子（{@link #groupOffset} 取列车中心，越过为正）：按牌子居中要往回开。量不出（{@code NaN}）时为 false。
+   *
+   * <p>TrainCarts 让停着的车往回开时，起步那一拍就把整列调头；车被调度扣着开不动，也会留下反过来的行进方向。
+   */
+  public static boolean centerPastStopPoint(double centerOffset) {
+    return centerOffset > CENTERED_BLOCKS;
+  }
 
   /**
    * 水平面上 {@code center} 相对 {@code stopPoint} 沿 {@code travel} 方向的偏移。

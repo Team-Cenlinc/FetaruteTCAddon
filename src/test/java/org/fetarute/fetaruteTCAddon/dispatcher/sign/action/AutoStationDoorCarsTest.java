@@ -43,4 +43,31 @@ class AutoStationDoorCarsTest {
     assertTrue(AutoStationDoorController.opensDoors(DoorCars.ALL, second));
     assertTrue(AutoStationDoorController.opensDoors(null, second));
   }
+
+  @Test
+  @DisplayName("只写节数没写 door: 的标志：照样全车开门，但停站中挂上来的车厢按这块标志判，节数对不上整列时不开")
+  void markWithoutDoorSpecStillJudgesJoinedCars() {
+    UUID trunk = UUID.randomUUID();
+    UUID joined = UUID.randomUUID();
+    List<UUID> merged = List.of(trunk, joined);
+
+    DoorCars ownLength =
+        AutoStationDoorController.doorCars(null, StopMarkSign.parse("car:1", "").orElseThrow());
+    assertTrue(ownLength.all(), "停在一节车的标志：主干全车开门");
+    assertFalse(
+        ownLength.joined(merged, java.util.Set.of(joined)).includes(joined),
+        "挂上后两节，标志是一节车的：挂上来的那节多半在站台外");
+
+    DoorCars wholeTrain =
+        AutoStationDoorController.doorCars(null, StopMarkSign.parse("car:2", "").orElseThrow());
+    assertTrue(
+        wholeTrain.joined(merged, java.util.Set.of(joined)).includes(joined),
+        "按整列节数的标志停好：挂上来的那节开门");
+
+    assertTrue(
+        AutoStationDoorController.doorCars(null, null)
+            .joined(merged, java.util.Set.of(joined))
+            .includes(joined),
+        "没有标志（按车站牌子居中）：都开");
+  }
 }

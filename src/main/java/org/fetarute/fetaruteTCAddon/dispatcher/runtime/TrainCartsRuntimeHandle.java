@@ -43,7 +43,9 @@ import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
  */
 public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
 
-  private static final String ACTION_TAG_LAUNCH = "fta_launch";
+  /** 调度下发的发车动作的标签：停站对位据此认出不是自己的对位动作。 */
+  public static final String ACTION_TAG_LAUNCH = "fta_launch";
+
   private static final double TICKS_PER_SECOND = 20.0;
   private static final int PATH_NODE_SEARCH_DISTANCE = 64;
   private static final int MAX_LIVE_BODY_WALK_STEPS = 256;
@@ -1019,6 +1021,8 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
             fallbackState, destination, "path_world_missing", logger);
       }
       com.bergerkiller.bukkit.tc.pathfinding.PathNode currentNode = null;
+      com.bergerkiller.bukkit.tc.pathfinding.PathNode targetNode =
+          pathWorld.getNodeByName(destination.trim());
       for (RailStateCandidate candidate : candidates) {
         RailState state = candidate.state();
         if (state == null) {
@@ -1026,26 +1030,24 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
         }
         Block railBlock = state.railBlock();
         Block positionBlock = state.positionBlock();
-        String foundDetail = null;
         com.bergerkiller.bukkit.tc.pathfinding.PathNode node =
             railBlock != null ? pathWorld.getNodeAtRail(railBlock) : null;
         if (node == null && positionBlock != null) {
           node = pathWorld.getNodeAtRail(positionBlock);
         }
-        if (node == null) {
-          // 若当前位置不在 PathNode 上，沿轨道向前/向后寻找最近节点以对齐 TrainCarts debug destination 语义
-          PathNodeSearchResult search =
-              findNearestPathNode(pathWorld, candidate, railBlock, positionBlock);
-          if (search != null) {
-            node = search.node();
-            foundDetail = candidate.describe(railBlock, positionBlock) + " " + search.detail();
+        if (node == null && targetNode != null) {
+          // 不在 PathNode 上：寻路结果第一段的出口属于那个节点的轨道，不能拿到这里套用；改为沿轨道两头各找最近的节点，
+          // 往“走到节点 + 节点到目的地”最短的一头开
+          Optional<LaunchDirectionResult> searched =
+              resolveBySearch(pathWorld, candidate, railBlock, positionBlock, targetNode);
+          if (searched.isPresent()) {
+            return searched.get();
           }
         }
         if (node != null) {
           railState = state;
           currentNode = node;
-          candidateDebug =
-              foundDetail != null ? foundDetail : candidate.describe(railBlock, positionBlock);
+          candidateDebug = candidate.describe(railBlock, positionBlock);
           break;
         }
         if (candidateDebug.equals("-")) {
@@ -1059,8 +1061,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
         return resolveLaunchDirectionFallback(
             fallbackState, destination, "current_node_missing " + candidateDebug, logger);
       }
-      com.bergerkiller.bukkit.tc.pathfinding.PathNode destinationNode =
-          pathWorld.getNodeByName(destination.trim());
+      com.bergerkiller.bukkit.tc.pathfinding.PathNode destinationNode = targetNode;
       if (destinationNode == null) {
         return resolveLaunchDirectionFallback(
             railState, destination, "destination_node_missing", logger);
@@ -1152,23 +1153,24 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     candidates.add(new RailStateCandidate(label, member, state));
   }
 
-  private PathNodeSearchResult findNearestPathNode(
+  /**
+   * 车头不在 PathNode 上时的起步方向：沿轨道朝每个可走的方向找最近的节点，看节点去目的地的寻路是不是从走进来的那个接口原路出去。 不折返的一头里取“走到节点 +
+   * 寻路距离”最短的；只有折返的（节点在身后、车身底下的站点就是这样）就往反方向开。
+   *
+   * @return 哪个方向都找不到能到目的地的节点时为空
+   */
+  private Optional<LaunchDirectionResult> resolveBySearch(
       com.bergerkiller.bukkit.tc.pathfinding.PathWorld pathWorld,
       RailStateCandidate candidate,
       Block railBlock,
-      Block positionBlock) {
-    if (pathWorld == null || candidate == null) {
-      return null;
-    }
+      Block positionBlock,
+      com.bergerkiller.bukkit.tc.pathfinding.PathNode destination) {
     Block start = railBlock != null ? railBlock : positionBlock;
-    if (start == null) {
-      return null;
+    if (start == null || candidate == null) {
+      return Optional.empty();
     }
-    Set<BlockFace> directions = resolveSearchDirections(candidate);
-    if (directions.isEmpty()) {
-      return null;
-    }
-    for (BlockFace direction : directions) {
+    List<SearchedRoute> found = new ArrayList<>();
+    for (BlockFace direction : resolveSearchDirections(candidate)) {
       TrackWalkingPoint walker = new TrackWalkingPoint(start, direction);
       walker.setLoopFilter(true);
       if (!walker.moveFull()) {
@@ -1179,17 +1181,179 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
           break;
         }
         Block block = walker.state != null ? walker.state.railBlock() : null;
-        if (block == null) {
-          continue;
-        }
-        com.bergerkiller.bukkit.tc.pathfinding.PathNode node = pathWorld.getNodeAtRail(block);
+        com.bergerkiller.bukkit.tc.pathfinding.PathNode node =
+            block == null ? null : pathWorld.getNodeAtRail(block);
         if (node != null) {
-          return new PathNodeSearchResult(
-              node, "track_search " + direction.name() + " dist=" + Math.round(walker.movedTotal));
+          com.bergerkiller.bukkit.tc.pathfinding.PathConnection[] route =
+              node == destination
+                  ? new com.bergerkiller.bukkit.tc.pathfinding.PathConnection[0]
+                  : node.findRoute(destination);
+          Optional<Boolean> reverses =
+              route != null && route.length > 0
+                  ? reversesAt(walker.state, route[0].junctionName)
+                  : Optional.of(false);
+          if (reverses.isPresent()) {
+            found.add(
+                new SearchedRoute(
+                    direction,
+                    walker.movedTotal,
+                    routeDistance(node == destination, route),
+                    reverses.get()));
+          }
+          break;
         }
       }
     }
-    return null;
+    String source = " source=" + candidate.describe(railBlock, positionBlock);
+    return pickSearchedDirection(found)
+        .map(
+            direction ->
+                LaunchDirectionResult.success(
+                    direction, "track_search " + describe(found) + source));
+  }
+
+  /** 节点到目的地的寻路距离；寻不到路时为空。 */
+  private static OptionalDouble routeDistance(
+      boolean atDestination, com.bergerkiller.bukkit.tc.pathfinding.PathConnection[] route) {
+    if (atDestination) {
+      return OptionalDouble.of(0.0);
+    }
+    if (route == null || route.length == 0) {
+      return OptionalDouble.empty();
+    }
+    double total = 0.0;
+    for (com.bergerkiller.bukkit.tc.pathfinding.PathConnection connection : route) {
+      total += connection.distance;
+    }
+    return OptionalDouble.of(total);
+  }
+
+  /** 寻路是不是从走进这个节点时经过的接口原路出去（要折返）。读不出接口或行进方向时为空：这一头不参与选方向（读不出就当不折返，身后的节点会让车往后开）。 */
+  private static Optional<Boolean> reversesAt(RailState arrived, String exitJunction) {
+    if (arrived == null || exitJunction == null || arrived.railPiece() == null) {
+      return Optional.empty();
+    }
+    org.bukkit.util.Vector motion = arrived.motionVector();
+    if (motion == null) {
+      return Optional.empty();
+    }
+    List<JunctionFace> faces = new ArrayList<>();
+    for (RailJunction junction : arrived.railPiece().getJunctions()) {
+      if (junction == null || junction.name() == null || junction.position() == null) {
+        continue;
+      }
+      BlockFace face = junction.position().getMotionFaceWithSubCardinal();
+      if (isHorizontalFace(face)) {
+        faces.add(new JunctionFace(junction.name(), face.getModX(), face.getModZ()));
+      }
+    }
+    if (faces.stream().noneMatch(face -> face.name().equalsIgnoreCase(exitJunction))) {
+      // 寻路的出口不在这段轨道读得出的接口里：判不了
+      return Optional.empty();
+    }
+    return enteredThrough(faces, motion.getX(), motion.getZ()).map(exitJunction::equalsIgnoreCase);
+  }
+
+  /**
+   * 走进节点时经过的接口：朝外方向与行进方向最相反的那个（直轨上是身后那头，道岔上是进岔的那头）。纯计算。
+   *
+   * @return 没有接口或行进方向为零时为空
+   */
+  static Optional<String> enteredThrough(
+      List<JunctionFace> junctions, double motionX, double motionZ) {
+    double motionLength = Math.hypot(motionX, motionZ);
+    if (junctions == null || motionLength < 1.0e-6) {
+      return Optional.empty();
+    }
+    String entered = null;
+    double lowest = Double.POSITIVE_INFINITY;
+    for (JunctionFace junction : junctions) {
+      double length = Math.hypot(junction.x(), junction.z());
+      if (length < 1.0e-6) {
+        continue;
+      }
+      double dot = (junction.x() * motionX + junction.z() * motionZ) / (length * motionLength);
+      if (dot < lowest) {
+        lowest = dot;
+        entered = junction.name();
+      }
+    }
+    return Optional.ofNullable(entered);
+  }
+
+  /**
+   * 节点轨道的一个接口与它朝外的水平方向。
+   *
+   * @param name 接口名
+   * @param x 朝外方向 X 分量
+   * @param z 朝外方向 Z 分量
+   */
+  record JunctionFace(String name, double x, double z) {}
+
+  /**
+   * 沿轨道朝各方向找到的最近节点定起步方向。纯计算。
+   *
+   * <ul>
+   *   <li>不折返的一头里取到目的地总距离最短的那个方向；
+   *   <li>没有不折返的：取折返的里寻路最短的那一头的反方向（目的地在身后）；
+   *   <li>寻不到路的一头不算。
+   * </ul>
+   *
+   * @return 哪头都寻不到路时为空
+   */
+  static Optional<BlockFace> pickSearchedDirection(List<SearchedRoute> found) {
+    SearchedRoute onward = null;
+    SearchedRoute back = null;
+    for (SearchedRoute route : found) {
+      if (route.routed().isEmpty()) {
+        continue;
+      }
+      if (route.reverses()) {
+        if (back == null || route.routed().getAsDouble() < back.routed().getAsDouble()) {
+          back = route;
+        }
+      } else if (onward == null || route.total() < onward.total()) {
+        onward = route;
+      }
+    }
+    if (onward != null) {
+      return Optional.of(onward.direction());
+    }
+    return back == null ? Optional.empty() : Optional.of(back.direction().getOppositeFace());
+  }
+
+  private static String describe(List<SearchedRoute> found) {
+    StringBuilder out = new StringBuilder();
+    for (SearchedRoute route : found) {
+      if (out.length() > 0) {
+        out.append(' ');
+      }
+      out.append(route.direction().name())
+          .append(" dist=")
+          .append(Math.round(route.walked()))
+          .append(" route=")
+          .append(route.routed().isPresent() ? Math.round(route.routed().getAsDouble()) : "-");
+      if (route.reverses()) {
+        out.append("(back)");
+      }
+    }
+    return out.toString();
+  }
+
+  /**
+   * 朝一个方向沿轨道找到的最近节点。
+   *
+   * @param direction 从车头出发的方向
+   * @param walked 走到节点的距离
+   * @param routed 节点到目的地的寻路距离；寻不到路时为空
+   * @param reverses 寻路从走进节点的那个接口原路出去（目的地在这一头的反方向）
+   */
+  record SearchedRoute(
+      BlockFace direction, double walked, OptionalDouble routed, boolean reverses) {
+
+    double total() {
+      return walked + routed.orElse(Double.POSITIVE_INFINITY);
+    }
   }
 
   private Set<BlockFace> resolveSearchDirections(RailStateCandidate candidate) {
@@ -1320,9 +1484,6 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return face.map(BlockFace::name).orElse("-");
     }
   }
-
-  private record PathNodeSearchResult(
-      com.bergerkiller.bukkit.tc.pathfinding.PathNode node, String detail) {}
 
   private record RailStateCandidate(String label, MinecartMember<?> member, RailState state) {
     String describe(Block railBlock, Block positionBlock) {

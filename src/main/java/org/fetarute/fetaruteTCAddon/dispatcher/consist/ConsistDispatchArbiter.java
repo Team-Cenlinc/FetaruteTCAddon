@@ -144,6 +144,61 @@ public final class ConsistDispatchArbiter implements ConsistArbiter {
     return SpawnChoice.chosen(profile.pattern(), member.get().spawnTags());
   }
 
+  /**
+   * 折返车的车型：在送车交路上出车、开进终点待命，再由接续交路的票接走（叫车的折返车）。接车只认接续交路方案里的车型，所以出车就照接续交路的方案挑——
+   * 与新车出库同一套排名，跳过档案不可用的，优先没到出车上限的；送车交路自己也绑了方案时只挑它也认的车型，否则按票出车时会被它的方案拒掉。
+   *
+   * @param inboundRouteId 折返车出车跑的送车交路
+   * @param onwardRouteId 开进终点后接它的交路
+   * @return 接续交路没绑方案时不限车型；挑得出时为要出的车型；一个都挑不出时为接不上
+   */
+  public TurnbackConsist turnbackConsist(UUID inboundRouteId, UUID onwardRouteId) {
+    Optional<ResolvedConsistPlan> onward = plans.planForRoute(onwardRouteId);
+    if (onward.isEmpty()) {
+      return TurnbackConsist.ANY;
+    }
+    Optional<ResolvedConsistPlan> inbound = plans.planForRoute(inboundRouteId);
+    String atLimit = null;
+    for (ResolvedConsistPlan.Member member : plans.rank(onwardRouteId, onward.get())) {
+      Optional<ConsistProfile> profile = member.profile();
+      if (profile.isEmpty() || (inbound.isPresent() && !inbound.get().allows(member.key()))) {
+        continue;
+      }
+      String pattern = profile.get().pattern();
+      if (!inspector.exceedsSpawnLimit(pattern)) {
+        return TurnbackConsist.of(pattern);
+      }
+      if (atLimit == null) {
+        // 都到了出车上限时仍出排第一的：票留着等上限松开，和普通出车一样
+        atLimit = pattern;
+      }
+    }
+    return atLimit == null ? TurnbackConsist.NONE : TurnbackConsist.of(atLimit);
+  }
+
+  /**
+   * {@link #turnbackConsist} 的结果。
+   *
+   * @param possible 这条送车交路的折返车接不接得上
+   * @param consist 要出的车型（编组写法）；不限车型时为空
+   */
+  public record TurnbackConsist(boolean possible, Optional<String> consist) {
+
+    /** 接续交路没绑方案：照送车交路的编组出车。 */
+    public static final TurnbackConsist ANY = new TurnbackConsist(true, Optional.empty());
+
+    /** 两边的方案没有共同的车型：这条送车交路的折返车接不上。 */
+    public static final TurnbackConsist NONE = new TurnbackConsist(false, Optional.empty());
+
+    public TurnbackConsist {
+      consist = consist == null ? Optional.empty() : consist;
+    }
+
+    static TurnbackConsist of(String pattern) {
+      return new TurnbackConsist(true, Optional.of(pattern));
+    }
+  }
+
   @Override
   public boolean acceptsForRoute(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
     if (candidate == null) {

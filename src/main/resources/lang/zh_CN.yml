@@ -1536,6 +1536,7 @@ coupler:
     toggle: "  <white>右键端车外端</white> <gray>开启或锁闭该端车钩；手持扳手时，附近列车外端的车钩以绿色（开启）与红色（锁闭）粒子标示</gray>"
     split: "  <white>右键两节车厢的连接处</white> <gray>在此解挂，解挂处两端车钩随即锁闭；调度管理的列车解下的部分改用新车名</gray>"
     push: "  <white>Shift+右键车钩已开启的端车</white> <gray>将整列车慢速推向前方列车并连挂；对方相对一端的车钩须已开启</gray>"
+    couple: "  <white>开启车钩后点击聊天栏的［连挂］</white> <gray>本列车慢速驶向前方列车并连挂，对方相对一端的车钩随之开启</gray>"
     info: "  <white>右键车厢中部</white> <gray>查看车厢序号、编组、两端车钩与可否操作</gray>"
   player-only: "<prefix> <red>车钩扳手只能由玩家领取</red>"
   unavailable: "<prefix> <red>连挂解挂服务尚未就绪</red>"
@@ -1568,6 +1569,10 @@ coupler:
     done: "<prefix> <green>已解挂</green> <white><train></white> <gray>（<kept> 节 + <detached> 节，解下的列车：</gray><white><name></white><gray>）</gray>"
     rename-failed: "<prefix> <yellow>已解挂</yellow> <white><train></white><yellow>，但解下的 <detached> 节未能取得新车名，调度将按重复列车处理</yellow>"
     failed: "<prefix> <red>未能解挂</red> <white><train></white>"
+  couple:
+    offer: "<prefix> <gray>前方约 <gap> 格有列车</gray> <white><train></white> <click:run_command:'/fta coupler couple <token>'><hover:show_text:'<gray>本列车将慢速驶向该列车并连挂；对方相对一端的车钩随之开启</gray>'><green>[连挂]</green></hover></click>"
+    none: "<prefix> <yellow>该［连挂］按钮已失效：请用扳手右键重新开启要连挂一端的车钩，再点击新的［连挂］</yellow>"
+    far: "<prefix> <yellow>距离列车过远，请走近后再点击［连挂］</yellow>"
   push:
     joint: "<prefix> <yellow>此处为两节车厢的连接处，只能从端车外侧推送</yellow>"
     closed: "<prefix> <yellow>该端车钩处于锁闭状态，请先右键开启</yellow>"
