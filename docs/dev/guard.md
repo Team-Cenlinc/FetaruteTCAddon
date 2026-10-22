@@ -48,7 +48,7 @@
 ## 按钮与铃
 
 - 快捷栏（数据包层改写，背包本身不动）：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃、9 紧急停车；5、8 空着。左右按列车行进方向算（与报站、站台屏、驾驶员一致；车掌坐车尾面朝后方，与自己的左右相反）：`DriveDoors` 与驾驶员共用，车掌的 `DriveDoors.Cab#doorsFromHead` 固定按车头端，开门、应开哪一侧、开错门、侧边栏都用 `DriveDoors#doorFacing`；出站监视的车后方向仍按车掌实际面朝的方向（`DriveDoors#cabFacing`）。开门键对已开着的一侧无效，关门后再开门照样按开门键。选中格子后右键按下，按住右键时客户端连续发包只算一次；发车铃按住多久响多久。
-- 贴图键：车门沿用驾驶台的 `fetarute:drive/panel/door_l_*`、`door_r_*`；其余是 `fetarute:drive/guard/<键>`（`door_close[_on]`、`report[_used]`、`confirm_stop|go|done`、`buzzer[_on]`、`emergency[_on]`、菜单的 `seat`），结束值乘沿用 `panel/end|end_confirm`。没装材质包时按染料区分，“亮起”加附魔光效。
+- 材质包标记（写在 `custom_model_data`，见 [resource-pack.md](resource-pack.md)）：车门沿用驾驶台的 `fetarute:drive/panel/door_l_*`、`door_r_*`；其余是 `fetarute:drive/guard/<键>`（`door_close[_on]`、`report[_used]`、`confirm_stop|go|done`、`buzzer[_on]`、`emergency[_on]`、菜单的 `seat`），结束值乘沿用 `panel/end|end_confirm`。没装材质包时按染料区分，“亮起”加附魔光效。
 - simulation 级人工驾驶的驾驶员收到发车信号后，要在 `ack-seconds`（默认 5）秒内按丢弃键回一短表示收到（`PendingAcks`，期限另留出认出一短要等的时间；等的期间转成 ATO 的不记），提示写在发车信号那一行（`drive.guard.driver.signal-ack`）；到时没回记一次漏确认（与漏确认信号同一项，扣 5 分）。车掌离岗时不再等。
 - 铃（`BuzzerPress`）：按住约 0.8 秒（`buzzer-long-ticks`）为一长；一短之后 1 秒（`buzzer-double-ticks`）内再按一下为呼叫。车掌一长＝发车信号；一短＝收到；两短＝呼叫驾驶员。驾驶员的铃是丢弃键（Q，驾驶中本来不用）：一短收到、两短呼叫车掌。铃声（`sounds.buzzer`）只给这列车上的驾驶员与车掌听。
 - 按住多久的量法：快捷栏上的发车铃带“可使用”组件（`consumable`，使用 3600 秒、无动画无声音无粒子），准星没对着方块或实体时客户端按下只发一次“使用”、之后一直处于使用状态，松开时另发 `RELEASE_USE_ITEM`（`InputSignal.RELEASE_USE`），按住多久就是多久。车掌坐在自己的座位上时方块与实体交互距离临时降为 0（`GuardSeatReach`，临时修饰符，离座、离岗撤掉）：对着方块右键时服务器取消这一下，Paper 会让客户端停止使用，改为每 4 tick 重发，只能按重发间隔（超过 0.3 秒算松开）猜，网络或客户端卡一下就断开。按住期间又收到包、或第一个包是对方块或实体，按重发间隔判；报着按住满 10 秒没等到松开作废；手离开发车铃这一格算松开。铃声不跟着收包响，按住期间每 4 tick 补响一次。

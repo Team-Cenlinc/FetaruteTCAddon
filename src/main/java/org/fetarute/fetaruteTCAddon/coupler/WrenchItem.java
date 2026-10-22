@@ -8,16 +8,16 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
-import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
+import org.fetarute.fetaruteTCAddon.utils.PackModel;
 
 /**
- * 车钩扳手：靠物品上的 PDC 标记识别，改名、附魔不影响，普通绊线钩不会被误认。物品模型写成 {@code fetarute:coupler/wrench}
- * 给材质包用，没有材质包时显示为绊线钩。
+ * 车钩扳手：靠物品上的 PDC 标记识别，改名、附魔不影响，普通绊线钩不会被误认。材质包标记 {@code fetarute:coupler/wrench} （{@link
+ * PackModel}），没有材质包时显示为绊线钩。
  */
 public final class WrenchItem {
 
-  /** 物品模型（材质包里的路径）。 */
+  /** 材质包标记的键。 */
   static final String MODEL_KEY = "coupler/wrench";
 
   private final NamespacedKey markKey;
@@ -40,7 +40,7 @@ public final class WrenchItem {
             locale.component("coupler.item.lore-2"),
             locale.component("coupler.item.lore-3"),
             locale.component("coupler.item.lore-4")));
-    meta.setItemModel(new NamespacedKey(HotbarItems.MODEL_NAMESPACE, MODEL_KEY));
+    PackModel.mark(meta, MODEL_KEY);
     meta.getPersistentDataContainer().set(markKey, PersistentDataType.BYTE, (byte) 1);
     item.setItemMeta(meta);
     return item;

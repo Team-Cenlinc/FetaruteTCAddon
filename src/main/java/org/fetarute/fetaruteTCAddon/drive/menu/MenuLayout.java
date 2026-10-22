@@ -26,7 +26,7 @@ public final class MenuLayout {
   /** 分组之间的玻璃板。 */
   private static final Set<Integer> DIVIDERS = Set.of(3, 6, 19);
 
-  /** 材质包里模型键的前缀（命名空间之后）。 */
+  /** 材质包标记里键的前缀（命名空间之后）。 */
   public static final String MODEL_PREFIX = "panel/";
 
   private static final Map<Integer, MenuAction> ACTIONS =

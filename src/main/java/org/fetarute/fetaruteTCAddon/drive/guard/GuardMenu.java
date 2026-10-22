@@ -7,13 +7,12 @@ import java.util.UUID;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
+import org.fetarute.fetaruteTCAddon.utils.PackModel;
 
 /**
  * 车掌菜单（F，三排 27 格）：传送入座、呼叫驾驶员、异常报告、结束值乘。
@@ -114,7 +113,7 @@ public final class GuardMenu {
             locale
                 .component("drive.guard.menu.hint." + hintId(action))
                 .decoration(TextDecoration.ITALIC, false)));
-    meta.setItemModel(new NamespacedKey(HotbarItems.MODEL_NAMESPACE, modelKey(action, view)));
+    PackModel.mark(meta, modelKey(action, view));
     if (action == Action.END && view.endConfirm()) {
       meta.setEnchantmentGlintOverride(true);
     }

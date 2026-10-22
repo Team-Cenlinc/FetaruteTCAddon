@@ -6,17 +6,16 @@ import java.util.Map;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
+import org.fetarute.fetaruteTCAddon.utils.PackModel;
 
 /**
  * 停车后菜单里的按钮物品。
  *
- * <p>默认用染料按颜色区分，没有材质包的玩家也能用；同时设置 {@code item_model}，装有材质包的客户端显示 {@code fetarute:drive/panel/…} 的贴图。
- * 选中的换向手柄按钮、正在接通的启动流程开关另加附魔光效：没有材质包时靠光效看出状态。
+ * <p>默认用染料按颜色区分，没有材质包的玩家也能用；同时写上材质包标记 {@code fetarute:drive/panel/…}（{@link
+ * PackModel}），装有材质包的客户端显示对应的贴图。 选中的换向手柄按钮、正在接通的启动流程开关另加附魔光效：没有材质包时靠光效看出状态。
  */
 public final class DriveMenuItems {
 
@@ -31,11 +30,9 @@ public final class DriveMenuItems {
             .component(nameKey(view), nameValues(locale, view))
             .decoration(TextDecoration.ITALIC, false));
     meta.lore(lore(locale, view));
-    meta.setItemModel(
-        new NamespacedKey(
-            HotbarItems.MODEL_NAMESPACE,
-            "drive/"
-                + MenuLayout.modelKey(view.action(), view.active(), view.fault(), view.supply())));
+    PackModel.mark(
+        meta,
+        "drive/" + MenuLayout.modelKey(view.action(), view.active(), view.fault(), view.supply()));
     if ((view.action().isReverser() && view.active())
         || view.busy()
         || (view.action() == MenuAction.END_DRIVING && view.active())) {
@@ -157,7 +154,7 @@ public final class DriveMenuItems {
     };
   }
 
-  /** 任务卡：原版书本贴图（不设 {@code item_model}），写卡片上的各行；不可点击。 */
+  /** 任务卡：原版书本贴图（不写材质包标记），写卡片上的各行；不可点击。 */
   public static ItemStack taskCard(LocaleManager locale, TaskCard.Card card) {
     ItemStack stack = new ItemStack(Material.BOOK);
     ItemMeta meta = stack.getItemMeta();

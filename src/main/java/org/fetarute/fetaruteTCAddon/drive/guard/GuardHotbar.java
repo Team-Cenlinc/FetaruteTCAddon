@@ -9,11 +9,10 @@ import java.util.Optional;
 import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
+import org.fetarute.fetaruteTCAddon.utils.PackModel;
 
 /**
  * 车掌的快捷栏：九格按钮，画法沿用驾驶台面板（钢灰图形配点缀色，接通时亮、断开时暗，金框表示已确认或已拉下）。
@@ -115,7 +114,7 @@ public final class GuardHotbar {
             locale
                 .component("drive.guard.button.hint." + hintId(button))
                 .decoration(TextDecoration.ITALIC, false)));
-    meta.setItemModel(new NamespacedKey(HotbarItems.MODEL_NAMESPACE, modelKey(button, view)));
+    PackModel.mark(meta, modelKey(button, view));
     if (lit(button, view)) {
       meta.setEnchantmentGlintOverride(true);
     }
