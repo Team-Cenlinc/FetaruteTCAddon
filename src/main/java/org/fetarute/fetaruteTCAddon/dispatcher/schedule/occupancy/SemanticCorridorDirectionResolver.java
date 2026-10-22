@@ -212,6 +212,22 @@ final class SemanticCorridorDirectionResolver {
     return directions;
   }
 
+  /**
+   * 资源自己及一跳邻居里有没有区间路径点（带方向的 {@link WaypointKind#INTERVAL}，与资源兜底轴同一个范围）。没有时资源只能按自己的有序节点定方向：
+   * 路径轴是从远处的区间锚点外推过来的，不经过区间路径点的请求拿不到它，两套参照系给同一方向标的号可能相反。
+   */
+  boolean hasIntervalAnchorNearby(List<NodeId> resourceNodes) {
+    for (NodeId node : expandResourceNeighborhood(resourceNodes)) {
+      Optional<WaypointMetadata> metadata = metadata(node);
+      if (metadata.isPresent()
+          && metadata.get().kind() == WaypointKind.INTERVAL
+          && DirectedStationPair.from(metadata.get()).isPresent()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private AxisResolution resolveAxis(List<NodeId> resourceNodes) {
     Set<NodeId> candidateNodes = expandResourceNeighborhood(resourceNodes);
     List<DirectedStationPair> pairs = new ArrayList<>();

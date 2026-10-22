@@ -2297,16 +2297,19 @@ public final class OccupancyRequestBuilder {
       SemanticCorridorDirectionResolver.PathAxisIndex pathAxisIndex,
       NodeId from,
       NodeId to) {
+    List<NodeId> resourceNodes = semanticResourceNodes(left, right, orderedNodes, boundaryNodes);
     SemanticCorridorDirectionResolver.Result semantic =
-        semanticDirectionResolver.resolve(
-            semanticResourceNodes(left, right, orderedNodes, boundaryNodes),
-            pathAxisIndex,
-            from,
-            to);
+        semanticDirectionResolver.resolve(resourceNodes, pathAxisIndex, from, to);
+    CorridorDirection byCorridor = resolveDirectionByCorridorNodes(orderedNodes, from, to);
     if (semantic.resolved()) {
+      // 资源附近没有区间路径点（库线深处、咽喉内侧）：路径轴是从远处锚点外推的，不经过区间路径点的请求只能按有序节点定方向。
+      // 有序节点认得出这一步时一律按它，同一资源只用一套参照系；否则同一列车同一方向前后两次请求会被标成相反方向。
+      if (byCorridor != CorridorDirection.UNKNOWN
+          && !semanticDirectionResolver.hasIntervalAnchorNearby(resourceNodes)) {
+        return DirectionResolution.resolved(byCorridor);
+      }
       return DirectionResolution.resolved(semantic.direction());
     }
-    CorridorDirection byCorridor = resolveDirectionByCorridorNodes(orderedNodes, from, to);
     if (semantic.blocksLegacyFallback()) {
       if (byCorridor != CorridorDirection.UNKNOWN
           && canUseOrderedCorridorFallbackAfterSemanticBlock(
