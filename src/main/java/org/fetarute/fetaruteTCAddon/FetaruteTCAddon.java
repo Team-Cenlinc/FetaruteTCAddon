@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.logging.Level;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
@@ -127,6 +128,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseService;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
+import org.fetarute.fetaruteTCAddon.integration.traincarts.TransferFunctionInputPlayerNearby;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -226,6 +228,21 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private DriveSessionManager driveSessionManager;
   private LicenseService licenseService;
 
+  /**
+   * 登记 TrainCarts 扩展类型。
+   *
+   * <p>TrainCarts 启用时就恢复已加载区块里的列车并读取附件配置，到 {@link #onEnable()} 再登记就晚了：已恢复的模型会把自定义传递函数读成 Unknown。
+   */
+  @Override
+  public void onLoad() {
+    try {
+      TransferFunctionInputPlayerNearby.register();
+    } catch (RuntimeException | LinkageError ex) {
+      // 附加功能：登记失败只是模型里用不了这个输入，不能拖垮插件加载。
+      getLogger().log(Level.WARNING, "TrainCarts 传递函数「附近有玩家」登记失败", ex);
+    }
+  }
+
   @Override
   public void onEnable() {
     saveDefaultConfig();
@@ -313,6 +330,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     beginRuntimeDispatchShutdown();
     unregisterSignActions();
     org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StationExitPoints.clear();
+    try {
+      TransferFunctionInputPlayerNearby.unregister();
+    } catch (RuntimeException | LinkageError ignored) {
+      // onLoad 登记失败时这里同样不可用，无需重复告警。
+    }
     if (signalEventBus != null) {
       signalEventBus.clear();
       signalEventBus = null;

@@ -30,6 +30,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DoorCars;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.StopMarkSign;
+import org.fetarute.fetaruteTCAddon.integration.traincarts.TrainViewers;
 
 /**
  * AutoStation 的开关门动画控制器。
@@ -3051,16 +3052,13 @@ public final class AutoStationDoorController {
     if (viewers == null || location == null) {
       return false;
     }
-    double radiusSquared = DOOR_SOUND_RADIUS_BLOCKS * DOOR_SOUND_RADIUS_BLOCKS;
-    for (Player player : viewers) {
-      if (player == null || player.getWorld() != location.getWorld()) {
-        continue;
-      }
-      if (player.getLocation().distanceSquared(location) <= radiusSquared) {
-        return true;
-      }
-    }
-    return false;
+    return TrainViewers.anyWithin(
+        viewers,
+        location.getWorld(),
+        location.getX(),
+        location.getY(),
+        location.getZ(),
+        DOOR_SOUND_RADIUS_BLOCKS);
   }
 
   static String sampleDoorTransformSummary(MinecartGroup group) {
