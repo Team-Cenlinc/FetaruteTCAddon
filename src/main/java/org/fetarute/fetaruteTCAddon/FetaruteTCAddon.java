@@ -144,7 +144,7 @@ import org.incendo.cloud.exception.InvalidSyntaxException;
 public final class FetaruteTCAddon extends JavaPlugin {
 
   private final CloudSimpleHandler cloudHandler = new CloudSimpleHandler();
-  private ConfigManager configManager;
+  private volatile ConfigManager configManager;
   private LocaleManager localeManager;
   private StorageManager storageManager;
   private CommandManager<CommandSender> commandManager;
@@ -174,7 +174,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private final java.util.concurrent.atomic.AtomicLong routeNodeUsageVersion =
       new java.util.concurrent.atomic.AtomicLong();
 
-  private StationDirectory stationDirectory;
+  private volatile StationDirectory stationDirectory;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
   private DwellRegistry dwellRegistry;
@@ -184,12 +184,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus apiEventAlertBus;
   private org.bukkit.scheduler.BukkitTask apiEventTask;
   private RuntimeDispatchService runtimeDispatchService;
-  private org.fetarute.fetaruteTCAddon.coupler.CouplerService couplerService;
+  private volatile org.fetarute.fetaruteTCAddon.coupler.CouplerService couplerService;
+
+  /** 只读 HTTP 接口（{@code web-api:}）。 */
+  private org.fetarute.fetaruteTCAddon.web.WebApiServer webApiServer;
+
   private org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher powerModeSwitcher;
   private RuntimeDispatchDiagnosticGate runtimeDispatchDiagnosticGate;
   private boolean runtimeDispatchRecoveryComplete;
   private ReclaimManager reclaimManager;
-  private org.fetarute.fetaruteTCAddon.call.CallService callService;
+  private volatile org.fetarute.fetaruteTCAddon.call.CallService callService;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
   private org.bukkit.scheduler.BukkitTask runtimeRecoveryTask;
 
@@ -199,10 +203,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private final RecoveryRequestBackoff runtimeRecoveryRequestBackoff =
       new RecoveryRequestBackoff(java.time.Duration.ofSeconds(10), System::nanoTime);
   private org.bukkit.scheduler.BukkitTask healthMonitorTask;
-  private SpawnManager spawnManager;
+  private volatile SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
   private org.bukkit.scheduler.BukkitTask spawnMonitorTask;
-  private org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService
+  private volatile org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService
       timetableService;
   private org.bukkit.scheduler.BukkitTask timetableReloadTask;
   private SpeedSettingStickListener speedSettingStickListener;
@@ -211,12 +215,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private EtaService etaService;
   private DisplayService displayService;
   private HudTemplateService hudTemplateService;
-  private org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService consistPlanService;
+  private volatile org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService
+      consistPlanService;
   private org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistDispatchArbiter consistArbiter;
   private HudDefaultTemplateService hudDefaultTemplateService;
   private PidsConfigManager pidsConfigManager;
   private PidsLayoutRegistry pidsLayoutRegistry;
-  private PidsService pidsService;
+  private volatile PidsService pidsService;
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
   private DriveSessionManager driveSessionManager;
   private LicenseService licenseService;
@@ -298,6 +303,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (driveSessionManager != null) {
       driveSessionManager.shutdown();
       driveSessionManager = null;
+    }
+    if (webApiServer != null) {
+      webApiServer.stop();
+      webApiServer = null;
     }
     stopApiEvents();
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
@@ -423,6 +432,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       pidsLayoutRegistry.reload();
     }
     this.localeManager.reload(configManager.current().locale());
+    applyWebApi();
     if (driveSessionManager != null) {
       driveSessionManager.reload(readDriveConfig());
       if (licenseService != null) {
@@ -2082,16 +2092,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
         instanceof
         org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
         timetabled) {
-      // 解编 GOTO 指向的支线不进发车计划：按交路现拼发车服务，解下的车接的班次照样出票，站牌照样列出
+      // 解编 GOTO 指向的支线不进发车计划：按交路现拼发车服务，解下的车接的班次照样出票，站牌照样列出。
+      // 站牌也会在只读 HTTP 接口的后台线程走到这里：公司代码先查内存目录，只有主线程才退回查库（存储只有一条连接）
       RouteDefinitionCache forecastRoutes = routeDefinitionCache;
       timetabled.setUnplannedServices(
           routeId ->
               org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteSpawnServices.forRoute(
                   baseSpawnManager,
                   forecastRoutes,
-                  storageManager != null && storageManager.isReady()
-                      ? storageManager.provider()
-                      : Optional.empty(),
+                  this::companyCodeOf,
                   routeId,
                   loggerManager::debug));
       // 回程支线没车时主干出整列：与编表同一个来源（交路的 spawn_train_pattern，其次首站 CRET 的车库牌子）
@@ -2415,6 +2424,24 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .filter(org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern::isComposite);
   }
 
+  /** 公司代码：先查车站目录（内存）；查不到时只在主线程查库，后台线程不碰存储。 */
+  private Optional<String> companyCodeOf(java.util.UUID companyId) {
+    Optional<String> code =
+        getStationDirectory()
+            .flatMap(directory -> directory.snapshot().company(companyId))
+            .map(org.fetarute.fetaruteTCAddon.company.model.Company::code);
+    if (code.isPresent()
+        || !org.bukkit.Bukkit.isPrimaryThread()
+        || storageManager == null
+        || !storageManager.isReady()) {
+      return code;
+    }
+    return storageManager
+        .provider()
+        .flatMap(provider -> provider.companies().findById(companyId))
+        .map(org.fetarute.fetaruteTCAddon.company.model.Company::code);
+  }
+
   /** 站牌票据与预测行（按车次标识）在表上那一班的分行预测；不按表运行、拆挂服务没起来时为空。 */
   private Optional<org.fetarute.fetaruteTCAddon.coupler.DivisionForecast> plannedDivisionOf(
       String serviceTripId) {
@@ -2724,6 +2751,21 @@ public final class FetaruteTCAddon extends JavaPlugin {
     startApiEvents();
     getLogger()
         .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");
+    applyWebApi();
+  }
+
+  /** 按配置启停只读 HTTP 接口（启用与重载时调用）。 */
+  private void applyWebApi() {
+    if (webApiServer == null) {
+      webApiServer =
+          new org.fetarute.fetaruteTCAddon.web.WebApiServer(
+              getLogger()::info,
+              getLogger()::warning,
+              () -> getStationDirectory().map(StationDirectory::snapshot),
+              (operator, line) ->
+                  getPidsService().flatMap(pids -> pids.lineStatus(operator, line)));
+    }
+    webApiServer.apply(configManager.current().webApiSettings());
   }
 
   /**

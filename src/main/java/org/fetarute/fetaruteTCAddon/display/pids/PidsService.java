@@ -273,6 +273,24 @@ public final class PidsService {
     lineStatuses.invalidateCancellations();
   }
 
+  /**
+   * 一条线路此刻的运行状况，与线路运行状况屏同一份汇总（每分钟汇总一次）；可在任意线程调用（只读 HTTP 接口用）。
+   *
+   * @param operatorCode 运营商代码
+   * @param lineCode 线路代码（不分大小写）
+   * @return 线路不在名称目录里（筹建中、代码不对、目录还没建好）时为空
+   */
+  public Optional<org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus> lineStatus(
+      String operatorCode, String lineCode) {
+    if (operatorCode == null || lineCode == null) {
+      return Optional.empty();
+    }
+    return directory.operatorLines(operatorCode).stream()
+        .filter(line -> line.chip().code().equalsIgnoreCase(lineCode))
+        .findFirst()
+        .map(line -> lineStatuses.statusOf(line, clock.instant()));
+  }
+
   public void stop() {
     if (directoryTask != null) {
       directoryTask.cancel();

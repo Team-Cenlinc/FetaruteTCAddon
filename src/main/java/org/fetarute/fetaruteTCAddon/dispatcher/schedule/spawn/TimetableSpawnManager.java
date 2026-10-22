@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -62,12 +63,13 @@ public final class TimetableSpawnManager
   private volatile Instant lastPoll;
 
   /**
-   * 最近一次预测出的票据各属于哪个交路的哪一班：预测票不入队，站牌要靠它找到来车。每次预测整张替换。
+   * 预测出的票据各属于哪个交路的哪一班：预测票不入队，站牌要靠它找到来车。
    *
-   * <p>按车次标识（{@link SpawnTicket#serviceTripId()}）记，不按票据 ID：预测票每次重新生成、ID 随之变，
-   * 两次预测交错（例如外部插件在别的线程查站牌）时按 ID 记的会互相顶掉，同一车次的标识则不变。
+   * <p>按车次标识（{@link SpawnTicket#serviceTripId()}）记，不按票据 ID：预测票每次重新生成、ID 随之变，同一车次的标识则不变。
+   * 每次预测并进来而不是整张替换：站台屏（主线程）与只读 HTTP 接口（后台线程）用不同的时间窗交错预测时，替换会冲掉对方刚记下、正要用的意图；
+   * 同一套已发布时刻表里同一车次算出的意图总是同一个，合并不冲突。服务日早于前一天的随预测清掉；已发布时刻表一变（重新发布、撤下）整本作废， 读的时候也先核对，旧表的意图不会被当成新表的。
    */
-  private volatile Map<String, TicketIntent> forecastIntents = Map.of();
+  private volatile IntentBook forecastIntents = IntentBook.fresh();
 
   /**
    * 发车计划里没有的交路的发车服务（按交路现拼）：解编 GOTO 指向的支线交路不进发车计划（不能按间隔单独出车），但按表时解下的车接的那几班要出票，
@@ -929,6 +931,7 @@ public final class TimetableSpawnManager
     retryQueue.clear();
     ownedTickets.clear();
     missingServiceWarned.clear();
+    forecastIntents = IntentBook.fresh();
     lastPoll = now;
     if (delegate instanceof SpawnResetSupport resetSupport) {
       SpawnResetResult inner = resetSupport.reset(now);
@@ -997,6 +1000,7 @@ public final class TimetableSpawnManager
     if (managed.isEmpty()) {
       return delegated;
     }
+    List<String> source = publishedFingerprint();
     // 受管辖 route 的 headway 预测是错的——那条线已经不按 headway 发车了。换成表定时刻。
     List<SpawnTicket> out = new ArrayList<>();
     for (SpawnTicket ticket : delegated) {
@@ -1028,7 +1032,13 @@ public final class TimetableSpawnManager
                 built.serviceTripId().ifPresent(trip -> intents.put(trip, legIntent(due)));
               });
     }
-    forecastIntents = Map.copyOf(intents);
+    IntentBook book = currentIntents();
+    if (book.source().equals(source)) {
+      LocalDate stale = LocalDate.ofInstant(now, ZoneId.systemDefault()).minusDays(1);
+      book.intents().values().removeIf(intent -> intent.serviceDate().isBefore(stale));
+      book.intents().putAll(intents);
+    }
+    // 预测期间时刻表换了：这一轮算的是旧表，不记
     return List.copyOf(out);
   }
 
@@ -1054,7 +1064,7 @@ public final class TimetableSpawnManager
   }
 
   /**
-   * 站牌行的车次标识（{@link SpawnTicket#serviceTripId()}）对应的交路意图：最近一次预测记下的优先，其次是已出、还没派出的票。派出后意图已摘掉，查不到。
+   * 站牌行的车次标识（{@link SpawnTicket#serviceTripId()}）对应的交路意图：预测时记下的优先（保留到服务日过去），其次是已出、还没派出的票。
    *
    * @param serviceTripId 车次标识
    */
@@ -1062,7 +1072,7 @@ public final class TimetableSpawnManager
     if (serviceTripId == null || serviceTripId.isBlank() || timetableService == null) {
       return Optional.empty();
     }
-    TicketIntent forecast = forecastIntents.get(serviceTripId);
+    TicketIntent forecast = currentIntents().intents().get(serviceTripId);
     if (forecast != null) {
       return Optional.of(forecast);
     }
@@ -1091,8 +1101,8 @@ public final class TimetableSpawnManager
         : timetableService.firstTripOf(duty).map(TimetableSpawnManager::serviceTripIdOf);
   }
 
-  /** 已出的票按登记的意图，预测票按最近一次预测记下的意图；派出后意图已摘掉，查不到。 */
-  private Optional<TicketIntent> ticketIntentOf(SpawnTicket ticket) {
+  /** 这张票的交路意图：已出的票按登记的意图，其余按预测时记下的意图（按车次标识）；别层的票为空。 */
+  public Optional<TicketIntent> ticketIntentOf(SpawnTicket ticket) {
     if (ticket == null || ticket.id() == null || timetableService == null) {
       return Optional.empty();
     }
@@ -1100,8 +1110,44 @@ public final class TimetableSpawnManager
     if (owned != null) {
       return owned.intent();
     }
-    Map<String, TicketIntent> forecast = forecastIntents;
+    Map<String, TicketIntent> forecast = currentIntents().intents();
     return ticket.serviceTripId().map(forecast::get);
+  }
+
+  /**
+   * 预测意图本：记下时的已发布时刻表指纹与意图。
+   *
+   * @param source 已发布时刻表的指纹（{@link #publishedFingerprint()}）
+   * @param intents 车次标识 → 交路意图
+   */
+  private record IntentBook(
+      List<String> source, java.util.concurrent.ConcurrentMap<String, TicketIntent> intents) {
+
+    /** 空的一本；指纹对不上任何真实指纹，第一次用时换成当前的。 */
+    static IntentBook fresh() {
+      return new IntentBook(List.of("-"), new java.util.concurrent.ConcurrentHashMap<>());
+    }
+  }
+
+  /** 此刻有效的意图本：已发布时刻表与记下时不同就换一本空的。 */
+  private IntentBook currentIntents() {
+    List<String> source = publishedFingerprint();
+    IntentBook book = forecastIntents;
+    if (!book.source().equals(source)) {
+      book = new IntentBook(source, new java.util.concurrent.ConcurrentHashMap<>());
+      forecastIntents = book;
+    }
+    return book;
+  }
+
+  /** 已发布时刻表的指纹：各表的 ID 与更新时刻（重新发布沿用 ID、更新时刻会变）。 */
+  private List<String> publishedFingerprint() {
+    if (timetableService == null) {
+      return List.of();
+    }
+    return timetableService.publishedTimetables().stream()
+        .map(timetable -> timetable.id() + "@" + timetable.updatedAt())
+        .toList();
   }
 
   /** 一趟车对应票据的车次标识：带客出入库由交路的走行票开出，标识跟走行票走（交路号 + 服务日）； 其余按车次号 + 起点发车日历日。 */

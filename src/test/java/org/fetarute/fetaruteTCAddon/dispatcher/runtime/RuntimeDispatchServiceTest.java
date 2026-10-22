@@ -1933,6 +1933,93 @@ class RuntimeDispatchServiceTest {
   }
 
   @Test
+  // 站牌（可能在只读 HTTP 接口的后台线程）读有效节点：遇到对不上当前定义的覆盖只当作没有，不删；清理留给主线程的调度调用。
+  void readOnlyEffectiveNodeQueriesDoNotPruneOverrides() {
+    NodeId depot = NodeId.of("OP:D:DEPOT:1");
+    NodeId platformOne = NodeId.of("OP:S:PPK:1");
+    NodeId platformTwo = NodeId.of("OP:S:PPK:2");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("depot-readonly-dynamic"), List.of(depot, platformOne), Optional.empty());
+    RailEdge firstApproach =
+        new RailEdge(
+            EdgeId.undirected(depot, platformOne),
+            depot,
+            platformOne,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailEdge secondApproach =
+        new RailEdge(
+            EdgeId.undirected(depot, platformTwo),
+            depot,
+            platformTwo,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    RailGraph graph =
+        new SimpleRailGraph(
+            Map.of(
+                depot, new RailNodeTest(depot),
+                platformOne, new RailNodeTest(platformOne),
+                platformTwo, new RailNodeTest(platformTwo)),
+            Map.of(
+                firstApproach.id(), firstApproach,
+                secondApproach.id(), secondApproach),
+            Set.of());
+
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findStop(route.id(), 1))
+        .thenReturn(Optional.of(dynamicStop(1, platformOne, "DYNAMIC:OP:S:PPK:[1:2]")));
+    OccupancyManager occupancyManager = mockOccupancyManager();
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(
+            List.of(
+                new OccupancyClaim(
+                    OccupancyResource.forNode(platformOne),
+                    "platform-incumbent",
+                    Optional.empty(),
+                    Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+    when(occupancyManager.isNodeOccupied(platformTwo)).thenReturn(false);
+    RuntimeDispatchService service =
+        new RuntimeDispatchService(
+            occupancyManager,
+            mock(RailGraphService.class),
+            routeDefinitions,
+            new RouteProgressRegistry(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            new DwellRegistry(),
+            mock(ConfigManager.class),
+            null,
+            new TrainConfigResolver(),
+            null);
+
+    Optional<List<NodeId>> prepared =
+        service.prepareDepotSpawnDynamicAuthority(
+            "spawn-dynamic-train", route, route.waypoints(), 0, graph, Instant.EPOCH);
+
+    assertEquals(Optional.of(List.of(depot, platformTwo)), prepared);
+
+    RouteDefinition refreshed =
+        new RouteDefinition(route.id(), List.of(depot, NodeId.of("OP:S:PPK:3")), Optional.empty());
+    assertEquals(
+        refreshed.waypoints(),
+        service.resolveEffectiveWaypointsForEvent("spawn-dynamic-train", refreshed),
+        "声明节点对不上：当作没有覆盖");
+    assertFalse(service.hasEffectiveNode("spawn-dynamic-train", refreshed, 1));
+    assertEquals(
+        List.of(depot, platformTwo),
+        service.resolveEffectiveWaypointsForEvent("spawn-dynamic-train", route),
+        "只读查询没有删掉覆盖");
+    assertTrue(service.hasEffectiveNode("spawn-dynamic-train", route, 1));
+  }
+
+  @Test
   void depotSpawnAuthorityStopsBeforeFutureUnmaterializedDynamicPlaceholder() {
     List<NodeId> nodes = new ArrayList<>();
     nodes.add(NodeId.of("OP:D:DEPOT:1"));

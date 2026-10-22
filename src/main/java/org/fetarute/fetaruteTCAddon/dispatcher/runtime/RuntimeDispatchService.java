@@ -5299,7 +5299,7 @@ public final class RuntimeDispatchService {
 
     OccupancyRequestBuilder builder =
         runtimeLookaheadBuilder(graph, runtimeSettings, rearGuardEdges, train);
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
     int nextIndex = currentIndex + 1;
     DynamicResolution<DynamicSelection> dynamicSelection =
         selectDynamicStationTargetForProgress(
@@ -5330,7 +5330,7 @@ public final class RuntimeDispatchService {
     if (dynamicSelection.isSelected()) {
       DynamicSelection selection = dynamicSelection.selected().orElseThrow();
       recordEffectiveNode(trainName, route, nextIndex, selection.targetNode());
-      effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+      effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
       contextOpt = Optional.of(selection.context());
     } else {
       contextOpt =
@@ -6405,7 +6405,7 @@ public final class RuntimeDispatchService {
     int priority = resolvePriority(properties, route);
     OccupancyRequestBuilder builder =
         runtimeLookaheadBuilder(graph, runtimeSettings, rearGuardEdges, train);
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
     DynamicResolution<DynamicSelection> dynamicSelection =
         selectDynamicStationTargetForProgress(
             trainName,
@@ -6427,7 +6427,7 @@ public final class RuntimeDispatchService {
     if (dynamicSelection.isSelected()) {
       DynamicSelection selection = dynamicSelection.selected().orElseThrow();
       recordEffectiveNode(trainName, route, nextIndex, selection.targetNode());
-      effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+      effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
       nextNode = selection.targetNode();
       context = selection.context();
     } else {
@@ -12611,7 +12611,7 @@ public final class RuntimeDispatchService {
     RailGraph graph = graphOpt.get();
     RouteDefinition route = routeOpt.get();
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(resolution.resolvedName(), route);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(resolution.resolvedName(), route, true);
     Optional<OccupancyRequestContext> contextOpt =
         buildForwardAuthorizationContext(
             graph,
@@ -12955,7 +12955,7 @@ public final class RuntimeDispatchService {
     RailGraph graph = graphOpt.get();
     String resolvedTrainName = entry.trainName();
     ConfigManager.RuntimeSettings runtimeSettings = configManager.current().runtimeSettings();
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(resolvedTrainName, route);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(resolvedTrainName, route, true);
     RuntimeTrainHandle trainHandle = new TrainCartsRuntimeHandle(group);
     Optional<OccupancyRequestContext> contextOpt =
         buildHardAuthorityContext(
@@ -13160,7 +13160,7 @@ public final class RuntimeDispatchService {
         .ifPresent(
             selected ->
                 recordEffectiveNode(trainName, route, currentIndex + 1, selected.targetNode()));
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
     Optional<OccupancyRequestContext> contextOpt =
         buildContextWithinDynamicBoundary(
             builder,
@@ -14677,7 +14677,7 @@ public final class RuntimeDispatchService {
         runtimeLookaheadBuilder(graph, runtimeSettings, runtimeSettings.rearGuardEdges(), train);
     NodeId currentNodeForSignal =
         resolveEffectiveCurrentNodeForSignal(trainName, route, currentIndex, graph);
-    List<NodeId> directionContextNodes = resolveEffectiveWaypoints(trainName, route);
+    List<NodeId> directionContextNodes = resolveEffectiveWaypoints(trainName, route, true);
     List<NodeId> effectiveNodes =
         applyCurrentNodeOverride(directionContextNodes, currentIndex, currentNodeForSignal);
     DispatchPriorityResolution basePriorityResolution =
@@ -16603,7 +16603,7 @@ public final class RuntimeDispatchService {
     ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
     OccupancyRequestBuilder builder =
         runtimeLookaheadBuilder(graph, runtime, runtime.rearGuardEdges(), trainHandle);
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
     int nextIndex = startIndex + 1;
     DynamicResolution<DynamicSelection> dynamicSelection =
         selectDynamicStationTargetForProgress(
@@ -16630,7 +16630,7 @@ public final class RuntimeDispatchService {
     if (dynamicSelection.isSelected()) {
       DynamicSelection selection = dynamicSelection.selected().orElseThrow();
       recordEffectiveNode(trainName, route, nextIndex, selection.targetNode());
-      effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+      effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
       ctx = selection.context();
     } else {
       Optional<OccupancyRequestContext> ctxOpt =
@@ -20564,7 +20564,7 @@ public final class RuntimeDispatchService {
       return DynamicResolution.notApplicable("route-stop-not-dynamic");
     }
     Optional<NodeId> materialized =
-        readEffectiveNode(trainName, route, targetIndex)
+        readEffectiveNode(trainName, route, targetIndex, true)
             .filter(node -> DynamicStopMatcher.matchesStop(node, stopOpt.get()));
     if (materialized.isPresent()) {
       return dynamicAllocator.isAvailableForMaterialization(
@@ -20641,12 +20641,12 @@ public final class RuntimeDispatchService {
       return DynamicResolution.blocked("dynamic-stop-invalid");
     }
     DynamicSpec spec = specOpt.get();
-    List<NodeId> baseNodes = resolveEffectiveWaypoints(trainName, route);
+    List<NodeId> baseNodes = resolveEffectiveWaypoints(trainName, route, true);
     if (targetIndex < 0 || targetIndex >= baseNodes.size()) {
       return DynamicResolution.blocked("dynamic-target-index-out-of-range");
     }
     Optional<NodeId> materializedTarget =
-        readEffectiveNode(trainName, route, targetIndex)
+        readEffectiveNode(trainName, route, targetIndex, true)
             .filter(node -> DynamicStopMatcher.matchesStop(node, stopOpt.get()));
 
     return selectDynamicStationTargetForProgressCandidate(
@@ -22044,7 +22044,7 @@ public final class RuntimeDispatchService {
                     trainName, route, selected.stopIndex(), selected.allocatedNode()));
 
     List<NodeId> effectiveNodes =
-        new java.util.ArrayList<>(resolveEffectiveWaypoints(trainName, route));
+        new java.util.ArrayList<>(resolveEffectiveWaypoints(trainName, route, true));
     effectiveNodes.set(startIndex, currentNode);
     Optional<DynamicAuthorityWindow> windowOpt =
         resolveDynamicAuthorityWindow(
@@ -22107,7 +22107,7 @@ public final class RuntimeDispatchService {
           (provisionalDynamicIndex != null
                   && provisionalDynamicIndex.isPresent()
                   && provisionalDynamicIndex.getAsInt() == index)
-              || readEffectiveNode(trainName, route, index).isPresent();
+              || readEffectiveNode(trainName, route, index, true).isPresent();
       int endExclusive = materialized ? index + 1 : index;
       if (endExclusive <= currentIndex + 1) {
         debugLogger.accept(
@@ -23065,7 +23065,7 @@ public final class RuntimeDispatchService {
     if (route == null || graph == null) {
       return Optional.empty();
     }
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
     if (effectiveNodes.size() < 2) {
       return Optional.empty();
     }
@@ -25171,7 +25171,8 @@ public final class RuntimeDispatchService {
     }
     NodeId leaderCurrentNode =
         resolveEffectiveCurrentNodeForSignal(leaderTrain, leaderRoute, leaderCurrentIndex, graph);
-    List<NodeId> leaderDirectionContextNodes = resolveEffectiveWaypoints(leaderTrain, leaderRoute);
+    List<NodeId> leaderDirectionContextNodes =
+        resolveEffectiveWaypoints(leaderTrain, leaderRoute, true);
     List<NodeId> effectiveNodes =
         applyCurrentNodeOverride(
             leaderDirectionContextNodes, leaderCurrentIndex, leaderCurrentNode);
@@ -28609,7 +28610,7 @@ public final class RuntimeDispatchService {
         || properties == null
         || route.waypoints().isEmpty()
         || boundedIndex != 0
-        || readEffectiveNode(trainName, route, 0).isPresent()
+        || readEffectiveNode(trainName, route, 0, true).isPresent()
         || !hasPendingSpawnOrigin(properties)) {
       return;
     }
@@ -28728,7 +28729,8 @@ public final class RuntimeDispatchService {
    * <p>若列车已经切换 route，或同一 routeId 的声明节点/RouteStop 已经刷新，读取动作会立即丢弃旧覆盖。这样 {@code /fta reload} 无需重建整个
    * RuntimeDispatchService，也不会让 reload 前遗留的位置覆盖污染新定义。
    */
-  private Optional<NodeId> readEffectiveNode(String trainName, RouteDefinition route, int index) {
+  private Optional<NodeId> readEffectiveNode(
+      String trainName, RouteDefinition route, int index, boolean prune) {
     if (trainName == null || trainName.isBlank() || route == null || index < 0) {
       return Optional.empty();
     }
@@ -28750,7 +28752,7 @@ public final class RuntimeDispatchService {
         && !dynamicAllocator.isAbandoned(trainName, override.node())) {
       return Optional.of(override.node());
     }
-    if (overrides.remove(index, override)) {
+    if (prune && overrides.remove(index, override)) {
       if (overrides.isEmpty()) {
         effectiveNodeOverrides.remove(key, overrides);
       }
@@ -28856,7 +28858,7 @@ public final class RuntimeDispatchService {
       if (stop.isEmpty() || !DynamicStopMatcher.isDynamicStop(stop.get())) {
         continue;
       }
-      Optional<NodeId> held = readEffectiveNode(trainName, route, index);
+      Optional<NodeId> held = readEffectiveNode(trainName, route, index, true);
       if (held.isEmpty()) {
         break;
       }
@@ -28978,7 +28980,7 @@ public final class RuntimeDispatchService {
     if (index < 0 || index >= route.waypoints().size()) {
       return null;
     }
-    return readEffectiveNode(trainName, route, index).orElse(route.waypoints().get(index));
+    return readEffectiveNode(trainName, route, index, true).orElse(route.waypoints().get(index));
   }
 
   /**
@@ -29026,7 +29028,8 @@ public final class RuntimeDispatchService {
     return lastPassed;
   }
 
-  private List<NodeId> resolveEffectiveWaypoints(String trainName, RouteDefinition route) {
+  private List<NodeId> resolveEffectiveWaypoints(
+      String trainName, RouteDefinition route, boolean prune) {
     if (route == null) {
       return List.of();
     }
@@ -29051,13 +29054,15 @@ public final class RuntimeDispatchService {
         continue;
       }
       if (!effectiveNodeOverrideMatches(override, route, idx)) {
-        overrides.remove(idx, override);
-        traceEffectiveNodeOverrideRejected(trainName, idx, override, route);
+        if (prune) {
+          overrides.remove(idx, override);
+          traceEffectiveNodeOverrideRejected(trainName, idx, override, route);
+        }
         continue;
       }
       copy.set(idx, override.node());
     }
-    if (overrides.isEmpty()) {
+    if (prune && overrides.isEmpty()) {
       effectiveNodeOverrides.remove(key, overrides);
     }
     return copy;
@@ -29070,7 +29075,7 @@ public final class RuntimeDispatchService {
    * placeholder，导致 preview 与周期 tick 的授权窗口不一致。
    */
   public List<NodeId> resolveEffectiveWaypointsForEvent(String trainName, RouteDefinition route) {
-    return resolveEffectiveWaypoints(trainName, route);
+    return resolveEffectiveWaypoints(trainName, route, false);
   }
 
   /**
@@ -29084,7 +29089,7 @@ public final class RuntimeDispatchService {
    * @param index 交路节点下标
    */
   public boolean hasEffectiveNode(String trainName, RouteDefinition route, int index) {
-    return readEffectiveNode(trainName, route, index).isPresent();
+    return readEffectiveNode(trainName, route, index, false).isPresent();
   }
 
   /**
@@ -29095,7 +29100,7 @@ public final class RuntimeDispatchService {
    */
   public List<NodeId> resolveDirectionContextWaypointsForEvent(
       String trainName, RouteDefinition route) {
-    return resolveEffectiveWaypoints(trainName, route);
+    return resolveEffectiveWaypoints(trainName, route, true);
   }
 
   /**
@@ -29107,7 +29112,7 @@ public final class RuntimeDispatchService {
    */
   public List<NodeId> resolveEffectiveWaypointsForEvent(
       String trainName, RouteDefinition route, int currentIndex, RailGraph graph) {
-    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route);
+    List<NodeId> effectiveNodes = resolveEffectiveWaypoints(trainName, route, true);
     if (route == null || currentIndex < 0 || graph == null) {
       return effectiveNodes;
     }
@@ -29241,13 +29246,13 @@ public final class RuntimeDispatchService {
         resolveStopRetainCurrentNode(trainName, route, currentIndex, currentNode, graph);
     List<NodeId> effectiveNodes =
         applyCurrentNodeOverride(
-            resolveEffectiveWaypoints(trainName, route), currentIndex, resolvedCurrentNode);
+            resolveEffectiveWaypoints(trainName, route, true), currentIndex, resolvedCurrentNode);
     Optional<NodeId> targetNode =
         currentIndex + 1 < effectiveNodes.size()
             ? Optional.ofNullable(effectiveNodes.get(currentIndex + 1))
             : Optional.empty();
     if (isDeclaredDynamicStop(route, currentIndex + 1)
-        && readEffectiveNode(trainName, route, currentIndex + 1).isEmpty()) {
+        && readEffectiveNode(trainName, route, currentIndex + 1, true).isEmpty()) {
       targetNode = Optional.empty();
     }
     TrainProperties properties = TrainPropertiesStore.get(trainName);
@@ -29855,7 +29860,7 @@ public final class RuntimeDispatchService {
       return;
     }
     Optional<NodeId> materializedTarget =
-        readEffectiveNode(trainName, route, targetIndex)
+        readEffectiveNode(trainName, route, targetIndex, true)
             .filter(node -> DynamicStopMatcher.matches(node, spec.get()));
     List<OccupancyResource> resources =
         materializedTarget
@@ -31203,7 +31208,7 @@ public final class RuntimeDispatchService {
       return "missing_graph_or_route";
     }
     if (isDeclaredDynamicStop(route, currentIndex + 1)
-        && readEffectiveNode(trainName, route, currentIndex + 1).isEmpty()) {
+        && readEffectiveNode(trainName, route, currentIndex + 1, true).isEmpty()) {
       return "dynamic-target-not-materialized";
     }
     List<NodeId> nodes =

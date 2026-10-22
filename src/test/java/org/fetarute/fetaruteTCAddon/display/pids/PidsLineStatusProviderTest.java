@@ -252,6 +252,26 @@ class PidsLineStatusProviderTest {
   }
 
   @Test
+  // 后台线程（只读 HTTP 接口）汇总取消的同时主线程取消了车次、作废了缓存：汇总出的旧一份不写回，下一次重新汇总。
+  void anInvalidationDuringTheSummaryIsNotLost() {
+    when(trains.listAllActiveTrains(false)).thenReturn(List.of());
+    when(timetables.listAssignments()).thenReturn(List.of());
+    when(timetables.cancellations(any(), any()))
+        .thenAnswer(
+            invocation -> {
+              provider.invalidateCancellations();
+              return List.of();
+            })
+        .thenReturn(List.of(cancelled(ROUTE)));
+
+    assertEquals(PidsLineStatus.of(Condition.NO_TRAINS), provider.statusOf(MT, NOW));
+    assertEquals(
+        new PidsLineStatus(Condition.CANCELLATIONS, new Detail.Cancelled(1)),
+        provider.statusOf(MT, NOW.plusSeconds(1)),
+        "作废前的那一份没写回：有效期内也重新汇总");
+  }
+
+  @Test
   void aFailedRefreshKeepsThePreviousFacts() {
     when(trains.listAllActiveTrains(false))
         .thenReturn(List.of(train("t1", "SURC:MT:R1", Optional.empty(), Optional.empty(), false)));

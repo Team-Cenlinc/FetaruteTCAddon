@@ -57,6 +57,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * <p>这意味着它不会修改列车的生命周期标签，也不会触碰 pending layover 或 reclaim 状态。
  *
  * <p>长期运行时会按票据首次 due 时间清理过旧队列项，并同步释放对应 service 的 backlog，避免堵塞 route 在数天后形成幽灵积压。
+ *
+ * <p>线程：出票、改队列都在主线程；站牌预测（{@link #snapshotForecast}、{@link #snapshotQueue}）也可能来自后台线程（只读 HTTP
+ * 接口），所以公开方法都在本对象上同步。预测与快照只做内存遍历，持锁很短。
  */
 public final class StorageSpawnManager
     implements SpawnManager, SpawnForecastSupport, SpawnResetSupport {
@@ -91,7 +94,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public List<SpawnTicket> pollDueTickets(StorageProvider provider, Instant now) {
+  public synchronized List<SpawnTicket> pollDueTickets(StorageProvider provider, Instant now) {
     if (provider == null || now == null) {
       return List.of();
     }
@@ -102,7 +105,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public void requeue(SpawnTicket ticket) {
+  public synchronized void requeue(SpawnTicket ticket) {
     if (ticket == null) {
       return;
     }
@@ -110,7 +113,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public void complete(SpawnTicket ticket) {
+  public synchronized void complete(SpawnTicket ticket) {
     // 按需票（叫车）不占服务的 backlog：它不是这个服务生成的
     if (ticket == null || ticket.service() == null || onDemand(ticket)) {
       return;
@@ -123,7 +126,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public boolean withdraw(UUID ticketId) {
+  public synchronized boolean withdraw(UUID ticketId) {
     return ticketId != null
         && queue.removeIf(ticket -> ticket != null && ticketId.equals(ticket.id()));
   }
@@ -134,12 +137,12 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public SpawnPlan snapshotPlan() {
+  public synchronized SpawnPlan snapshotPlan() {
     return plan;
   }
 
   @Override
-  public List<SpawnTicket> snapshotQueue() {
+  public synchronized List<SpawnTicket> snapshotQueue() {
     if (queue.isEmpty()) {
       return List.of();
     }
@@ -155,7 +158,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public ReplacementSnapshot snapshotForReplacement() {
+  public synchronized ReplacementSnapshot snapshotForReplacement() {
     Map<SpawnServiceKey, Instant> cursors = new HashMap<>();
     states.forEach(
         (key, state) -> {
@@ -173,7 +176,7 @@ public final class StorageSpawnManager
    * 服务从重载时间重新起算，不能根据很久以前的 firstDueAt 追补历史班次。
    */
   @Override
-  public void restoreForReplacement(
+  public synchronized void restoreForReplacement(
       ReplacementSnapshot snapshot, List<SpawnTicket> additionalTickets, Instant restoredAt) {
     ReplacementSnapshot safeSnapshot =
         snapshot == null ? new ReplacementSnapshot(List.of(), Map.of(), 0L) : snapshot;
@@ -224,7 +227,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public SpawnResetResult reset(Instant now) {
+  public synchronized SpawnResetResult reset(Instant now) {
     int queueSize = queue.size();
     int stateSize = states.size();
     queue.clear();
@@ -245,7 +248,8 @@ public final class StorageSpawnManager
    * <p>注意：该列表不进入真实队列，不会影响实际出车与 backlog。
    */
   @Override
-  public List<SpawnTicket> snapshotForecast(Instant now, Duration horizon, int maxPerService) {
+  public synchronized List<SpawnTicket> snapshotForecast(
+      Instant now, Duration horizon, int maxPerService) {
     if (now == null || horizon == null || horizon.isZero() || horizon.isNegative()) {
       return List.of();
     }

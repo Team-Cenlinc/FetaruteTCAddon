@@ -187,7 +187,12 @@ public final class TimetableApiImpl implements TimetableApi {
         cancellation.trainName());
   }
 
-  /** 本 tick 内第一次查询时计算，其后直接返回同一份结果。 */
+  /**
+   * 本 tick 内第一次查询时计算，其后直接返回同一份结果。
+   *
+   * <p>在锁外算（不用 {@code computeIfAbsent}）：后台线程（只读 HTTP 接口）算的时候不占着桶锁，主线程同一 tick
+   * 查同一辆车不会等它；两边同时算时先写进去的为准。
+   */
   private Optional<TrainAssignment> memoized(TimetableService svc, String trainName) {
     long now = tick.getAsLong();
     TickMemo current = memo;
@@ -195,11 +200,14 @@ public final class TimetableApiImpl implements TimetableApi {
       current = new TickMemo(now, new ConcurrentHashMap<>());
       memo = current;
     }
-    return current
-        .byTrain()
-        .computeIfAbsent(
-            trainName.trim().toLowerCase(Locale.ROOT),
-            key -> svc.assignmentOf(trainName).map(a -> assignment(svc, a)));
+    String key = trainName.trim().toLowerCase(Locale.ROOT);
+    Optional<TrainAssignment> cached = current.byTrain().get(key);
+    if (cached != null) {
+      return cached;
+    }
+    Optional<TrainAssignment> computed = svc.assignmentOf(trainName).map(a -> assignment(svc, a));
+    Optional<TrainAssignment> raced = current.byTrain().putIfAbsent(key, computed);
+    return raced != null ? raced : computed;
   }
 
   /**

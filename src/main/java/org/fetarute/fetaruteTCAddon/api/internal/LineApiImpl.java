@@ -68,7 +68,7 @@ public final class LineApiImpl implements LineApi {
     if (lineId == null) {
       return Optional.empty();
     }
-    return lineRepository.findById(lineId).map(this::convertLine);
+    return lineRepository.findById(lineId).map(LineApiImpl::convertLine);
   }
 
   @Override
@@ -76,7 +76,7 @@ public final class LineApiImpl implements LineApi {
     if (operatorId == null || lineCode == null) {
       return Optional.empty();
     }
-    return lineRepository.findByOperatorAndCode(operatorId, lineCode).map(this::convertLine);
+    return lineRepository.findByOperatorAndCode(operatorId, lineCode).map(LineApiImpl::convertLine);
   }
 
   @Override
@@ -92,7 +92,8 @@ public final class LineApiImpl implements LineApi {
     return count;
   }
 
-  private LineInfo convertLine(Line line) {
+  /** 线路记录转成公开 API 的视图。 */
+  public static LineInfo convertLine(Line line) {
     return new LineInfo(
         line.id(),
         line.code(),
@@ -105,7 +106,7 @@ public final class LineApiImpl implements LineApi {
         line.spawnFreqBaselineSec());
   }
 
-  private ServiceType toServiceType(LineServiceType type) {
+  private static ServiceType toServiceType(LineServiceType type) {
     if (type == null) {
       return ServiceType.UNKNOWN;
     }
@@ -118,7 +119,8 @@ public final class LineApiImpl implements LineApi {
     };
   }
 
-  private LineStatus toLineStatus(org.fetarute.fetaruteTCAddon.company.model.LineStatus status) {
+  private static LineStatus toLineStatus(
+      org.fetarute.fetaruteTCAddon.company.model.LineStatus status) {
     if (status == null) {
       return LineStatus.UNKNOWN;
     }

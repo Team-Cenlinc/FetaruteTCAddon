@@ -58,7 +58,7 @@ public final class OperatorApiImpl implements OperatorApi {
     if (operatorId == null) {
       return Optional.empty();
     }
-    return operatorRepository.findById(operatorId).map(this::convertOperator);
+    return operatorRepository.findById(operatorId).map(OperatorApiImpl::convertOperator);
   }
 
   @Override
@@ -68,7 +68,7 @@ public final class OperatorApiImpl implements OperatorApi {
     }
     return operatorRepository
         .findByCompanyAndCode(companyId, operatorCode)
-        .map(this::convertOperator);
+        .map(OperatorApiImpl::convertOperator);
   }
 
   @Override
@@ -82,7 +82,8 @@ public final class OperatorApiImpl implements OperatorApi {
     return count;
   }
 
-  private OperatorInfo convertOperator(Operator operator) {
+  /** 运营商记录转成公开 API 的视图。 */
+  public static OperatorInfo convertOperator(Operator operator) {
     return new OperatorInfo(
         operator.id(),
         operator.code(),

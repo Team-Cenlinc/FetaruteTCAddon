@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 45
+config-version: 46
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -348,6 +348,17 @@ coupler:
   approach-speed-blocks-per-second: 3.0
   # 后到的车离对方最远多少格（沿调度图）才开进去；也是开进去最多走的距离，走过了还没碰到就停车放弃
   approach-max-blocks: 120
+
+web-api:
+  # 只读 HTTP 接口：线路、车站、站牌与到站预测、在线列车（JSON），给外部的缓存中转（如 Cloudflare Worker）定时拉取。
+  # 全部在插件自己的后台线程处理，不占服务器主线程。默认关闭
+  enabled: false
+  # 监听地址：默认只听本机，推荐配合 Cloudflare Tunnel 等反向代理转发（代理只转发完整的请求）。
+  # 改成 0.0.0.0 让别的机器直接来拉时务必设置 token；直接暴露在公网时慢速连接可以占满处理线程（接口卡住，不影响服务器）
+  host: 127.0.0.1
+  port: 8780
+  # 共享令牌：非空时请求须带请求头 Authorization: Bearer <令牌>（或 X-Fetarute-Token: <令牌>），否则回 401
+  token: ""
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

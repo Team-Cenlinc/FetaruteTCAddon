@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 45;
+  private static final int EXPECTED_CONFIG_VERSION = 46;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -120,7 +120,9 @@ public final class ConfigManager {
   private static final int DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES = 15;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
-  private ConfigView current;
+
+  /** 当前配置；重载时整份替换，后台线程（只读 HTTP 接口等）也会读。 */
+  private volatile ConfigView current;
 
   public ConfigManager(FetaruteTCAddon plugin) {
     this.plugin = plugin;
@@ -182,6 +184,7 @@ public final class ConfigManager {
     CallSettings callSettings = parseCall(callSection, logger);
     ConfigurationSection couplerSection = config.getConfigurationSection("coupler");
     CouplerSettings couplerSettings = parseCoupler(couplerSection, logger);
+    WebApiSettings webApiSettings = parseWebApi(config.getConfigurationSection("web-api"), logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -197,7 +200,27 @@ public final class ConfigManager {
         healthSettings,
         timetableSettings,
         callSettings,
-        couplerSettings);
+        couplerSettings,
+        webApiSettings);
+  }
+
+  /** 解析只读 HTTP 接口配置段；缺段或取值无效时用默认值。 */
+  private static WebApiSettings parseWebApi(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    WebApiSettings defaults = WebApiSettings.defaults();
+    if (section == null) {
+      return defaults;
+    }
+    int port = section.getInt("port", defaults.port());
+    if (port < 1 || port > 65535) {
+      logger.warning("web-api.port 配置无效: " + port + "，已回退为默认值");
+      port = defaults.port();
+    }
+    return new WebApiSettings(
+        section.getBoolean("enabled", defaults.enabled()),
+        section.getString("host", defaults.host()),
+        port,
+        section.getString("token", defaults.token()));
   }
 
   /** 解析车钩扳手配置段；缺段或取值无效时用默认值。 */
@@ -1565,7 +1588,8 @@ public final class ConfigManager {
       HealthSettings healthSettings,
       TimetableSettings timetableSettings,
       CallSettings callSettings,
-      CouplerSettings couplerSettings) {
+      CouplerSettings couplerSettings,
+      WebApiSettings webApiSettings) {
     public ConfigView {
       smartDispatcherSettings =
           smartDispatcherSettings == null
@@ -1575,6 +1599,43 @@ public final class ConfigManager {
           timetableSettings == null ? TimetableSettings.defaults() : timetableSettings;
       callSettings = callSettings == null ? CallSettings.defaults() : callSettings;
       couplerSettings = couplerSettings == null ? CouplerSettings.defaults() : couplerSettings;
+      webApiSettings = webApiSettings == null ? WebApiSettings.defaults() : webApiSettings;
+    }
+
+    /** 兼容尚未感知只读 HTTP 接口配置的调用方与测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        SmartDispatcherSettings smartDispatcherSettings,
+        HealthSettings healthSettings,
+        TimetableSettings timetableSettings,
+        CallSettings callSettings,
+        CouplerSettings couplerSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          smartDispatcherSettings,
+          healthSettings,
+          timetableSettings,
+          callSettings,
+          couplerSettings,
+          WebApiSettings.defaults());
     }
 
     /** 兼容尚未感知车钩扳手配置的调用方与测试夹具。 */
@@ -1823,6 +1884,27 @@ public final class ConfigManager {
 
     public static CallSettings defaults() {
       return new CallSettings(5, 60, 60, 2, 2, 60, 90);
+    }
+  }
+
+  /**
+   * 只读 HTTP 接口（{@code web-api:}）。
+   *
+   * @param enabled 是否启动
+   * @param host 监听地址；默认只听本机
+   * @param port 端口
+   * @param token 共享令牌；非空时请求须带 {@code Authorization: Bearer <令牌>} 或 {@code X-Fetarute-Token}
+   */
+  public record WebApiSettings(boolean enabled, String host, int port, String token) {
+
+    public WebApiSettings {
+      host = host == null || host.isBlank() ? "127.0.0.1" : host.trim();
+      port = port < 1 || port > 65535 ? 8780 : port;
+      token = token == null ? "" : token.trim();
+    }
+
+    public static WebApiSettings defaults() {
+      return new WebApiSettings(false, "127.0.0.1", 8780, "");
     }
   }
 

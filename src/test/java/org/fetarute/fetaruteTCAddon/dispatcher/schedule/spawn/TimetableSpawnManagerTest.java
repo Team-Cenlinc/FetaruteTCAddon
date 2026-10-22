@@ -489,7 +489,7 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.service.cancellationOf(TIMETABLE, TRIP_TWO, date).isPresent());
   }
 
-  /** 站牌行的车次标识找回表上那一班：预测行按最近一次预测，已出没派的票按登记；派出后查不到。 */
+  /** 站牌行的车次标识找回表上那一班：预测行按预测时记下的，已出没派的票按登记。 */
   @Test
   void aBoardRowsTripIdLeadsBackToItsDutyIntent() {
     Fixture fixture = fixture();
@@ -515,8 +515,76 @@ class TimetableSpawnManagerTest {
         fixture.manager.intentOfServiceTrip(firstTrip).orElseThrow().tripIndex(),
         "预测窗口已过：按已出的票找");
     fixture.manager.onDispatched(issued.get(1), "train-1");
-    assertTrue(fixture.manager.intentOfServiceTrip(firstTrip).isEmpty(), "派出后意图已摘掉");
+    assertEquals(
+        0,
+        fixture.manager.intentOfServiceTrip(firstTrip).orElseThrow().tripIndex(),
+        "派出后已出的票摘掉；预测时记下的意图保留到服务日过去");
     assertTrue(fixture.manager.intentOfServiceTrip("no-such-trip").isEmpty());
+  }
+
+  /** 站台屏与只读 HTTP 接口用不同时间窗交错预测：后一次不冲掉前一次记下的意图；服务日早于前一天的随预测清掉。 */
+  @Test
+  void interleavedForecastsKeepEachOthersIntents() {
+    Fixture fixture = fixture();
+    String later =
+        fixture
+            .manager
+            .snapshotForecast(DAY.plusSeconds(8 * 3600 - 60), Duration.ofMinutes(20), 5)
+            .stream()
+            .filter(ticket -> ROUTE.equals(ticket.service().routeId()))
+            .filter(ticket -> ticket.dueAt().equals(DAY.plusSeconds(8 * 3600 + 600)))
+            .findFirst()
+            .orElseThrow()
+            .serviceTripId()
+            .orElseThrow();
+
+    fixture.manager.snapshotForecast(DAY.plusSeconds(8 * 3600 - 60), Duration.ofMinutes(2), 5);
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isPresent(), "窄时间窗的预测不冲掉宽时间窗记下的");
+
+    fixture.manager.snapshotForecast(DAY.plus(Duration.ofDays(3)), Duration.ofMinutes(1), 5);
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isEmpty(), "服务日早于前一天的清掉");
+  }
+
+  /** 重新发布时刻表（沿用 ID、更新时刻变了）：旧表记下的意图整本作废，不会被当成新表的同一车次；再预测一次又记上。 */
+  @Test
+  void republishingDiscardsForecastIntents() {
+    Timetable original = timetable();
+    Fixture fixture = fixture(original);
+    Instant at = DAY.plusSeconds(8 * 3600 - 60);
+    String later =
+        fixture.manager.snapshotForecast(at, Duration.ofMinutes(20), 5).stream()
+            .filter(ticket -> ROUTE.equals(ticket.service().routeId()))
+            .filter(ticket -> ticket.dueAt().equals(DAY.plusSeconds(8 * 3600 + 600)))
+            .findFirst()
+            .orElseThrow()
+            .serviceTripId()
+            .orElseThrow();
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isPresent());
+
+    Timetable republished =
+        new Timetable(
+            original.id(),
+            original.companyId(),
+            original.operatorId(),
+            original.lineId(),
+            original.code(),
+            original.name(),
+            original.status(),
+            original.zoneId(),
+            original.serviceStartSecondOfDay(),
+            original.serviceEndSecondOfDay(),
+            original.routePlans(),
+            original.trips(),
+            original.duties(),
+            original.notes(),
+            original.createdAt(),
+            original.updatedAt().plusSeconds(60));
+    when(fixture.provider().timetables().listPublished()).thenReturn(List.of(republished));
+    fixture.service().reload(fixture.provider());
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isEmpty(), "旧表的意图作废");
+
+    fixture.manager.snapshotForecast(at, Duration.ofMinutes(20), 5);
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isPresent(), "按新表重新记上");
   }
 
   /** 已取消的车次不会开出，站牌预测里不再出现；站牌与站台屏从时刻表的取消标记显示它。 */
