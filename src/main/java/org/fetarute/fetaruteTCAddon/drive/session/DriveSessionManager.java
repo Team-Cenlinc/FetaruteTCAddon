@@ -1568,6 +1568,35 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return session.driverLink() != null && activeTask;
   }
 
+  /** 停稳时离座是否须再按一次确认：驾驶调度列车时离座即结束驾驶、列车交还自动运行，领没领任务都一样。 */
+  static boolean exitNeedsConfirm(DriveSession session) {
+    return session.driverLink() != null;
+  }
+
+  /**
+   * 此刻离座不结束驾驶（与每拍的座位检查同一口径）：折返换端途中；停着时还有终点站等接续下一趟、分行后等选择继续驾驶的一段。
+   *
+   * @param moving 列车在行驶
+   */
+  private boolean leavingKeepsDriving(DriveSession session, boolean moving) {
+    if (session.cabChange().allowsLeavingSeat()) {
+      return true;
+    }
+    return !moving
+        && ((session.driverLink() != null && session.cabChange().walksOnLeaving())
+            || splitChoices.choosing(session.playerId()));
+  }
+
+  /** 再按一次的提示：终点站还没结算、有任务（离座按放弃处理）、没有任务（离座交还自动运行）各一条。 */
+  private String confirmNoticeKey(DriveSession session) {
+    if (atTerminalBeforeSettlement(session)) {
+      return "drive.seat-exit.confirm-terminal";
+    }
+    return exitAbandonsTask(session, tasks.activeTaskOf(session.playerId()).isPresent())
+        ? "drive.seat-exit.confirm"
+        : "drive.seat-exit.confirm-handback";
+  }
+
   /**
    * TrainCarts 入座前：车掌预留的座位别人（乘客、驾驶员）不能坐。
    *
@@ -1614,7 +1643,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /**
-   * 驾驶员自己按 Shift 离座前的判定：行驶中拦下；停稳且有未结束的任务时须在两秒内再按一次（离座即按放弃处理）；其余放行。
+   * 驾驶员自己按 Shift 离座前的判定：行驶中拦下；驾驶调度列车时停稳也须在两秒内再按一次（离座即结束驾驶，有未结束的任务时按放弃处理）；离座不结束驾驶时（换端途中、
+   * 终点站等接续下一趟、分行后等选择）与其余情况放行。
    *
    * @return 是否放行
    */
@@ -1634,9 +1664,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         session
             .exitGuard()
             .decide(
-                session.cabChange().allowsLeavingSeat(),
+                leavingKeepsDriving(session, moving),
                 moving,
-                exitAbandonsTask(session, tasks.activeTaskOf(player.getUniqueId()).isPresent()),
+                exitNeedsConfirm(session),
                 session.lastSneakTick(),
                 session.sneakEdges(),
                 now);
@@ -1645,12 +1675,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         // 行驶中的提示发到聊天栏：动作栏被占住会挡掉速度与限速显示。
       case MOVING -> player.sendMessage(
           plugin.getLocaleManager().component("drive.seat-exit.moving", Map.of()));
-      case CONFIRM -> notice(
-          player,
-          atTerminalBeforeSettlement(session)
-              ? "drive.seat-exit.confirm-terminal"
-              : "drive.seat-exit.confirm",
-          Map.of());
+      case CONFIRM -> notice(player, confirmNoticeKey(session), Map.of());
       case QUIET -> {}
     }
     if (decision != SeatExitGuard.Decision.ALLOW) {

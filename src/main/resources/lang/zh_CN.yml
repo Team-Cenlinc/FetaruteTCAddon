@@ -3593,4 +3593,5 @@ drive:
   seat-exit:
     moving: "<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座；需要立即结束驾驶时，输入 /fta drive off</yellow>"
     confirm: "<prefix> <yellow>两秒内再按一次 Shift 离座；离座后本趟任务按放弃处理</yellow>"
+    confirm-handback: "<prefix> <yellow>两秒内再按一次 Shift 离座；离座后驾驶结束，列车交还自动运行</yellow>"
     confirm-terminal: "<prefix> <yellow>已到终点站：请先开门结算本趟成绩，再离座换端；现在离座本趟按放弃处理，两秒内再按一次 Shift 离座</yellow>"

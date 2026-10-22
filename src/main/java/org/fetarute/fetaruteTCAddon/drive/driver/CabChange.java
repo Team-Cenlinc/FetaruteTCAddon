@@ -97,6 +97,7 @@ public final class CabChange {
 
   private Stage stage = Stage.IDLE;
   private CabSeats.End target = CabSeats.End.HEAD;
+  private boolean walksOnLeaving;
   private Instant deadline;
   private Instant lastNow;
   private long reserveSeconds;
@@ -196,6 +197,8 @@ public final class CabChange {
   /** 推进一拍。 */
   public Event tick(Input in) {
     Objects.requireNonNull(in, "in");
+    walksOnLeaving =
+        in.applicable() && in.preRelease() && stage != Stage.ACTIVE && in.walkAllowed();
     lastNow = in.now();
     memberCount = in.memberCount();
     if (!in.preRelease()) {
@@ -334,6 +337,14 @@ public final class CabChange {
   /** 换端途中离座不结束驾驶，也不把驾驶员送回原来的座位。 */
   public boolean allowsLeavingSeat() {
     return stage != Stage.IDLE;
+  }
+
+  /**
+   * 上一拍在终点站等接续下一趟（放行前，见 {@link Input#walkAllowed}）：此刻离座不结束驾驶，下一拍按离座引导到发车端。已坐在发车端时换端已完成、{@link
+   * #allowsLeavingSeat} 为 false，离座照样不结束驾驶。
+   */
+  public boolean walksOnLeaving() {
+    return walksOnLeaving;
   }
 
   /** 要坐进哪一端的驾驶室（按此刻的编组次序）；发车方向未定、任一端都可以时为 {@link CabSeats.End#NONE}。 */

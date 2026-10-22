@@ -77,6 +77,20 @@ class CabChangeWalkTest {
   }
 
   @Test
+  @DisplayName("等接续期间已坐在发车端：换端已完成，但此刻离座照样不结束驾驶（离座一按即可）；放行后、不等接续时不算")
+  void seatedAtTheRightEndStillWalksOnLeaving() {
+    change.tick(waiting(CabSeats.Departure.HEAD, CabSeats.End.HEAD, true, 0));
+    assertFalse(change.allowsLeavingSeat());
+    assertTrue(change.walksOnLeaving(), "离座后下一拍按离座引导，不结束驾驶");
+
+    change.tick(waiting(CabSeats.Departure.HEAD, CabSeats.End.HEAD, false, 5));
+    assertFalse(change.walksOnLeaving(), "不等接续：离座按离岗处理");
+
+    change.tick(released(CabSeats.End.HEAD, 10));
+    assertFalse(change.walksOnLeaving(), "放行以后");
+  }
+
+  @Test
   @DisplayName("方向未定：两端驾驶室都可以先坐下等候；放行后坐在后面那一端要换过去，不能从后端开车")
   void waitsAtEitherEndUntilReleased() {
     assertEquals(

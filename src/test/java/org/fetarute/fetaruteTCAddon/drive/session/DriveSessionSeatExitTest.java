@@ -90,6 +90,26 @@ class DriveSessionSeatExitTest {
   }
 
   @Test
+  @DisplayName("驾驶调度列车时停稳离座也要再按一次：没领任务（直接接管）离座同样结束驾驶；非调度列车一按就下")
+  void dispatchSessionsConfirmLeavingEvenWithoutATask() {
+    DriveSession free = session();
+    assertFalse(DriveSessionManager.exitNeedsConfirm(free));
+    DriveSession dispatch = session();
+    dispatch.attachDriverLink(new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L));
+    assertTrue(DriveSessionManager.exitNeedsConfirm(dispatch));
+
+    SeatExitGuard guard = new SeatExitGuard();
+    assertEquals(
+        SeatExitGuard.Decision.CONFIRM,
+        guard.decide(false, false, DriveSessionManager.exitNeedsConfirm(dispatch), 100, true, 100),
+        "第一次按下：提示再按一次");
+    assertEquals(
+        SeatExitGuard.Decision.ALLOW,
+        guard.decide(false, false, DriveSessionManager.exitNeedsConfirm(dispatch), 110, true, 110),
+        "两秒内再按一次：放行");
+  }
+
+  @Test
   @DisplayName("终点站离座引导：等接续下一趟或列车在待命、且没有开着的一趟时才引导")
   void walkIsAllowedOnlyWhileWaitingForTheNextTrip() {
     assertTrue(DriveSessionManager.walkAllowed(false, true, false), "结算后等接续");

@@ -1707,6 +1707,7 @@ drive:
   seat-exit:
     moving: "<prefix> <yellow>You cannot leave the seat while the train is moving; stop first, then press Shift. To end driving at once, run /fta drive off</yellow>"
     confirm: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; this trip will then count as abandoned</yellow>"
+    confirm-handback: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; driving then ends and the train returns to automatic operation</yellow>"
     confirm-terminal: "<prefix> <yellow>You are at the terminus: open the doors first to score this trip, then leave the seat to change ends; leaving now abandons the trip. Press Shift again within 2 seconds to leave</yellow>"
 sign:
   # AutoStation sign line 4 is blank or unrecognised: the doors will not open at this stop
