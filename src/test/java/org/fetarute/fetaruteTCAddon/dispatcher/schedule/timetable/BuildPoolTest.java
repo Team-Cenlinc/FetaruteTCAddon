@@ -145,7 +145,7 @@ class BuildPoolTest {
     assertEquals(1, BuildPool.serial().threads());
   }
 
-  /** 线程数换算：不配置取核数一半（至少 1、至多 4），0 取全部核，其余照用。 */
+  /** 线程数换算：不配置取核数一半（至少 1、至多 4），0 取全部核，显式写的数不超过可用核数（结果随所在机器的核数变）。 */
   @Test
   void configuredThreadsResolve() {
     assertEquals(1, BuildPool.defaultThreads(1));
@@ -156,7 +156,7 @@ class BuildPoolTest {
     assertEquals(BuildPool.defaultThreads(cores), BuildPool.resolveThreads(-1));
     assertEquals(cores, BuildPool.resolveThreads(0));
     assertEquals(1, BuildPool.resolveThreads(1));
-    assertEquals(6, BuildPool.resolveThreads(6));
+    assertEquals(Math.min(6, cores), BuildPool.resolveThreads(6));
     assertTrue(BuildPool.resolveThreads(-1) <= BuildPool.DEFAULT_MAX_THREADS);
   }
 }
