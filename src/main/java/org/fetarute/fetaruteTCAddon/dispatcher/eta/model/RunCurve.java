@@ -141,7 +141,8 @@ final class RunCurve {
       double elapsed = 0.0;
       for (int k = 1; k <= subSteps; k++) {
         // 按 v² 插值：制动曲线上 v² 随里程线性变化，按速度线性插值会在刹停前的最后一格把耗时高估近一半。
-        double cap = Math.sqrt(from * from + (to * to - from * from) * k / subSteps);
+        // 末一小步 k = subSteps 时舍入可能得到极小的负数：开方前截到 0，否则整段时分成了 NaN。
+        double cap = Math.sqrt(Math.max(0.0, from * from + (to * to - from * from) * k / subSteps));
         double half =
             Math.sqrt(velocity * velocity + curve.accelerationBps2(velocity, phaseStart, to) * ds);
         double accel = curve.accelerationBps2(half, phaseStart, to);
