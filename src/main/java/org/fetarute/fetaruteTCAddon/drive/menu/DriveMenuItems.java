@@ -6,17 +6,16 @@ import java.util.Map;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
+import org.fetarute.fetaruteTCAddon.utils.PackModel;
 
 /**
  * 停车后菜单里的按钮物品。
  *
- * <p>默认用染料按颜色区分，没有材质包的玩家也能用；同时设置 {@code item_model}，装有材质包的客户端显示 {@code fetarute:drive/panel/…} 的贴图。
- * 选中的换向手柄按钮、正在接通的启动流程开关另加附魔光效：没有材质包时靠光效看出状态。
+ * <p>默认用染料按颜色区分，没有材质包的玩家也能用；同时写上材质包标记 {@code fetarute:drive/panel/…}（{@link
+ * PackModel}），装有材质包的客户端显示对应的贴图。 选中的换向手柄按钮、正在接通的启动流程开关另加附魔光效：没有材质包时靠光效看出状态。
  */
 public final class DriveMenuItems {
 
@@ -26,13 +25,14 @@ public final class DriveMenuItems {
   public static ItemStack build(LocaleManager locale, ButtonView view) {
     ItemStack stack = new ItemStack(materialOf(view));
     ItemMeta meta = stack.getItemMeta();
-    meta.displayName(locale.component(nameKey(view)).decoration(TextDecoration.ITALIC, false));
+    meta.displayName(
+        locale
+            .component(nameKey(view), nameValues(locale, view))
+            .decoration(TextDecoration.ITALIC, false));
     meta.lore(lore(locale, view));
-    meta.setItemModel(
-        new NamespacedKey(
-            HotbarItems.MODEL_NAMESPACE,
-            "drive/"
-                + MenuLayout.modelKey(view.action(), view.active(), view.fault(), view.supply())));
+    PackModel.mark(
+        meta,
+        "drive/" + MenuLayout.modelKey(view.action(), view.active(), view.fault(), view.supply()));
     if ((view.action().isReverser() && view.active())
         || view.busy()
         || (view.action() == MenuAction.END_DRIVING && view.active())) {
@@ -54,7 +54,15 @@ public final class DriveMenuItems {
       case REVERSER_NEUTRAL -> Material.GRAY_DYE;
       case REVERSER_REVERSE -> Material.LIGHT_BLUE_DYE;
       case DOOR_LEFT, DOOR_RIGHT -> view.active() ? Material.LIME_DYE : Material.GRAY_DYE;
-      case KEY, POWER, BREAKER, AUX, COMPRESSOR, BRAKE_TEST -> view.busy()
+      case KEY,
+          POWER,
+          BREAKER,
+          AUX,
+          COMPRESSOR,
+          BRAKE_TEST,
+          POWER_MODE_1,
+          POWER_MODE_2,
+          POWER_MODE_3 -> view.busy()
           ? Material.YELLOW_DYE
           : view.active() ? Material.LIME_DYE : Material.GRAY_DYE;
       case START -> view.busy()
@@ -66,6 +74,13 @@ public final class DriveMenuItems {
       case TASK_CARD -> Material.BOOK;
       case DOOR_BYPASS -> view.active() ? Material.ORANGE_DYE : Material.GRAY_DYE;
     };
+  }
+
+  /** 按钮名称里的占位符：受电方式按钮写方式名称。 */
+  static Map<String, String> nameValues(LocaleManager locale, ButtonView view) {
+    return view.action().powerModeIndex() >= 0
+        ? Map.of("mode", locale.text("drive.power.name." + view.supply().key()))
+        : Map.of();
   }
 
   /** 按钮名称的语言键。 */
@@ -90,6 +105,7 @@ public final class DriveMenuItems {
           case END_DRIVING -> view.active() ? "end-driving-confirm" : "end-driving";
           case TASK_CARD -> "task-card-free";
           case DOOR_BYPASS -> view.active() ? "door-bypass-on" : "door-bypass-off";
+          case POWER_MODE_1, POWER_MODE_2, POWER_MODE_3 -> "power-mode-" + state;
         };
   }
 
@@ -132,10 +148,13 @@ public final class DriveMenuItems {
           : "drive.menu.hint.end-driving";
       case TASK_CARD -> "drive.menu.hint.task-card";
       case DOOR_BYPASS -> "drive.menu.hint.door-bypass";
+      case POWER_MODE_1, POWER_MODE_2, POWER_MODE_3 -> view.active()
+          ? "drive.menu.hint.power-mode-current"
+          : "drive.menu.hint.power-mode-select";
     };
   }
 
-  /** 任务卡：原版书本贴图（不设 {@code item_model}），写卡片上的各行；不可点击。 */
+  /** 任务卡：原版书本贴图（不写材质包标记），写卡片上的各行；不可点击。 */
   public static ItemStack taskCard(LocaleManager locale, TaskCard.Card card) {
     ItemStack stack = new ItemStack(Material.BOOK);
     ItemMeta meta = stack.getItemMeta();

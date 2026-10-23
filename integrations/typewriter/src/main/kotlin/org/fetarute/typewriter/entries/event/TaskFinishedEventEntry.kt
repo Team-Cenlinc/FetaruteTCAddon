@@ -22,33 +22,30 @@ import org.fetarute.typewriter.entries.action.AssignTripActionEntry
 import java.util.Optional
 import kotlin.reflect.KClass
 
-@Entry("fetarute_task_finished_event", "When a player's FetaruteTC driving task ends", Colors.YELLOW, "mdi:train-car")
+@Entry("fetarute_task_finished_event", "玩家的 FTCA 驾驶任务结束时", Colors.YELLOW, "mdi:train-car")
 @ContextKeys(TaskFinishedContextKeys::class)
 /**
- * The `Task Finished Event` is triggered when a driving task ends: driven to the end, abandoned,
- * expired before the player took over, or interrupted.
+ * “驾驶任务结束”事件：驾驶任务结束时触发——开到终点、放弃、还没接班就作废，或被中断。
  *
- * Points and grade are only set when the player actually drove the train; otherwise they are 0 and empty.
+ * 得分与评级只在玩家真的开过车时才有，否则为 0 与空。
  *
- * Besides tasks from the task board and from Typewriter, FetaruteTCAddon also records a task when a player
- * takes over a scheduled train directly, drives on with the next trip at the terminus, or takes a road test
- * or its practice run. Use the sources to tell them apart.
+ * 除了任务板与 Typewriter 派的任务，玩家直接接管调度列车、在终点站接着开下一趟、参加路考或路考练习时，
+ * FetaruteTCAddon 也会记一个任务；用“来源”区分。
  *
- * ## How could this be used?
- * Reward the player when the trip was completed with grade A or better,
- * or move the quest back a step when the task was abandoned.
+ * ## 用法示例
+ * 车次以 A 级以上完成时发奖励；任务被放弃时把剧情退回一步。
  */
 class TaskFinishedEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only tasks given by this action. Leave empty for any task.")
+    @Help("只要这个动作派出的驾驶任务；留空不限。")
     val assignedBy: Ref<AssignTripActionEntry> = emptyRef(),
-    @Help("Only trips of this route code. Leave blank for any route.")
+    @Help("只要这个交路编号的车次；留空不限交路。")
     val route: String = "",
-    @Help("Only tasks that ended this way. Leave empty for any end.")
+    @Help("只要以这种终态结束的；留空不限终态。")
     val state: Optional<TaskEndState> = Optional.empty(),
-    @Help("Only tasks from these sources. Leave empty for any source.")
+    @Help("只要这些来源的驾驶任务；留空不限来源。")
     val sources: List<TaskSource> = emptyList(),
 ) : EventEntry
 

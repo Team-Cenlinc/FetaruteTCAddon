@@ -35,6 +35,8 @@ import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager.SpawnSettings;
+import org.fetarute.fetaruteTCAddon.coupler.CarTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile;
 import org.fetarute.fetaruteTCAddon.dispatcher.consist.ResolvedConsistPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
@@ -125,6 +127,34 @@ public final class FtaDepotCommand {
                   checkDepotSchedule(ctx.sender(), normalizeNodeIdArg(ctx.get("node")), limit);
                 }));
 
+    var extraFlag = CommandFlag.<CommandSender>builder("extra").build();
+    var atFlag =
+        CommandFlag.<CommandSender>builder("at")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder("at", StringParser.stringParser())
+                    .suggestionProvider(CommandSuggestionProviders.placeholder("<HH:MM>"))
+                    .build())
+            .build();
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("depot")
+            .literal("extra")
+            .literal("list")
+            .permission("fetarute.depot.spawn")
+            .handler(ctx -> listExtras(ctx.sender())));
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("depot")
+            .literal("extra")
+            .literal("cancel")
+            .permission("fetarute.depot.spawn")
+            .required(
+                "id", StringParser.stringParser(), CommandSuggestionProviders.placeholder("<编号>"))
+            .handler(ctx -> cancelExtra(ctx.sender(), ((String) ctx.get("id")).trim())));
+
     manager.command(
         manager
             .commandBuilder("fta")
@@ -137,6 +167,8 @@ public final class FtaDepotCommand {
             .required("route", StringParser.quotedStringParser(), routeSuggestions)
             .required("node", StringParser.quotedStringParser(), depotSuggestions)
             .flag(patternFlag)
+            .flag(extraFlag)
+            .flag(atFlag)
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -175,6 +207,17 @@ public final class FtaDepotCommand {
                     sender.sendMessage(
                         locale.component(
                             "command.depot.spawn.not-depot", Map.of("node", depotId.value())));
+                    return;
+                  }
+                  boolean patternGiven = ctx.flags().getValue(patternFlag, null) != null;
+                  String atRaw = ctx.flags().getValue(atFlag, null);
+                  // 加开：表外加开一班，有表、无表的线路都可以，从这个车库出车、跑完回库。
+                  if (ctx.flags().hasFlag(extraFlag)) {
+                    spawnExtra(sender, locale, resolved, depotId, atRaw, patternGiven);
+                    return;
+                  }
+                  if (atRaw != null) {
+                    sender.sendMessage(locale.component("command.depot.extra.at-needs-extra"));
                     return;
                   }
                   // 有表线路：提前出这条线路从该车库开出的下一班，出车后在车库等到计划时刻再走。
@@ -254,13 +297,15 @@ public final class FtaDepotCommand {
                     sender.sendMessage(locale.component("command.depot.spawn.spawn-failed"));
                     return;
                   }
-                  SpawnableGroup spawnable = SpawnableGroup.parse(trainCarts, pattern);
-                  if (spawnable == null || spawnable.getMembers().isEmpty()) {
+                  Optional<CompositeSpawnPattern.Parsed> parsed =
+                      CompositeSpawnPattern.parse(trainCarts, pattern);
+                  if (parsed.isEmpty()) {
                     sender.sendMessage(
                         locale.component(
                             "command.depot.spawn.pattern-invalid", Map.of("pattern", pattern)));
                     return;
                   }
+                  SpawnableGroup spawnable = parsed.get().group();
 
                   TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
                   Set<RailBlockPos> anchors = findAnchorRails(access, depotInfo);
@@ -283,6 +328,7 @@ public final class FtaDepotCommand {
                   TrainProperties properties = group.getProperties();
                   // 与自动出库一致：关摩擦、重力、碰撞，常驻加载（否则首个物理 tick 就会被 TrainCarts 卸载）。
                   SpawnPhysicsProperties.apply(properties);
+                  CarTags.stampSpawnOrigins(group, parsed.get().parts(), parsed.get().partSizes());
                   UUID runId = UUID.randomUUID();
                   Optional<RouteDestinationResolver.DestinationInfo> destInfoOpt =
                       RouteDestinationResolver.resolve(provider, resolved.route());
@@ -529,7 +575,10 @@ public final class FtaDepotCommand {
                   "route",
                   service.routeCode(),
                   "headway",
-                  formatDuration(service.baseHeadway()),
+                  service
+                      .baseHeadway()
+                      .map(value -> formatDuration(value))
+                      .orElse(locale.text("command.spawn.dispatch-by-operation")),
                   "depots",
                   SpawnScheduleDiagnostics.depotCandidatesText(provider, service))));
     }
@@ -1310,6 +1359,160 @@ public final class FtaDepotCommand {
   }
 
   private record ResolvedRoute(Company company, Operator operator, Line line, Route route) {}
+
+  /**
+   * 加开：表外加开一班，从这个车库出车、跑这条交路的全程，不进时刻表、跑完回库（与叫来的车同一套），站台屏写“加开”。
+   *
+   * @param atRaw {@code --at HH:MM}；不写时尽快出车
+   */
+  private void spawnExtra(
+      CommandSender sender,
+      LocaleManager locale,
+      ResolvedRoute resolved,
+      NodeId depotId,
+      String atRaw,
+      boolean patternGiven) {
+    Optional<org.fetarute.fetaruteTCAddon.call.CallService> calls = plugin.getCallService();
+    if (calls.isEmpty()) {
+      sender.sendMessage(locale.component("command.depot.extra.unavailable"));
+      return;
+    }
+    Instant departAt = Instant.now();
+    if (atRaw != null) {
+      Optional<java.time.LocalTime> clock =
+          org.fetarute.fetaruteTCAddon.call.ExtraTrips.parseClock(atRaw);
+      if (clock.isEmpty()) {
+        sender.sendMessage(
+            locale.component("command.depot.extra.invalid-time", Map.of("value", atRaw)));
+        return;
+      }
+      departAt =
+          org.fetarute.fetaruteTCAddon.call.ExtraTrips.departAt(
+              clock.get(), java.time.ZonedDateTime.now(java.time.ZoneId.systemDefault()));
+    }
+    java.util.UUID issuer =
+        sender instanceof org.bukkit.entity.Player player
+            ? player.getUniqueId()
+            : org.fetarute.fetaruteTCAddon.call.CallService.CONSOLE;
+    var result = calls.get().addExtra(resolved.route().id(), depotId.value(), departAt, issuer);
+    String route = resolved.route().code();
+    switch (result.outcome()) {
+      case ISSUED -> {
+        String id = result.id().map(java.util.UUID::toString).orElse("");
+        sender.sendMessage(
+            locale.component(
+                atRaw == null ? "command.depot.extra.issued-now" : "command.depot.extra.issued",
+                Map.of(
+                    "route",
+                    route,
+                    "node",
+                    depotId.value(),
+                    "time",
+                    org.fetarute.fetaruteTCAddon.call.CallService.EXTRA_CLOCK.format(departAt),
+                    "id",
+                    shortId(id),
+                    "full_id",
+                    id)));
+        if (patternGiven) {
+          sender.sendMessage(locale.component("command.depot.extra.pattern-ignored"));
+        }
+      }
+      case NO_ROUTE -> sender.sendMessage(
+          locale.component("command.depot.extra.no-route", Map.of("route", route)));
+      case NOT_FROM_DEPOT -> sender.sendMessage(
+          locale.component("command.depot.extra.not-from-depot", Map.of("route", route)));
+      case WRONG_DEPOT -> sender.sendMessage(
+          locale.component(
+              "command.depot.extra.wrong-depot",
+              Map.of(
+                  "route",
+                  route,
+                  "node",
+                  depotId.value(),
+                  "depot",
+                  result.routeDepot().orElse("-"))));
+      case FAILED -> sender.sendMessage(
+          locale.component("command.depot.extra.failed", Map.of("route", route)));
+      case SPAWN_DISABLED -> sender.sendMessage(
+          locale.component("command.depot.extra.spawn-disabled"));
+    }
+  }
+
+  /** {@code /fta depot extra list}：还没派出的加开与正在跑的加开的车。 */
+  private void listExtras(CommandSender sender) {
+    LocaleManager locale = plugin.getLocaleManager();
+    Optional<org.fetarute.fetaruteTCAddon.call.CallService> calls = plugin.getCallService();
+    if (calls.isEmpty()) {
+      sender.sendMessage(locale.component("command.depot.extra.unavailable"));
+      return;
+    }
+    var pending = calls.get().pendingExtras();
+    var running = calls.get().extraTrainNames();
+    if (pending.isEmpty() && running.isEmpty()) {
+      sender.sendMessage(locale.component("command.depot.extra.list-empty"));
+      return;
+    }
+    sender.sendMessage(locale.component("command.depot.extra.list-header"));
+    for (var extra : pending) {
+      String id = extra.id().toString();
+      sender.sendMessage(
+          locale.component(
+              "command.depot.extra.list-pending",
+              Map.of(
+                  "id",
+                  shortId(id),
+                  "full_id",
+                  id,
+                  "route",
+                  calls.get().routeCodeOf(extra.routeId()),
+                  "node",
+                  extra.depotNode(),
+                  "time",
+                  org.fetarute.fetaruteTCAddon.call.CallService.EXTRA_CLOCK.format(
+                      extra.departAt()))));
+    }
+    for (String train : running.stream().sorted().toList()) {
+      sender.sendMessage(
+          locale.component("command.depot.extra.list-running", Map.of("train", train)));
+    }
+  }
+
+  /** {@code /fta depot extra cancel <编号>}：编号写前几位即可（列表里显示的前 8 位）。 */
+  private void cancelExtra(CommandSender sender, String idPrefix) {
+    LocaleManager locale = plugin.getLocaleManager();
+    Optional<org.fetarute.fetaruteTCAddon.call.CallService> calls = plugin.getCallService();
+    if (calls.isEmpty()) {
+      sender.sendMessage(locale.component("command.depot.extra.unavailable"));
+      return;
+    }
+    String wanted = idPrefix.toLowerCase(java.util.Locale.ROOT);
+    List<java.util.UUID> matches =
+        calls.get().pendingExtras().stream()
+            .map(org.fetarute.fetaruteTCAddon.call.CallService.ExtraTrip::id)
+            .filter(id -> !wanted.isEmpty() && id.toString().startsWith(wanted))
+            .toList();
+    if (matches.size() != 1) {
+      sender.sendMessage(
+          locale.component(
+              matches.isEmpty()
+                  ? "command.depot.extra.cancel-not-found"
+                  : "command.depot.extra.cancel-ambiguous",
+              Map.of("id", idPrefix)));
+      return;
+    }
+    String key =
+        switch (calls.get().cancelExtra(matches.get(0))) {
+          case CANCELLED -> "command.depot.extra.cancelled";
+          case ALREADY_DEPARTED -> "command.depot.extra.cancel-too-late";
+          case NOT_FOUND -> "command.depot.extra.cancel-not-found";
+        };
+    sender.sendMessage(locale.component(key, Map.of("id", shortId(matches.get(0).toString()))));
+  }
+
+  /** 加开编号的简写（前 8 位）。 */
+  private static String shortId(String id) {
+    return id.length() > 8 ? id.substring(0, 8) : id;
+  }
 
   /** 有表线路提前出车往后找下一班找多远。 */
   private static final Duration EARLY_SPAWN_HORIZON = Duration.ofMinutes(60);

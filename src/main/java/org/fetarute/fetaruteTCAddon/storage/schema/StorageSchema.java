@@ -588,6 +588,8 @@ public final class StorageSchema {
                     planned_end_second %s NOT NULL,
                     close_reason %s NOT NULL,
                     consist_key %s,
+                    split_from_trip_id %s,
+                    joins_trip_id %s,
                     FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
                 );
                 """,
@@ -606,6 +608,8 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.stringType(),
         dialect.stringType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
         table("timetables"));
   }
 
@@ -712,6 +716,7 @@ public final class StorageSchema {
                     station_code %s,
                     platforms %s,
                     line_codes %s,
+                    rotation_operators %s,
                     appearance %s NOT NULL,
                     mode %s NOT NULL,
                     created_at %s NOT NULL,
@@ -732,6 +737,7 @@ public final class StorageSchema {
         dialect.jsonType(),
         dialect.stringType(),
         dialect.stringType(),
+        dialect.jsonType(),
         dialect.jsonType(),
         dialect.jsonType(),
         dialect.stringType(),

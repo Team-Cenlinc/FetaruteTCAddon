@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 41
+config-version: 47
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -57,7 +57,7 @@ health:
   progress-stop-grace-seconds: 60
   # 红灯下停滞超过该秒数时，优先尝试解开两车互卡
   deadlock-threshold-seconds: 45
-  # 销毁类清理总开关：同时控制"互卡销毁"与"长时间停滞清车"。
+  # 销毁类清理总开关：同时控制"互卡销毁"、"长时间停滞清车"与"车身重叠"（两车叠在一起、连续不动超过下面的销毁秒数时删其中一列）。
   # 关闭时卡死的列车只能手动删除；长期运行的服务器建议开启（还需 smart-dispatcher.mode 为 ENFORCE）。
   # 停滞告警里的"清车=…"会说明清车为何没有执行，例如在等哪一列车、那列车处于什么状态。
   deadlock-destroy-enabled: false
@@ -102,6 +102,8 @@ autostation:
   door-close-sound-volume: 1.0
   # 关门提示音音高
   door-close-sound-pitch: 1.2
+  # 自动运行停车的随机误差上限（格）：多数停在停车点附近、越往两边越少，与实车定位停车相近；0 表示分毫不差（最大 1）
+  stop-scatter-blocks: 0.2
 
 runtime:
   # 信号与闭塞检查的间隔（ticks，20 ticks = 1 秒）
@@ -156,11 +158,11 @@ runtime:
   rear-guard-edges: 1
   # 道岔区联锁范围（向前的区间数）
   switcher-zone-edges: 3
-  # 进站及停车路径点前的限速（格/秒）
+  # 停车路径点（区间停车点）前的限速（格/秒）。车站不再限速：列车按 train.ato-brake-fraction 的舒适减速度直接刹到停车点
   approach-speed-bps: 10.0
   # 进入车库前的限速（格/秒）
   approach-depot-speed-bps: 5.0
-  # 进站限速区范围（格）：距下一个进站触发点（车站、车库及其咽喉、紧邻的道岔）不超过该距离的节点起按进站限速运行，
+  # 进站限速区范围（格）：距下一个停车点（车库及其咽喉、紧邻的道岔；停车路径点本身）不超过该距离的节点起按上面的限速运行，
   # 区外按车型减速度提前制动到区起点。编排时刻表与到站预测使用同一规则，修改后需重新编排时刻表；0 表示不按距离划区
   approach-window-blocks: 96.0
   # 距进站触发点的区间数不超过该值时也划入进站限速区；0 表示不按区间数判断
@@ -286,9 +288,12 @@ timetable:
   max-delay-seconds: 900
   # 重新加载已发布时刻表的间隔（秒）；发布或下架后最多等待该时长生效
   reload-interval-seconds: 60
-  # 编表时每次车站停车在停站时间（dwell）之外额外计入的秒数，涵盖列车对位刹停与开门延迟。
-  # 若实际"到站→发车"总时长与表定明显不符，可按实测调整，修改后需重新编排时刻表
-  station-stop-overhead-seconds: 4
+  # 编表时每次车站停车在停站时间（dwell）之外额外计入的秒数：停稳确认与开门延迟（刹停本身已算在运行曲线里）。
+  # 若实际"停稳→发车"总时长与表定明显不符，可按实测调整，修改后需重新编排时刻表
+  station-stop-overhead-seconds: 1
+  # 编表（/fta timetable build，含快车错峰搜索）用几个线程并行试候选；结果与线程数无关，线程数只影响快慢。
+  # auto 取核数的一半（至少 1、至多 4），给游戏留出余量；0 表示用全部核；1 为单线程；显式写的数不超过可用核数
+  build-threads: auto
   # 晚点追赶：只对已绑定表定车次且确实晚点的列车生效，只会缩短等待，不会让列车更晚。
   # 每趟车结束时日志记录一行 TIMETABLE_TRIP_DELAY，可据此评估追赶效果
   recovery:
@@ -320,11 +325,51 @@ call:
   # 叫来的车离前车不到该秒数时按需降速（最低到线路限速的七成，再近交给信号），后车追到 min-lead-minutes 以内时不降；0 表示不降速。
   # 叫来的车在合流、进路排队时排在所有列车之后
   follow-gap-seconds: 60
+  # 终点站与交路第一站叫车时，折返车在终点就绪后最多等候的秒数：这一单的票还没接走它就作废这一单、车回库，不长时间占着终点股道；
+  # 0 表示不设上限（等到叫车超时）
+  turnback-hold-seconds: 90
+
+coupler:
+  # 车钩扳手（/fta coupler wrench 领取，权限 fetarute.coupler）：右键端车端部开/锁车钩，右键两节车的连接处拆开，
+  # Shift+右键开着车钩的端车把整列车慢慢推向前方的车并挂上（对方这一端车钩也要开着）。
+  # 调度管着的车只能动不在运营中的（终点待命车、已过最后一个载客站的回库车）
+  enabled: true
+  # 联挂后最多几节；0 表示只受 TrainCarts 自己的上限
+  max-cars: 0
+  # 推车时沿轨道最远找多少格内的对方端车（两车之间的空隙）
+  push-max-blocks: 8
+  # 推车速度（格/秒）
+  push-speed-blocks-per-second: 1.0
+  # 交路写了解编（DECP）、联挂（COPL）的那一站多停的秒数：编表、到站预测与现场停站同一口径，改了要重新编表。
+  # 联挂时回程支线车按表提前 couple-seconds 到站，在股道上等主干进站挂上
+  decouple-seconds: 30
+  couple-seconds: 30
+  # 联挂（COPL）不写 WAIT 时等对方的秒数：主干先到等回程支线车、支线车先到等主干，等不到各走各的。不超过发车扣留上限 150 秒
+  couple-wait-seconds: 120
+  # 联挂时后到的车先被对方的占用挡在站台外，停稳后由插件以这个速度开进去（格/秒），最后几格按 push-speed-blocks-per-second 对位挂上
+  approach-speed-blocks-per-second: 3.0
+  # 后到的车离对方最远多少格（沿调度图）才开进去；也是开进去最多走的距离，走过了还没碰到就停车放弃
+  approach-max-blocks: 120
+
+web-api:
+  # 只读 HTTP 接口：线路、车站、站牌与到站预测、在线列车（JSON），给外部的缓存中转（如 Cloudflare Worker）定时拉取。
+  # 全部在插件自己的后台线程处理，不占服务器主线程。默认关闭
+  enabled: false
+  # 监听地址：默认只听本机，推荐配合 Cloudflare Tunnel 等反向代理转发（代理只转发完整的请求）。
+  # 改成 0.0.0.0 让别的机器直接来拉时务必设置 token；直接暴露在公网时慢速连接可以占满处理线程（接口卡住，不影响服务器）
+  host: 127.0.0.1
+  port: 8780
+  # 共享令牌：非空时请求须带请求头 Authorization: Bearer <令牌>（或 X-Fetarute-Token: <令牌>），否则回 401
+  token: ""
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，
   # 编排时刻表与到站预测也按它计算；修改后需重新编排时刻表
   default-type: metro
+  # 自动运行（调度控车、驾驶员的 ATO 模式，以及编表与到站预测）进站与减速时用的舒适减速度，占下面常用制动减速度的比例（0–1）。
+  # 列车沿这条曲线直接刹到停车点；信号与移动授权的刹车按常用制动，驾驶员的建议速度另按常用制动的 0.85 计（drive.yml），
+  # 所以人照建议速度开会比时刻表略快。修改后需重新编排时刻表
+  ato-brake-fraction: 0.75
   # 各车种的加减速度（格/秒²，1 格按 1 米计）：低速段平均起动加速度与常用制动减速度，不是紧急制动。
   # 实际按首尾柔和的 S 形曲线变化，控车与编表使用同一条曲线
   types:

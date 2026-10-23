@@ -28,8 +28,8 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
 
   private static final String COLUMNS =
       "id, world_id, x, y, z, facing, tile_rows, tile_cols, layout_id, page_layouts,"
-          + " operator_code, station_code, platforms, line_codes, appearance, mode, created_at,"
-          + " updated_at";
+          + " operator_code, station_code, platforms, line_codes, rotation_operators, appearance,"
+          + " mode, created_at, updated_at";
 
   public JdbcPidsScreenRepository(
       DataSource dataSource,
@@ -78,14 +78,15 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
             + table("pids_screens")
             + " SET world_id = ?, x = ?, y = ?, z = ?, facing = ?, tile_rows = ?, tile_cols = ?,"
             + " layout_id = ?, page_layouts = ?, operator_code = ?, station_code = ?,"
-            + " platforms = ?, line_codes = ?, appearance = ?, mode = ?, updated_at = ?"
+            + " platforms = ?, line_codes = ?, rotation_operators = ?, appearance = ?, mode = ?,"
+            + " updated_at = ?"
             + " WHERE id = ?";
     String insert =
         "INSERT INTO "
             + table("pids_screens")
             + " ("
             + COLUMNS
-            + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     try {
       return inTransaction(
           connection -> {
@@ -127,7 +128,7 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
     }
   }
 
-  /** 绑定 {@code world_id} 到 {@code mode} 共 15 列，返回下一个参数下标。 */
+  /** 绑定 {@code world_id} 到 {@code mode} 共 16 列，返回下一个参数下标。 */
   private int bindFields(PreparedStatement statement, int start, PidsScreen screen)
       throws SQLException {
     int i = start;
@@ -147,6 +148,7 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
     statement.setString(i++, screen.station().map(PidsStationKey::stationCode).orElse(null));
     statement.setString(i++, gson.toJson(List.copyOf(screen.platforms())));
     statement.setString(i++, gson.toJson(List.copyOf(screen.lines())));
+    statement.setString(i++, screen.rotation().isEmpty() ? null : gson.toJson(screen.rotation()));
     statement.setString(i++, screen.appearance().name());
     statement.setString(i++, screen.mode().name());
     return i;
@@ -173,6 +175,7 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
             : Optional.empty(),
         strings(rs.getString("platforms")),
         strings(rs.getString("line_codes")),
+        rotation(rs.getString("rotation_operators")),
         PidsScreen.Appearance.valueOf(rs.getString("appearance")),
         PidsScreen.Mode.valueOf(rs.getString("mode")),
         readInstant(rs, "created_at"),
@@ -201,6 +204,20 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
     }
     values.stream().skip(1).filter(Objects::nonNull).forEach(ids::add);
     return ids;
+  }
+
+  /** 按运营商轮播的清单（有序）；读不出时不轮播，一行坏数据不影响整表读入。 */
+  private List<String> rotation(String json) {
+    if (json == null || json.isBlank()) {
+      return List.of();
+    }
+    try {
+      List<String> values = gson.fromJson(json, STRING_LIST);
+      return values == null ? List.of() : values;
+    } catch (JsonParseException ex) {
+      debug("站台屏的运营商轮播读不出，不轮播: " + ex.getMessage());
+      return List.of();
+    }
   }
 
   private Set<String> strings(String json) {

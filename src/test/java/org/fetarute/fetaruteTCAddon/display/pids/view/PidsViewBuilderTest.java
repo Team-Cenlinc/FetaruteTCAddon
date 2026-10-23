@@ -221,6 +221,112 @@ class PidsViewBuilderTest {
     assertEquals(List.of("1"), view.platforms());
   }
 
+  /** 取消行只在计划到达之前显示：快照里还留着、但此刻已过计划到达的取消行不列。 */
+  @Test
+  void cancelledRowsAreDroppedOnceTheirTimeHasPassed() {
+    PidsRow expired = cancelled(-10);
+    PidsRow due = cancelled(0);
+    PidsRow real = row(PidsRow.Status.EN_ROUTE, 120, OptionalLong.empty());
+
+    List<PidsView.Row> rows = build(expired, due, real);
+
+    assertEquals(1, rows.size());
+    assertFalse(rows.get(0).badge().hollow(), "只剩真会来的车");
+  }
+
+  /** 正在进站、停靠中的车排在最前：取消的班次计划时刻再早，也不占首行。 */
+  @Test
+  void aTrainAtThePlatformComesBeforeCancelledRows() {
+    PidsRow arriving = row(PidsRow.Status.ARRIVING, 40, OptionalLong.empty());
+    PidsRow later = row(PidsRow.Status.EN_ROUTE, 300, OptionalLong.empty());
+
+    List<PidsView.Row> rows = build(cancelled(20), arriving, later);
+
+    assertEquals(
+        List.of(false, true, false),
+        rows.stream().map(row -> row.badge().hollow()).toList(),
+        "进站的车在首行，取消行在它之后，仍按时间排在后面的车之前");
+    assertEquals(ArrivalMode.HIGHLIGHT, rows.get(0).arrival().mode());
+  }
+
+  /** 统屏：别的站台有车进站，不打乱这个站台按时间排的取消行；只有同一站台的进站车才排到取消行前面。 */
+  @Test
+  void aTrainArrivingAtAnotherPlatformKeepsCancelledRowsInTimeOrder() {
+    PidsRow arrivingAtTwo =
+        new PidsRow(
+            PidsRow.Status.ARRIVING,
+            "WS",
+            "SURC:WS:R1",
+            "NFY",
+            Optional.of("SURC:NFY"),
+            "2",
+            NOW.plusSeconds(40),
+            OptionalLong.empty(),
+            2,
+            false,
+            false,
+            false,
+            Optional.of("train"));
+    PidsViewBuilder.Request unified =
+        new PidsViewBuilder.Request(
+            new PidsSnapshot(STATION, NOW, List.of(cancelled(20), arrivingAtTwo)),
+            NOW,
+            ZoneId.of("Asia/Shanghai"),
+            PidsTheme.DARK,
+            Set.of(),
+            List.of(),
+            6,
+            true);
+
+    assertEquals(
+        List.of(true, false),
+        builder.build(unified).rows().stream().map(row -> row.badge().hollow()).toList(),
+        "1 站台的取消行仍排在 2 站台进站车之前");
+  }
+
+  /** 行数有限时真会来的车优先：取消行只占剩下的行，按先后取，不把真车挤出屏幕。 */
+  @Test
+  void cancelledRowsNeverPushRealTrainsOffTheScreen() {
+    PidsRow first = row(PidsRow.Status.EN_ROUTE, 120, OptionalLong.empty());
+    PidsRow second = row(PidsRow.Status.EN_ROUTE, 240, OptionalLong.empty());
+    PidsRow third = row(PidsRow.Status.EN_ROUTE, 360, OptionalLong.empty());
+
+    assertEquals(
+        List.of("2", "4", "6"),
+        shape(capped(3, cancelled(60), cancelled(90), first, second, third)),
+        "三班真车占满三行，取消行不列");
+    assertEquals(
+        List.of("取消", "2", "4"),
+        shape(capped(3, cancelled(60), first, cancelled(180), second)),
+        "只有两班真车：剩一行给最早的取消行，按时间排");
+  }
+
+  /** 每行写成“取消”或到站分钟数。 */
+  private static List<String> shape(PidsView view) {
+    return view.rows().stream()
+        .map(row -> row.badge().hollow() ? "取消" : String.valueOf(row.arrival().minutes()))
+        .toList();
+  }
+
+  private PidsView capped(int capacity, PidsRow... rows) {
+    return builder.build(
+        new PidsViewBuilder.Request(
+            new PidsSnapshot(STATION, NOW, List.of(rows)),
+            NOW,
+            ZoneId.of("Asia/Shanghai"),
+            PidsTheme.DARK,
+            Set.of(),
+            List.of("1"),
+            capacity,
+            true));
+  }
+
+  /** 计划在 {@code seconds} 秒后发车、已取消的班次。 */
+  private static PidsRow cancelled(long seconds) {
+    return withStatus(
+        row(PidsRow.Status.EN_ROUTE, seconds, OptionalLong.empty()), PidsRow.Status.CANCELLED);
+  }
+
   @Test
   void bandSkipsOutOfServiceRowsAndViewsCompareByValue() {
     PidsRow outOfService =
@@ -353,6 +459,221 @@ class PidsViewBuilderTest {
             .vacancy(placed(new PidsViewBuilder.Placement(WORLD, 0, -1), first))
             .flatMap(PidsVacancyView::front),
         "屏幕与轨道垂直：说不清车头朝哪一侧");
+  }
+
+  /** 分行页：首行是可以上车、在前方分行的运行中列车时才有；标题写分行站，两段按去向写（不载客的写到哪站止），车厢页时段先放它。 */
+  @Test
+  void theFirstTrainThatDividesAheadHasADivisionPage() {
+    PidsRow first =
+        divided(
+            PidsRow.Status.ARRIVING,
+            new PidsRow.Division(
+                4,
+                "SURC:NFY",
+                List.of(
+                    new PidsRow.Division.Part(4, false, Optional.of("SURC:NTA")),
+                    new PidsRow.Division.Part(2, true, Optional.empty()))));
+
+    PidsDivisionView view =
+        builder
+            .division(request(first, row(PidsRow.Status.EN_ROUTE, 300, OptionalLong.empty())))
+            .orElseThrow();
+
+    assertEquals("WS", view.badge().code());
+    assertEquals(
+        new Names("本次列车在新笛矢·壑湖分行", "Divides at Neo Fueya - Hor Huu"), view.title(), "站名里的间隔号收紧");
+    assertEquals(
+        List.of(
+            new PidsDivisionView.Segment(
+                4, new Names("前 4 节开往南渡", "Front 4 cars to Nam Toa"), false),
+            new PidsDivisionView.Segment(
+                2,
+                new Names("后 2 节至新笛矢·壑湖止", "Rear 2 cars terminate at Neo Fueya - Hor Huu"),
+                true)),
+        view.segments());
+    assertEquals(6, view.cars());
+    assertEquals(ArrivalMode.HIGHLIGHT, view.arrival().mode(), "到站与主页首行相同：进站");
+    assertTrue(view.front().isEmpty(), "不知道屏幕朝向：车头画在左侧");
+    assertTrue(builder.hasDivision(request(first)), "车厢页时段先放分行页（不看有没有座位数据）");
+  }
+
+  @Test
+  void dividingHereSaysThisStation() {
+    PidsRow first =
+        divided(
+            PidsRow.Status.BOARDING,
+            new PidsRow.Division(
+                2,
+                "SURC:NFY",
+                List.of(
+                    new PidsRow.Division.Part(2, true, Optional.empty()),
+                    new PidsRow.Division.Part(4, false, Optional.of("SURC:NTA")))));
+
+    PidsDivisionView view = builder.division(request(first)).orElseThrow();
+
+    assertEquals(new Names("本次列车在本站分行", "Divides at this station"), view.title());
+    assertEquals(
+        new Names("前 2 节本站止", "Front 2 cars terminate here"), view.segments().get(0).destination());
+  }
+
+  /** 刚在本站拆开：解下接着载客的一段实心、写即将发车，留下不载客的一段灰色虚线，两段之间留空；解下的在车尾一侧时它倒着开走，车头画在它行进方向的另一侧。 */
+  @Test
+  void afterTheSplitTheDepartingPartIsDrawnApart() {
+    PidsRow first =
+        divided(
+            PidsRow.Status.BOARDING,
+            new PidsRow.Division(
+                2,
+                "SURC:NFY",
+                List.of(
+                    new PidsRow.Division.Part(4, false, Optional.empty()),
+                    new PidsRow.Division.Part(4, true, Optional.of("SURC:NTA"))),
+                true));
+
+    PidsViewBuilder.Request request = placed(new PidsViewBuilder.Placement(WORLD, 1, 0), first);
+    PidsDivisionView view = builder.division(request).orElseThrow();
+
+    assertEquals(new Names("本站已分行，后 4 节即将开往南渡", "Divided · rear 4 cars to Nam Toa"), view.title());
+    assertEquals(
+        List.of(
+            new PidsDivisionView.Segment(
+                4, new Names("不载客，请勿上车", "Not in service"), PidsDivisionView.Style.INACTIVE, false),
+            new PidsDivisionView.Segment(
+                4,
+                new Names("开往南渡，即将发车", "To Nam Toa · departing soon"),
+                PidsDivisionView.Style.SOLID,
+                true)),
+        view.segments());
+    assertEquals(
+        Optional.of(PidsVacancyView.Front.LEFT), view.front(), "这一班顺着交路往右开，解下的车尾一段是倒着开走的：原来的车头在左");
+    assertTrue(first.dividing().isEmpty(), "拆开以后不再按分行写备注与广播");
+    assertEquals(Optional.of(view), builder.carPage(request).map(found -> found));
+  }
+
+  /** 回程支线车在前方站联挂：本列车实心、无需换乘，要挂上的几节虚线；车厢页时段放联挂页。 */
+  @Test
+  void aTrainJoiningAheadHasAJoinPage() {
+    PidsRow first =
+        joined(PidsRow.Status.ARRIVING, new PidsRow.Joining(4, "SURC:NFY", 4, 2, false));
+
+    PidsDivisionView view = builder.join(request(first)).orElseThrow();
+
+    assertEquals(
+        new Names("本次列车在新笛矢·壑湖联挂", "This train joins another at Neo Fueya - Hor Huu"),
+        view.title());
+    assertEquals(
+        List.of(
+            new PidsDivisionView.Segment(
+                4,
+                new Names("本列车 4 节，无需换乘", "This train · stay on board"),
+                PidsDivisionView.Style.SOLID,
+                false),
+            new PidsDivisionView.Segment(
+                2,
+                new Names("在新笛矢·壑湖挂上 2 节", "2 more cars added there"),
+                PidsDivisionView.Style.DASHED,
+                false)),
+        view.segments());
+    assertTrue(builder.hasCarPage(request(first)));
+    assertEquals(Optional.of(view), builder.carPage(request(first)).map(found -> found));
+  }
+
+  /** 主干在本站联挂：已在站台的几节实心，正在进站的本列车虚线；标题写联挂以后几节开往哪里。节数读不到时不放联挂页。 */
+  @Test
+  void theTrunkJoiningHereShowsWhatIsAlreadyStanding() {
+    PidsRow arriving =
+        joined(PidsRow.Status.ARRIVING, new PidsRow.Joining(2, "SURC:NTA", 4, 1, true));
+
+    PidsDivisionView view = builder.join(request(arriving)).orElseThrow();
+
+    assertEquals(
+        new Names(
+            "本次列车在本站联挂，5 节开往新笛矢·壑湖", "Joins another train here · 5 cars to Neo Fueya - Hor Huu"),
+        view.title());
+    assertEquals(
+        List.of(
+            new PidsDivisionView.Segment(
+                4,
+                new Names("本列车 4 节，进站后挂上", "This train · 4 cars arriving"),
+                PidsDivisionView.Style.DASHED,
+                false),
+            new PidsDivisionView.Segment(
+                1,
+                new Names("已在站台的 1 节", "1 car already here"),
+                PidsDivisionView.Style.SOLID,
+                false)),
+        view.segments());
+    PidsDivisionView standing =
+        builder
+            .join(
+                request(
+                    joined(
+                        PidsRow.Status.BOARDING, new PidsRow.Joining(2, "SURC:NTA", 4, 4, false))))
+            .orElseThrow();
+    assertEquals(PidsDivisionView.Style.SOLID, standing.segments().get(0).style(), "本列车已在站台");
+    assertEquals(
+        new Names("即将挂上 4 节", "4 more cars joining"), standing.segments().get(1).destination());
+    assertTrue(
+        builder
+            .join(request(joined(PidsRow.Status.ARRIVING, new PidsRow.Joining(2, "SURC:NTA"))))
+            .isEmpty(),
+        "节数读不到：只在备注里写");
+  }
+
+  /** 首行还没开出（按表预告）：分行页、联挂页照样放，不等车开出来；空位页要读得到车上的座位，仍不放。 */
+  @Test
+  void aTrainNotYetDepartedStillHasItsCarPages() {
+    PidsRow planned =
+        restatus(
+            divided(
+                PidsRow.Status.EN_ROUTE,
+                new PidsRow.Division(
+                    4,
+                    "SURC:NFY",
+                    List.of(
+                        new PidsRow.Division.Part(4, false, Optional.of("SURC:NTA")),
+                        new PidsRow.Division.Part(2, true, Optional.empty())))),
+            PidsRow.Status.PLANNED);
+
+    assertTrue(builder.division(request(planned)).isPresent(), "还没出车的一班按表分行");
+    assertTrue(builder.vacancy(request(planned)).isEmpty());
+
+    PidsRow joining =
+        restatus(
+            joined(PidsRow.Status.EN_ROUTE, new PidsRow.Joining(4, "SURC:NFY", 4, 2, false)),
+            PidsRow.Status.PENDING);
+    assertTrue(builder.join(request(joining)).isPresent(), "还没出车的回程支线车按表联挂");
+  }
+
+  /** 首行不分行（或分行站已过、首行是本站终到的车）：没有分行页；只有后面的车分行也不放。 */
+  @Test
+  void divisionPageNeedsTheFirstBoardableTrainToDivide() {
+    PidsRow.Division behind =
+        new PidsRow.Division(
+            1,
+            "SURC:NFY",
+            List.of(
+                new PidsRow.Division.Part(4, false, Optional.of("SURC:NTA")),
+                new PidsRow.Division.Part(2, true, Optional.empty())));
+    PidsRow.Division ahead =
+        new PidsRow.Division(
+            4,
+            "SURC:NFY",
+            List.of(
+                new PidsRow.Division.Part(4, false, Optional.of("SURC:NTA")),
+                new PidsRow.Division.Part(2, true, Optional.empty())));
+
+    assertTrue(builder.division(request(divided(PidsRow.Status.EN_ROUTE, behind))).isEmpty());
+    assertTrue(
+        builder
+            .division(
+                request(
+                    row(PidsRow.Status.EN_ROUTE, 60, OptionalLong.empty()),
+                    divided(PidsRow.Status.EN_ROUTE, ahead)))
+            .isEmpty(),
+        "首行之外的车只在备注里写");
+    assertFalse(
+        builder.hasDivision(request(row(PidsRow.Status.EN_ROUTE, 60, OptionalLong.empty()))));
   }
 
   /** 首行本站终到、通过、还没开出或读不到载客：没有空位页，轮播照常放宣传页。 */
@@ -623,6 +944,55 @@ class PidsViewBuilderTest {
         cars);
   }
 
+  /** 运行中、本站停靠序号为 2、带分行的行。 */
+  private static PidsRow divided(PidsRow.Status status, PidsRow.Division division) {
+    return new PidsRow(
+        status,
+        "WS",
+        "SURC:WS:R1",
+        "NTA",
+        Optional.of("SURC:NTA"),
+        "1",
+        NOW.plusSeconds(120),
+        OptionalLong.empty(),
+        2,
+        false,
+        false,
+        false,
+        Optional.of("train"),
+        false,
+        List.of(),
+        List.of(),
+        Optional.empty(),
+        false,
+        Optional.of(division));
+  }
+
+  /** 运行中、本站停靠序号为 2、开往新笛矢·壑湖、带联挂的行。 */
+  private static PidsRow joined(PidsRow.Status status, PidsRow.Joining joining) {
+    return new PidsRow(
+        status,
+        "WS",
+        "SURC:WS:R1",
+        "NFY",
+        Optional.of("SURC:NFY"),
+        "1",
+        NOW.plusSeconds(120),
+        OptionalLong.empty(),
+        2,
+        false,
+        false,
+        false,
+        Optional.of("train"),
+        false,
+        List.of(),
+        List.of(),
+        Optional.empty(),
+        false,
+        Optional.empty(),
+        Optional.of(joining));
+  }
+
   private static PidsRow pending(PidsRow.Status status, List<String> candidates) {
     return new PidsRow(
         status,
@@ -657,6 +1027,31 @@ class PidsViewBuilderTest {
         false,
         false,
         Optional.of("rapid"));
+  }
+
+  /** 同一行改状态，其余（分行、联挂等）全部照搬。 */
+  private static PidsRow restatus(PidsRow row, PidsRow.Status status) {
+    return new PidsRow(
+        status,
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        row.platform(),
+        row.expectedAt(),
+        row.delaySeconds(),
+        row.stopSequence(),
+        row.passing(),
+        row.terminating(),
+        row.outOfService(),
+        row.trainName(),
+        row.platformPending(),
+        row.platformCandidates(),
+        row.cars(),
+        row.previousPlatform(),
+        row.lastTrain(),
+        row.division(),
+        row.joining());
   }
 
   private static PidsRow withStatus(PidsRow row, PidsRow.Status status) {
@@ -713,7 +1108,50 @@ class PidsViewBuilderTest {
               "pids.board.no-more-trains-call-secondary",
               "No further trains. Right-click to call a train."),
           Map.entry("pids.board.status.on-call", "叫车"),
-          Map.entry("pids.board.status.on-call-secondary", "On call"));
+          Map.entry("pids.board.status.on-call-secondary", "On call"),
+          Map.entry("pids.board.division.title", "本次列车在<station>分行"),
+          Map.entry("pids.board.division.title-secondary", "Divides at <station>"),
+          Map.entry("pids.board.division.title-here", "本次列车在本站分行"),
+          Map.entry("pids.board.division.title-here-secondary", "Divides at this station"),
+          Map.entry("pids.board.division.front", "前"),
+          Map.entry("pids.board.division.front-secondary", "Front"),
+          Map.entry("pids.board.division.rear", "后"),
+          Map.entry("pids.board.division.rear-secondary", "Rear"),
+          Map.entry("pids.board.division.to", "<end> <cars> 节开往<destination>"),
+          Map.entry("pids.board.division.to-secondary", "<end> <cars> cars to <destination>"),
+          Map.entry("pids.board.division.ends", "<end> <cars> 节至<station>止"),
+          Map.entry(
+              "pids.board.division.ends-secondary", "<end> <cars> cars terminate at <station>"),
+          Map.entry("pids.board.division.ends-here", "<end> <cars> 节本站止"),
+          Map.entry("pids.board.division.ends-here-secondary", "<end> <cars> cars terminate here"),
+          Map.entry("pids.board.division.title-divided", "本站已分行，<end> <cars> 节即将开往<destination>"),
+          Map.entry(
+              "pids.board.division.title-divided-secondary",
+              "Divided · <end> <cars> cars to <destination>"),
+          Map.entry("pids.board.division.divided-front", "前"),
+          Map.entry("pids.board.division.divided-front-secondary", "front"),
+          Map.entry("pids.board.division.divided-rear", "后"),
+          Map.entry("pids.board.division.divided-rear-secondary", "rear"),
+          Map.entry("pids.board.division.departing", "开往<destination>，即将发车"),
+          Map.entry("pids.board.division.departing-secondary", "To <destination> · departing soon"),
+          Map.entry("pids.board.division.not-in-service", "不载客，请勿上车"),
+          Map.entry("pids.board.division.not-in-service-secondary", "Not in service"),
+          Map.entry("pids.board.join.title", "本次列车在<station>联挂"),
+          Map.entry("pids.board.join.title-secondary", "This train joins another at <station>"),
+          Map.entry("pids.board.join.title-here", "本次列车在本站联挂，<cars> 节开往<destination>"),
+          Map.entry(
+              "pids.board.join.title-here-secondary",
+              "Joins another train here · <cars> cars to <destination>"),
+          Map.entry("pids.board.join.own-ahead", "本列车 <cars> 节，无需换乘"),
+          Map.entry("pids.board.join.own-ahead-secondary", "This train · stay on board"),
+          Map.entry("pids.board.join.added", "在<station>挂上 <cars> 节"),
+          Map.entry("pids.board.join.added-secondary", "<cars> more cars added there"),
+          Map.entry("pids.board.join.own-arriving", "本列车 <cars> 节，进站后挂上"),
+          Map.entry("pids.board.join.own-arriving-secondary", "This train · <cars> cars arriving"),
+          Map.entry("pids.board.join.standing", "已在站台的 <cars> 节"),
+          Map.entry("pids.board.join.standing-one-secondary", "<cars> car already here"),
+          Map.entry("pids.board.join.joining", "即将挂上 <cars> 节"),
+          Map.entry("pids.board.join.joining-secondary", "<cars> more cars joining"));
 
   /** 只认识 WS 线、NFY 与 NTA 两站。 */
   private static final class MapDirectory implements PidsDirectory {

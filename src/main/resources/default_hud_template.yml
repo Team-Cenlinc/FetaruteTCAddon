@@ -7,10 +7,24 @@ bossbar:
     AT_LAST_STATION_2: <gold>◆━━━━━</gold> <white>Final stop</white> <yellow>{current_station_lang2}</yellow> <gold>━━━━━◆</gold>
     TERM_ARRIVING_1: <gold>◇━━</gold> <white>终点</white> <yellow>{next_station}</yellow> <white>即将到达</white> <gold>━━◇</gold>
     TERM_ARRIVING_2: <gold>◇━━</gold> <white>Terminal</white> <yellow>{next_station_lang2}</yellow> <white>arriving</white> <gold>━━◇</gold>
+    JOIN_ARRIVING_1: <aqua>◇━━</aqua> <white>下一站</white> <yellow>{next_station}</yellow> <dark_gray>┃</dark_gray> <white>本列车在该站联挂后开往</white> <yellow>{dest_eop}</yellow> <aqua>━━◇</aqua>
+    JOIN_ARRIVING_2: <aqua>◇━━</aqua> <white>Next:</white> <yellow>{next_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>The train joins another there and continues to</white> <yellow>{dest_eop_lang2}</yellow> <aqua>━━◇</aqua>
+    AT_JOIN_STATION_1: <aqua>◆━━</aqua> <yellow>{current_station}</yellow> <white>到了</white> <dark_gray>┃</dark_gray> <white>本列车在本站联挂后开往</white> <yellow>{dest_eop}</yellow> <aqua>━━◆</aqua>
+    AT_JOIN_STATION_2: <aqua>◆━━</aqua> <yellow>{current_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>The train joins another here and continues to</white> <yellow>{dest_eop_lang2}</yellow> <aqua>━━◆</aqua>
+    DIVIDE_ARRIVING_1: <aqua>◇━━</aqua> <white>下一站</white> <yellow>{next_station}</yellow> <dark_gray>┃</dark_gray> <white>本站分行，本节车厢开往</white> <yellow>{car_destination}</yellow> <aqua>━━◇</aqua>
+    DIVIDE_ARRIVING_2: <aqua>◇━━</aqua> <white>Next:</white> <yellow>{next_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>The train divides there; this car continues to</white> <yellow>{car_destination_lang2}</yellow> <aqua>━━◇</aqua>
+    AT_DIVIDE_STATION_1: <aqua>◆━━</aqua> <yellow>{current_station}</yellow> <white>到了</white> <dark_gray>┃</dark_gray> <white>本站分行，本节车厢开往</white> <yellow>{car_destination}</yellow> <aqua>━━◆</aqua>
+    AT_DIVIDE_STATION_2: <aqua>◆━━</aqua> <yellow>{current_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>The train divides here; this car continues to</white> <yellow>{car_destination_lang2}</yellow> <aqua>━━◆</aqua>
+    CAR_ENDS_ARRIVING_1: <gold>◇━━</gold> <white>本节车厢终点</white> <yellow>{next_station}</yellow> <white>即将到达</white> <gold>━━◇</gold>
+    CAR_ENDS_ARRIVING_2: <gold>◇━━</gold> <white>This car terminates at</white> <yellow>{next_station_lang2}</yellow> <gold>━━◇</gold>
+    AT_CAR_END_1: <gold>◆━━</gold> <yellow>{current_station}</yellow> <white>到了</white> <dark_gray>┃</dark_gray> <white>本节车厢在本站止，请下车</white> <gold>━━◆</gold>
+    AT_CAR_END_2: <gold>◆━━</gold> <yellow>{current_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>This car terminates here. Please alight</white> <gold>━━◆</gold>
     IN_TRIP_1: <{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <dark_gray>┃</dark_gray> <{signal_color_tag}>⬤</{signal_color_tag}> <white>{speed}</white> <dark_gray>┃</dark_gray> <gray>车厢 ⟨</gray><white>{player_carriage_no}</white><gray>/</gray><white>{player_carriage_total}</white><gray>⟩</gray>
     IN_TRIP_2: <{line_color_tag}>█</{line_color_tag}> <white>{line_lang2}</white> <dark_gray>┃</dark_gray> <{signal_color_tag}>⬤</{signal_color_tag}> <white>{speed}</white> <dark_gray>┃</dark_gray> <gray>Car. ⟨</gray><white>{player_carriage_no}</white><gray>/</gray><white>{player_carriage_total}</white><gray>⟩</gray>
     ON_LAYOVER_1: <aqua>◈━━</aqua> <gray>等待新行程</gray> <aqua>━━◈</aqua>
     ON_LAYOVER_2: <aqua>◈━━</aqua> <gray>Preparing for new trip</gray> <aqua>━━◈</aqua>
+    ON_LAYOVER_3: <aqua>◈━━</aqua> <white>本列车下一趟</white> <yellow>{?next_trip_departure}</yellow> <white>开往</white> <yellow>{?next_trip_destination}</yellow> <aqua>━━◈</aqua>
+    ON_LAYOVER_4: <aqua>◈━━</aqua> <white>Next trip</white> <yellow>{?next_trip_departure}</yellow> <white>to</white> <yellow>{?next_trip_destination_lang2}</yellow> <aqua>━━◈</aqua>
     IDLE_1: <{signal_color_tag}>⬤</{signal_color_tag}> <white>临时停车</white> <dark_gray>━</dark_gray> <gray>等待信号中...</gray>
     IDLE_2: <{signal_color_tag}>⬤</{signal_color_tag}> <white>Holding</white> <dark_gray>━</dark_gray> <gray>Waiting for signal...</gray>
     OUT_OF_SERVICE_1: <{line_color_tag}>█<white> {line}</white> █</{line_color_tag}> <dark_gray>┃</dark_gray> <white>{train_name}</white> <dark_gray>┃</dark_gray> <white>回库</white>
@@ -20,8 +34,26 @@ actionbar:
     rotate_ticks: 60
     AT_STATION_1: <dark_gray>◉</dark_gray> <white>本站</white> <yellow>{current_station}</yellow> <dark_gray>┃</dark_gray> <white>下一站</white> <yellow>{next_station}</yellow>
     AT_STATION_2: <dark_gray>◉</dark_gray> <white>Now at</white> <yellow>{current_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>Next</white> <yellow>{next_station_lang2}</yellow>
+    AT_STATION_3: <aqua>⇉</aqua> <white>本列车在</white> <yellow>{?division_station}</yellow> <white>分行</white> <dark_gray>┃</dark_gray> <white>本节车厢开往</white> <yellow>{?car_destination}</yellow>
+    AT_STATION_4: <aqua>⇉</aqua> <white>The train divides at</white> <yellow>{?division_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>This car continues to</white> <yellow>{?car_destination_lang2}</yellow>
+    AT_STATION_5: <gold>⇉</gold> <white>本列车在</white> <yellow>{?car_terminates}</yellow> <white>分行</white> <dark_gray>┃</dark_gray> <white>本节车厢在该站停止载客</white>
+    AT_STATION_6: <gold>⇉</gold> <white>The train divides at</white> <yellow>{?car_terminates_lang2}</yellow> <dark_gray>┃</dark_gray> <white>This car terminates there</white>
+    AT_STATION_7: <aqua>⇇</aqua> <white>本列车在</white> <yellow>{?join_station}</yellow> <white>联挂</white> <dark_gray>┃</dark_gray> <white>继续开往</white> <yellow>{dest_eop}</yellow>
+    AT_STATION_8: <aqua>⇇</aqua> <white>The train joins another at</white> <yellow>{?join_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>then continues to</white> <yellow>{dest_eop_lang2}</yellow>
     AT_LAST_STATION_1: <gold>◆━━</gold> <yellow>终点站 {current_station} 到了</yellow> <gold>━━◆</gold> <gray>请全体乘客下车</gray>
     AT_LAST_STATION_2: <gold>◆━━</gold> <yellow>Final stop {current_station_lang2}</yellow> <gold>━━◆</gold>
+    AT_JOIN_STATION_1: <aqua>◆━━</aqua> <yellow>{current_station} 到了</yellow> <aqua>━━◆</aqua> <white>本列车在本站联挂后开往</white> <yellow>{dest_eop}</yellow>
+    AT_JOIN_STATION_2: <aqua>◆━━</aqua> <yellow>{current_station_lang2}</yellow> <aqua>━━◆</aqua> <white>The train joins another here and continues to</white> <yellow>{dest_eop_lang2}</yellow>
+    AT_JOIN_STATION_3: <aqua>◆</aqua> <white>继续乘车的乘客请留在车内</white> <dark_gray>┃</dark_gray> <gray>联挂完成后发车</gray>
+    AT_JOIN_STATION_4: <aqua>◆</aqua> <white>Please stay on board</white> <dark_gray>┃</dark_gray> <gray>Departing after the trains are joined</gray>
+    AT_DIVIDE_STATION_1: <aqua>◆━━</aqua> <yellow>{current_station} 到了</yellow> <aqua>━━◆</aqua> <white>本站分行，本节车厢开往</white> <yellow>{car_destination}</yellow>
+    AT_DIVIDE_STATION_2: <aqua>◆━━</aqua> <yellow>{current_station_lang2}</yellow> <aqua>━━◆</aqua> <white>The train divides here; this car continues to</white> <yellow>{car_destination_lang2}</yellow>
+    AT_DIVIDE_STATION_3: <aqua>◆</aqua> <white>前往该方向的乘客请留在车内</white> <dark_gray>┃</dark_gray> <gray>分行完成后发车</gray>
+    AT_DIVIDE_STATION_4: <aqua>◆</aqua> <white>For</white> <yellow>{car_destination_lang2}</yellow><white>, please stay on board</white> <dark_gray>┃</dark_gray> <gray>Departing after the train divides</gray>
+    AT_CAR_END_1: <gold>◆</gold> <white>前往</white> <yellow>{?car_change_destination}</yellow> <white>的乘客请下车，经站台换乘{car_change_end} {car_change_cars} 节</white>
+    AT_CAR_END_2: <gold>◆</gold> <white>For</white> <yellow>{?car_change_destination_lang2}</yellow><white>, change to the {car_change_end_lang2} {car_change_cars_lang2} here</white>
+    AT_CAR_END_3: <gold>◆━━</gold> <yellow>{current_station} 到了</yellow> <gold>━━◆</gold> <gray>本节车厢在本站止，请下车</gray>
+    AT_CAR_END_4: <gold>◆━━</gold> <yellow>{current_station_lang2}</yellow> <gold>━━◆</gold> <gray>This car terminates here. Please alight</gray>
     DEPARTING_1: <aqua>▶</aqua> <white>欢迎乘坐</white> <aqua>{operator}</aqua> <dark_gray>┃</dark_gray> <white>{line}</white> <white>列车</white>
     DEPARTING_2: <aqua>▶</aqua> <white>本次列车开往</white> <yellow>{dest_eop}</yellow>
     DEPARTING_3: <aqua>▶</aqua> <white>Welcome aboard</white> <aqua>{operator}</aqua> <dark_gray>┃</dark_gray> <yellow>{line}</yellow> <white>to</white> <yellow>{dest_eop_lang2}</yellow>
@@ -35,6 +67,12 @@ actionbar:
     IN_TRIP_8: <aqua>⇄</aqua> <white>From</white> <yellow>{?through_station_lang2}</yellow> <white>this train runs as</white> <{through_line_color_tag}>█</{through_line_color_tag}><white>{through_line_lang2}</white>
     IN_TRIP_9: <aqua>▶</aqua> <white>按</white> <yellow>{?trip_dialog_key}</yellow> <white>查看后续站点</white>
     IN_TRIP_10: <aqua>▶</aqua> <white>Press</white> <yellow>{?trip_dialog_key}</yellow> <white>for upcoming stops</white>
+    IN_TRIP_11: <aqua>⇉</aqua> <white>本列车在</white> <yellow>{?division_station}</yellow> <white>分行</white> <dark_gray>┃</dark_gray> <white>本节车厢开往</white> <yellow>{?car_destination}</yellow>
+    IN_TRIP_12: <aqua>⇉</aqua> <white>The train divides at</white> <yellow>{?division_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>This car continues to</white> <yellow>{?car_destination_lang2}</yellow>
+    IN_TRIP_13: <gold>⇉</gold> <white>本列车在</white> <yellow>{?car_terminates}</yellow> <white>分行</white> <dark_gray>┃</dark_gray> <white>本节车厢在该站停止载客</white>
+    IN_TRIP_14: <gold>⇉</gold> <white>The train divides at</white> <yellow>{?car_terminates_lang2}</yellow> <dark_gray>┃</dark_gray> <white>This car terminates there</white>
+    IN_TRIP_15: <aqua>⇇</aqua> <white>本列车在</white> <yellow>{?join_station}</yellow> <white>联挂</white> <dark_gray>┃</dark_gray> <white>继续开往</white> <yellow>{dest_eop}</yellow>
+    IN_TRIP_16: <aqua>⇇</aqua> <white>The train joins another at</white> <yellow>{?join_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>then continues to</white> <yellow>{dest_eop_lang2}</yellow>
     ARRIVING_1: <green>▼</green> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <gray>下车请注意安全</gray>
     ARRIVING_2: <green>▼</green> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <gray>Mind the gap</gray>
     ARRIVING_3: <green>▼</green> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <white>可换乘</white> {?transfer_lines}
@@ -43,8 +81,24 @@ actionbar:
     TERM_ARRIVING_2: <gold>◆</gold> <yellow>Final stop</yellow> <gold>◆</gold> <gray>Thank you for travelling with {operator}</gray>
     TERM_ARRIVING_3: <gold>◆</gold> <yellow>终点站 {next_station} 到了</yellow> <dark_gray>━</dark_gray> <white>可换乘</white> {?transfer_lines}
     TERM_ARRIVING_4: <gold>◆</gold> <yellow>Final stop</yellow> <dark_gray>━</dark_gray> <white>Change for</white> {?transfer_lines}
+    JOIN_ARRIVING_1: <aqua>▼</aqua> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <white>本列车在本站联挂后开往</white> <yellow>{dest_eop}</yellow>
+    JOIN_ARRIVING_2: <aqua>▼</aqua> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <white>The train joins another here and continues to</white> <yellow>{dest_eop_lang2}</yellow>
+    JOIN_ARRIVING_3: <aqua>▼</aqua> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <white>可换乘</white> {?transfer_lines}
+    JOIN_ARRIVING_4: <aqua>▼</aqua> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <white>Change for</white> {?transfer_lines}
+    DIVIDE_ARRIVING_1: <aqua>▼</aqua> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <white>本站分行，本节车厢开往</white> <yellow>{car_destination}</yellow>
+    DIVIDE_ARRIVING_2: <aqua>▼</aqua> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <white>The train divides here; this car continues to</white> <yellow>{car_destination_lang2}</yellow>
+    DIVIDE_ARRIVING_3: <aqua>▼</aqua> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <white>可换乘</white> {?transfer_lines}
+    DIVIDE_ARRIVING_4: <aqua>▼</aqua> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <white>Change for</white> {?transfer_lines}
+    CAR_ENDS_ARRIVING_1: <gold>▼</gold> <white>本节车厢（第 {player_carriage_no} 节）在</white> <yellow>{next_station}</yellow> <white>止</white> <dark_gray>┃</dark_gray> <white>前往</white> <yellow>{?car_change_destination}</yellow> <white>请在该站换乘{car_change_end} {car_change_cars} 节</white>
+    CAR_ENDS_ARRIVING_2: <gold>▼</gold> <white>For</white> <yellow>{?car_change_destination_lang2}</yellow><white>, change to the {car_change_end_lang2} {car_change_cars_lang2} at</white> <yellow>{next_station_lang2}</yellow>
+    CAR_ENDS_ARRIVING_3: <gold>▼</gold> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <gray>本节车厢在该站止，请准备下车</gray>
+    CAR_ENDS_ARRIVING_4: <gold>▼</gold> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <gray>This car terminates here</gray>
     ON_LAYOVER_1: <aqua>◈</aqua> <gray>等待新行程</gray> <aqua>◈</aqua>
     ON_LAYOVER_2: <aqua>◈</aqua> <gray>Preparing for new trip</gray> <aqua>◈</aqua>
+    ON_LAYOVER_3: <aqua>◈</aqua> <white>本列车下一趟开往</white> <yellow>{?next_trip_destination}</yellow> <aqua>◈</aqua>
+    ON_LAYOVER_4: <aqua>◈</aqua> <white>Next trip to</white> <yellow>{?next_trip_destination_lang2}</yellow> <aqua>◈</aqua>
+    ON_LAYOVER_5: <aqua>◈</aqua> <white>还有</white> <yellow>{?next_trip_minutes}</yellow> <white>分钟发车</white> <dark_gray>┃</dark_gray> <gray>可留在车上等候</gray>
+    ON_LAYOVER_6: <aqua>◈</aqua> <white>Departs in</white> <yellow>{?next_trip_minutes}</yellow> <white>min</white> <dark_gray>┃</dark_gray> <gray>You may stay on board</gray>
     IDLE_1: <{signal_color_tag}>⬤</{signal_color_tag}> <white>临时停车</white> <dark_gray>━</dark_gray> <gray>等待信号中...</gray>
     IDLE_2: <{signal_color_tag}>⬤</{signal_color_tag}> <white>Holding</white> <dark_gray>━</dark_gray> <gray>Waiting for signal...</gray>
     OUT_OF_SERVICE_1: <gray>◈━━</gray> <white>本列车回库，不再载客</white> <gray>━━◈</gray>

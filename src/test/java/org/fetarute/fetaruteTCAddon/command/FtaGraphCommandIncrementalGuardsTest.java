@@ -48,6 +48,7 @@ import org.junit.jupiter.api.Test;
 
 /** refresh/extend 收尾前的核验，以及构建激活失败时的续跑状态处理。 */
 final class FtaGraphCommandIncrementalGuardsTest {
+  @org.junit.jupiter.api.io.TempDir java.nio.file.Path pluginFolder;
 
   @Test
   void extendRefusesWhenTheOccupancyManagerIsNotReady() throws Exception {
@@ -106,7 +107,7 @@ final class FtaGraphCommandIncrementalGuardsTest {
     World world = mock(World.class);
     when(world.getUID()).thenReturn(worldId);
     when(world.getName()).thenReturn("world");
-    RailGraphService service = new RailGraphService(ignored -> SimpleRailGraph.empty());
+    RailGraphService service = new RailGraphService();
     // 存储未就绪：写库失败，走激活失败分支。
     StorageManager notReady = storage(mock(RailNodeRepository.class), false);
     FetaruteTCAddon plugin = plugin();
@@ -160,7 +161,7 @@ final class FtaGraphCommandIncrementalGuardsTest {
     World world = mock(World.class);
     when(world.getUID()).thenReturn(worldId);
     when(world.getName()).thenReturn("world");
-    RailGraphService service = new RailGraphService(ignored -> SimpleRailGraph.empty());
+    RailGraphService service = new RailGraphService();
     service.markStale(
         world, new RailGraphService.RailGraphStaleState(Instant.EPOCH, "old", "new", 0, 0, 0));
     GraphStaleNotifier notifier = mock(GraphStaleNotifier.class);
@@ -183,8 +184,9 @@ final class FtaGraphCommandIncrementalGuardsTest {
     verify(notifier).onRecovered(world);
   }
 
-  private static FetaruteTCAddon plugin() {
+  private FetaruteTCAddon plugin() {
     FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
     when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
     return plugin;
   }

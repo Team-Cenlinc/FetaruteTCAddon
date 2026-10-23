@@ -120,17 +120,83 @@ public final class ConsistDispatchArbiter implements ConsistArbiter {
 
   /**
    * 票上指定了车型：只能出这个车型。档案不可用、方案里已经没有它、或到了出车上限，都不改出别的车型—— 时刻表按这个车型排的时分，换车型就对不上表了。票留着重试，到期由时刻表按出不了车处理。
+   *
+   * <p>票上的车型按 {@link ConsistKey#of} 归一后到方案里找（方案的车型键是小写，编表从交路编组推出的车型保留原来的大小写）。交路没绑方案、哪份方案里也没有这个车型时
+   * （例如写了加解编的交路，不能绑方案，车型由编表从交路的组合写法推出），照票上的写法出车。
    */
-  private SpawnChoice designated(UUID routeId, String key) {
-    Optional<ResolvedConsistPlan.Member> member = plans.member(routeId, key);
+  private SpawnChoice designated(UUID routeId, String designated) {
+    Optional<String> key = ConsistKey.of(designated);
+    Optional<ResolvedConsistPlan.Member> member =
+        key.flatMap(found -> plans.member(routeId, found));
     if (member.isEmpty()) {
-      return SpawnChoice.blocked("consist=" + key + ":not-in-any-plan");
+      Optional<String> pattern = ConsistKey.tidy(designated);
+      if (pattern.isPresent() && plans.planForRoute(routeId).isEmpty()) {
+        return inspector.exceedsSpawnLimit(pattern.get())
+            ? SpawnChoice.blocked("consist=" + designated + ":spawn-limit")
+            : SpawnChoice.chosen(pattern.get(), Map.of());
+      }
+      return SpawnChoice.blocked("consist=" + designated + ":not-in-any-plan");
     }
     ConsistProfile profile = member.get().profile().orElseThrow();
     if (inspector.exceedsSpawnLimit(profile.pattern())) {
-      return SpawnChoice.blocked("consist=" + key + ":spawn-limit");
+      return SpawnChoice.blocked("consist=" + designated + ":spawn-limit");
     }
     return SpawnChoice.chosen(profile.pattern(), member.get().spawnTags());
+  }
+
+  /**
+   * 折返车的车型：在送车交路上出车、开进终点待命，再由接续交路的票接走（叫车的折返车）。接车只认接续交路方案里的车型，所以出车就照接续交路的方案挑——
+   * 与新车出库同一套排名，跳过档案不可用的，优先没到出车上限的；送车交路自己也绑了方案时只挑它也认的车型，否则按票出车时会被它的方案拒掉。
+   *
+   * @param inboundRouteId 折返车出车跑的送车交路
+   * @param onwardRouteId 开进终点后接它的交路
+   * @return 接续交路没绑方案时不限车型；挑得出时为要出的车型；一个都挑不出时为接不上
+   */
+  public TurnbackConsist turnbackConsist(UUID inboundRouteId, UUID onwardRouteId) {
+    Optional<ResolvedConsistPlan> onward = plans.planForRoute(onwardRouteId);
+    if (onward.isEmpty()) {
+      return TurnbackConsist.ANY;
+    }
+    Optional<ResolvedConsistPlan> inbound = plans.planForRoute(inboundRouteId);
+    String atLimit = null;
+    for (ResolvedConsistPlan.Member member : plans.rank(onwardRouteId, onward.get())) {
+      Optional<ConsistProfile> profile = member.profile();
+      if (profile.isEmpty() || (inbound.isPresent() && !inbound.get().allows(member.key()))) {
+        continue;
+      }
+      String pattern = profile.get().pattern();
+      if (!inspector.exceedsSpawnLimit(pattern)) {
+        return TurnbackConsist.of(pattern);
+      }
+      if (atLimit == null) {
+        // 都到了出车上限时仍出排第一的：票留着等上限松开，和普通出车一样
+        atLimit = pattern;
+      }
+    }
+    return atLimit == null ? TurnbackConsist.NONE : TurnbackConsist.of(atLimit);
+  }
+
+  /**
+   * {@link #turnbackConsist} 的结果。
+   *
+   * @param possible 这条送车交路的折返车接不接得上
+   * @param consist 要出的车型（编组写法）；不限车型时为空
+   */
+  public record TurnbackConsist(boolean possible, Optional<String> consist) {
+
+    /** 接续交路没绑方案：照送车交路的编组出车。 */
+    public static final TurnbackConsist ANY = new TurnbackConsist(true, Optional.empty());
+
+    /** 两边的方案没有共同的车型：这条送车交路的折返车接不上。 */
+    public static final TurnbackConsist NONE = new TurnbackConsist(false, Optional.empty());
+
+    public TurnbackConsist {
+      consist = consist == null ? Optional.empty() : consist;
+    }
+
+    static TurnbackConsist of(String pattern) {
+      return new TurnbackConsist(true, Optional.of(pattern));
+    }
   }
 
   @Override

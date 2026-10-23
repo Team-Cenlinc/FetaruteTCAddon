@@ -15,7 +15,6 @@ import java.util.logging.Logger;
 import org.bukkit.World;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
@@ -30,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.TransactionCallback;
 import org.junit.jupiter.api.Test;
 
 final class FtaGraphCommandDeleteGraphFromStorageTest {
+  @org.junit.jupiter.api.io.TempDir java.nio.file.Path pluginFolder;
 
   @Test
   void deleteDoesNotRemoveRailNodesAndOverridesByDefault() throws Exception {
@@ -62,9 +62,9 @@ final class FtaGraphCommandDeleteGraphFromStorageTest {
     when(storageManager.provider()).thenReturn(Optional.of(provider));
 
     FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
     when(plugin.getStorageManager()).thenReturn(storageManager);
-    when(plugin.getRailGraphService())
-        .thenReturn(new RailGraphService(w -> SimpleRailGraph.empty()));
+    when(plugin.getRailGraphService()).thenReturn(new RailGraphService());
     when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
 
     FtaGraphCommand command = new FtaGraphCommand(plugin);
@@ -109,9 +109,9 @@ final class FtaGraphCommandDeleteGraphFromStorageTest {
     when(storageManager.provider()).thenReturn(Optional.of(provider));
 
     FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
     when(plugin.getStorageManager()).thenReturn(storageManager);
-    when(plugin.getRailGraphService())
-        .thenReturn(new RailGraphService(w -> SimpleRailGraph.empty()));
+    when(plugin.getRailGraphService()).thenReturn(new RailGraphService());
     when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
 
     FtaGraphCommand command = new FtaGraphCommand(plugin);

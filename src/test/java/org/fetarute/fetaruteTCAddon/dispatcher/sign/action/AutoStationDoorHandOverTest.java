@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DoorCars;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -24,5 +25,21 @@ class AutoStationDoorHandOverTest {
     assertFalse(AutoStationSignAction.shouldHandOverDoors(false, false, true, true, true, true));
     assertFalse(AutoStationSignAction.shouldHandOverDoors(false, false, true, false, false, true));
     assertFalse(AutoStationSignAction.shouldHandOverDoors(false, false, true, false, true, false));
+  }
+
+  @Test
+  @DisplayName("交给驾驶员或车掌的门记成开着，门会话也记成开过门：之后关门照常播关门动画，不会门开着却记成已关")
+  void adoptedDoorsCloseLikeOpenedOnes() {
+    AutoStationDoorController.ManualDoor door =
+        AutoStationDoorController.manualDoor(
+            null, new AutoStationDoorController.ManualDoorSide(true, "test"), null, DoorCars.ALL);
+    assertFalse(door.session().openSucceeded());
+
+    door.markOpenedByStation();
+
+    assertTrue(door.isOpen());
+    assertTrue(door.session().openSucceeded(), "关门只对开过门的会话播动画");
+    door.close();
+    assertFalse(door.isOpen());
   }
 }

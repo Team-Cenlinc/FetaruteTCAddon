@@ -44,6 +44,7 @@ public final class TrainSpawnTagInitializer {
           "FTA_OP_TRIPS",
           "FTA_OP_MAX",
           "FTA_SPAWN_GROUP",
+          TrainCartsTimetableDutyStore.TAG_DUTY,
           "FTA_TICKET_ID");
 
   private static final List<String> TRANSIENT_CONTROL_TAG_KEYS =
@@ -66,6 +67,11 @@ public final class TrainSpawnTagInitializer {
           "FTA_DRIVE_SPEEDLIMIT_ORIG");
 
   private TrainSpawnTagInitializer() {}
+
+  /** 发车控制类瞬时标签：每次出车清掉，换了身份的列车（如拆下的半列车）也要清掉。 */
+  public static List<String> transientControlTagKeys() {
+    return TRANSIENT_CONTROL_TAG_KEYS;
+  }
 
   /**
    * 标记一个已经实体化、但票据尚未完成提交的发车事务。

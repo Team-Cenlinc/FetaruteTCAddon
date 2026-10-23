@@ -530,6 +530,18 @@ public final class DriverTaskManager {
   }
 
   /**
+   * 驾驶中的任务在中途结算、算完成：列车在这一站分行，或联挂进站由调度控车（之后接着驾驶时从这一站另记一趟）。
+   *
+   * @param reason 记录里的结束原因
+   */
+  public void completeHere(UUID playerId, String reason) {
+    DriverTask task = byPlayer.get(playerId);
+    if (task != null && task.state() == DriverTask.State.DRIVING) {
+      finish(task, DriverTask.State.COMPLETED, reason);
+    }
+  }
+
+  /**
    * 列车是否正停在这趟车次的终点站：时刻表绑定显示已过本站、没有下一个停靠站。
    *
    * @return 查不到绑定时为 {@code false}

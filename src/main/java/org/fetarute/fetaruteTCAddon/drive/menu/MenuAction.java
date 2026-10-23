@@ -29,7 +29,21 @@ public enum MenuAction {
   /** 任务卡：只显示信息，不可点击。 */
   TASK_CARD,
   /** 门旁路（simulation 级）：车门故障使门关好回路不通时旁路，解除牵引封锁。 */
-  DOOR_BYPASS;
+  DOOR_BYPASS,
+  /** 多模车的第 1、2、3 种受电方式：当前用的亮着，点另一种换过去。单模车没有。 */
+  POWER_MODE_1,
+  POWER_MODE_2,
+  POWER_MODE_3;
+
+  /** 多模车受电方式按钮对应车上的第几种（0 起）；不是这类按钮时为 -1。 */
+  public int powerModeIndex() {
+    return switch (this) {
+      case POWER_MODE_1 -> 0;
+      case POWER_MODE_2 -> 1;
+      case POWER_MODE_3 -> 2;
+      default -> -1;
+    };
+  }
 
   /** 对应的启动流程系统；不是系统开关时为空。 */
   public Optional<SetupSystem> system() {

@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
+import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
@@ -83,7 +84,13 @@ public final class DriveSession implements DriveDoors.Cab {
     /** 驾驶调度列车：折返换端没能在时限内坐进前端驾驶室，交还自动运行发车。 */
     CAB_CHANGE_TIMEOUT,
     /** 驾驶调度列车：列车按交路开到收车地点（通常是车库）正常收车，驾驶正常结束。 */
-    SERVICE_END
+    SERVICE_END,
+    /** 驾驶调度列车：列车分行后未在时限内选择继续哪一段，交还自动运行。 */
+    SPLIT_TIMEOUT,
+    /** 驾驶调度列车：列车分行后改驾解下的一段，留下的一段交还自动运行。 */
+    SPLIT_SWITCH,
+    /** 驾驶调度列车：联挂进站与挂车由调度控车，本趟在进站前结算；挂上后可交还驾驶。 */
+    COUPLING
   }
 
   private static final double TICKS_PER_SECOND = 20.0;
@@ -163,8 +170,14 @@ public final class DriveSession implements DriveDoors.Cab {
   private CabSeatKey pendingCabSeat;
   private CabSeatKey confirmedCabSeat;
 
-  /** 超级电容车的储能；别的受电方式为空。 */
-  private final SuperCapacitor supercap;
+  /** 超级电容车的储能（多模车换到超级电容时补上）；从没用过超级电容的为空。 */
+  private SuperCapacitor supercap;
+
+  /** 多模车：交路备注 POWER 要求的这一段受电方式；交路到这里还没写 POWER 时为空。 */
+  private PowerSupply sectionPower;
+
+  /** 车上有的受电方式（第一个是默认模式）；单模车只有一种。 */
+  private List<PowerSupply> powerSupplies = List.of();
 
   /** 上一次报过的电量状态（跨越时提示一次）。 */
   private SuperCapacitor.Level reportedSupercapLevel = SuperCapacitor.Level.NORMAL;
@@ -228,9 +241,48 @@ public final class DriveSession implements DriveDoors.Cab {
         setup.supply().storesEnergy() ? new SuperCapacitor(config.supercap(), 1.0) : null;
   }
 
-  /** 超级电容车的储能；别的受电方式为空。 */
+  /** 超级电容车的储能；当前不用超级电容时为空。 */
   public Optional<SuperCapacitor> supercap() {
-    return Optional.ofNullable(supercap);
+    return Optional.ofNullable(activeSupercap());
+  }
+
+  private SuperCapacitor activeSupercap() {
+    return setup.supply().storesEnergy() ? supercap : null;
+  }
+
+  /** 受电方式换了（多模车）：换成超级电容时补上储能，按满电算（此前一直在网下行驶）。 */
+  public void powerSupplyChanged() {
+    if (setup.supply().storesEnergy() && supercap == null) {
+      supercap = new SuperCapacitor(config.supercap(), 1.0);
+    }
+  }
+
+  /** 记下这一段要求的受电方式（交路备注 POWER）；{@code null} 清掉。 */
+  public void setSectionPower(PowerSupply mode) {
+    this.sectionPower = mode;
+  }
+
+  /** 车上有的受电方式；多于一种时驾驶台菜单第三排显示各模式按钮、侧边栏显示受电一行。 */
+  public List<PowerSupply> powerSupplies() {
+    return powerSupplies;
+  }
+
+  public void setPowerSupplies(List<PowerSupply> supplies) {
+    this.powerSupplies = supplies == null ? List.of() : List.copyOf(supplies);
+  }
+
+  /** 这一段要求、而列车还没换过去的受电方式；没有要换的时为空。 */
+  public Optional<PowerSupply> pendingPower() {
+    return sectionPower == null || sectionPower == setup.supply()
+        ? Optional.empty()
+        : Optional.of(sectionPower);
+  }
+
+  /** simulation 级：这一段要求别的受电方式（涉及内燃的由驾驶员在驾驶台换），而当前方式要靠接触网或第三轨，开进来就没电。 */
+  public boolean noLinePower() {
+    return setupMode() == SimulationLevel.SetupMode.MANUAL
+        && pendingPower().isPresent()
+        && !setup.supply().selfPowered();
   }
 
   /** 取出并清除待报的电量事件；没有时为空。 */
@@ -381,9 +433,10 @@ public final class DriveSession implements DriveDoors.Cab {
   public boolean tractionBlocked() {
     return !setup.ready()
         || cab.tractionBlock().isPresent()
-        || (supercap != null && supercap.depleted())
+        || noLinePower()
+        || (activeSupercap() != null && activeSupercap().depleted())
         || reverser == ReverserPosition.NEUTRAL
-        || anyDoorOpen()
+        || trainDoorsOpen()
         || doorsClosing(lastAdvanceTick);
   }
 
@@ -454,18 +507,20 @@ public final class DriveSession implements DriveDoors.Cab {
   }
 
   /**
-   * 超级电容：停稳且开着车门时充电（升降弓由站台上的 TC 牌子负责），否则按本步的牵引与常用制动耗电、再生。电量跨越预警线、耗尽、充满时记一个事件。
+   * 超级电容：停站时充电（升降弓由站台上的 TC 牌子负责；车门由车掌或站台开关时也算，见 {@link #chargesSupercap()}），否则按本步的牵引与常用制动耗电、再生。
+   * 电量跨越预警线、耗尽、充满时记一个事件。
    *
    * @param failSafe 本步是失效导向安全的制动（紧急、停放、无人）：不再生
    * @param mainCircuit 主电路是否接通：断开时没有电制动，不再生
    */
   private void tickSupercap(
       boolean failSafe, boolean mainCircuit, double tractionScale, double speedBefore) {
+    SuperCapacitor supercap = activeSupercap();
     if (supercap == null) {
       return;
     }
     boolean wasFull = supercap.full();
-    if (isStopped() && anyDoorOpen()) {
+    if (chargesSupercap()) {
       supercap.charge(STEP_SECONDS);
       if (!wasFull && supercap.full()) {
         pendingSupercapEvent = SupercapEvent.CHARGED;
@@ -489,6 +544,17 @@ public final class DriveSession implements DriveDoors.Cab {
       }
       reportedSupercapLevel = level;
     }
+  }
+
+  /** 停站充电：停稳且开着车门（{@link #trainDoorsOpen}），或停在站台接手开关门的这一站（驾驶员这边看不到站台开的门，按停在这一站算）。 */
+  boolean chargesSupercap() {
+    return isStopped()
+        && (trainDoorsOpen() || (driverLink != null && driverLink.stationDoorsTakenOver()));
+  }
+
+  /** 车门开着：驾驶员自己开的，或这一站车门归车掌、车掌开着（含关门动画；驾驶员这边的车门状态这时一直是关着的）。 */
+  public boolean trainDoorsOpen() {
+    return anyDoorOpen() || (driverLink != null && driverLink.guardDoorsOpen());
   }
 
   /** 会话结束：不再充电。 */

@@ -2,6 +2,8 @@
 
 本文档说明 DYNAMIC route stop 的格式、解析规则与运行时行为。
 
+> 支持离散允许集合 `[1,3,5]` 与混合区间 `[1,2,3-5]`。完整契约见 [RouteStop 标记设计第 4 节](../design/route-stop-markers.md#4-dynamic-候选集合扩展)。
+
 ## 概述
 
 DYNAMIC route stop 允许在运行时根据轨道占用情况动态选择站台/车库，而不是在定义 route 时固定写死。这对于多站台车站或多轨道车库非常有用。
@@ -11,13 +13,17 @@ DYNAMIC route stop 允许在运行时根据轨道占用情况动态选择站台/
 ### 标准格式
 
 ```
-DYNAMIC:OP:TYPE:NAME:[FROM:TO]
+DYNAMIC:OP:TYPE:NAME:[1,3,5-7]
 ```
 
 - `OP`：运营商代码（如 `SURN`）
 - `TYPE`：节点类型，`S` 表示 Station，`D` 表示 Depot
 - `NAME`：站点/车库名称（如 `PPK`、`DEPOT`）
-- `[FROM:TO]`：轨道范围（如 `[1:3]` 表示轨道 1、2、3）
+- 末段：股道允许集合。`[1,3,5]` 只允许 1、3、5；`[1,2,3-5]` 允许 1..5；旧 `[1:3]` 保持兼容。省略末段、或末段只有冒号（`OP:S:NAME:`，旧写法）允许该站现有全部数字股道。
+
+列表与连字符区间必须带方括号。括号、逗号、冒号、连字符两侧的空白按旧版本容忍（`[1 : 3]`、`[1, 3]`、`NAME: [1:3]`），全角数字按半角读；两个数字之间夹空白（`[1 3]`）仍无效。备注里读写法时，选择器内的空白不截断，写法之后同一行的其它内容（如 `CHANGE:...`）不并入。重复项、重叠项及逆序端点按集合归一化，书写顺序不表示优先级。`[]`、空项、非正整数、正负号（`+3`）、缺括号、溢出明确拒绝，不回退到全站/全库。允许集合限制停靠目标，不封锁途经股道。
+
+加载存量错误定义时停用整条交路：启动或重载后汇总成一条 WARN，列出被停用的交路码、停靠点序号与原始指令（逐条细节在调试日志）；单条交路刷新时直接 WARN 这一条；不会删除坏站后继续加载其余停靠，也不会采用附带的固定节点。已运行列车进入既有的“缺少交路定义”安全停车流程。修正定义后重新加载即可恢复，数据库中的原始停靠保持可编辑。
 
 ### 简写格式
 
@@ -81,9 +87,11 @@ DSTY DYNAMIC:SURN:D:DEPOT:[1:3]    # 运行时从 DEPOT 轨道 1-3 选择空闲�
 
 DYNAMIC stop 在 define 阶段会检查轨道范围内的所有节点：
 
-1. **节点存在性检查**：遍历范围内所有轨道，检查是否存在于调度图
+1. **节点存在性检查**：筛选调度图中实际存在且属于允许集合的节点，不展开整个数值空间
    - 若所有轨道都不存在：报错 `dynamic-no-valid-tracks`
-   - 若部分轨道不存在：警告 `dynamic-partial-tracks`（不阻止定义）
+   - 若部分轨道不存在：警告 `dynamic-partial-tracks`（不阻止定义）；缺失值最多展示 20 个样本，并给出总数
+   - 实际候选超过 20 时：警告 `dynamic-candidate-budget`，运行时输出 `DYNAMIC_CANDIDATE_BUDGET`。寻路预算只评估数字顺序前 20 个合法实际节点；超过预算的完整评估仍待后续改进，预算不改变集合资格
+   - 图快照、运维覆盖视图与跨世界视图均保留站点索引；候选与容量通知只查询本站实际节点
 
 2. **可达性检查**：检查相邻 stop 之间是否存在可达路径
    - 对于 DYNAMIC stop，只要有一条轨道可达即通过
@@ -134,13 +142,14 @@ CONFLICT claim 以及列车实际占用的轨道不会因此释放或绕过。
 随后由普通授权链进入 FIFO queue；此时不得误报为容量耗尽并反复撤队。授权请求只能到达
 首个已 materialize 的 DYNAMIC 目标，不能借由 lookahead 或原子联锁越过后续声明占位节点。
 Depot spawn gate 同样遵守此边界：若紧邻出库点的是 DYNAMIC，必须先选出实际站台再生成列车；
-若无法选台则在 preview、spawn 与可写 acquire 之前重试，不得用 `fromTrack` 占位节点申请进路或写入
+若无法选台则在 preview、spawn 与可写 acquire 之前重试，不得用声明代表股道的占位节点申请进路或写入
 TrainCarts destination。
 
 ### Materialization 粘性
 
 **选台口径统一**：信号 tick（`DynamicPlatformAllocator`）、车站停站结束与 STOP 路点推进到下一站（`resolveDynamicStationTargetIfNeeded`）
 用同一个分配器——同一份候选枚举（未声明范围即该站现有全部股道）、同一张预订表、同一条物理先后规则；已经选定的站台原样沿用。
+推进点一旦选定目标便登记内部预订，即使进路尚忙、还未取得 NODE claim，也不会被另一条运行时路径重复选走。重复登记同一目标保留原有的预订状态，包括为物理前车暂时让出的优先权。
 推进点选台（构建进路请求预判的那一路）同样不选别的车已预订的站台。以前车站与 STOP 路点各按股道号取第一个空闲股道：
 未声明范围时只看 1 道，1 道被占就误报“没有站台”把车扣在原地，也会订走别的车已预订的站台。
 
@@ -160,6 +169,13 @@ TrainCarts destination。
 或与上一次不同时经 `StationStopObserver#onPlatformResolved` 播报，同值不发；公开为 `TrainPlatformAssignedEvent`（见 api.md）。
 
 同一列车、route 与 stop index 一旦选出合法 effective node，该选择在本段运行中保持稳定。后续中间 waypoint 或周期 signal tick 只能复用已经 materialize 的站台；即使另一站台此刻更空闲，也不能覆盖原选择。原站台 NODE 暂时繁忙时保持 `BLOCKED` 并监听该站台容量释放；站台有容量而进路繁忙时等待普通 Gate Queue，不能通过重新选台制造 destination 与已申请进路分叉。
+
+粘性有两个例外，放弃后留痕 `DYNAMIC 放弃已选站台并改选`，生效节点不再读到已放弃的站台：已选站台从图里消失或不可达时当场放弃；
+已选站台被占用、被别车预订或有前车在等，持续超过 120 秒（`DynamicPlatformAllocator.STICKY_LIMIT`）才放弃，期间照常等待原站台。重新物化到该站台时清除放弃标记。
+
+后车先选台、前车随后在同一进站路上等台时，后车只让出内部站台预订优先权，仍保留原目标；前车通过并完成进度后，后车继续等待同一股道。该协调不会释放真实占用 claim，避免“后车握空台、前车挡进路”的互卡。
+
+`[5,1,3]` 与 `[1,3,5]` 等价，不触发重新选台。缓存仍比较声明节点、停车方式、停站时长和 CHANGE 等其他动作，实际定义变化会失效。
 
 只有 materialization 的 route/声明节点/RouteStop 定义证据失效、交路 handoff 清理旧状态，或列车真实完成该进度窗口后，运行时才允许建立新的选择。相关回归应同时验证“首次选择成功”和“后续推进点不会从已选股道跳回较小股道”。
 
@@ -182,6 +198,28 @@ Waypoint STOP/TERMINATE 仍等待 `GROUP_ENTER`，保留整组到齐、居中与
 
 - 使用 `RailGraphPathFinder` 计算最短路径
 - 节点必须同时存在于 SignNodeRegistry 和 RailGraph
+
+## 与排班器的关系
+
+编表排台与运行时共用允许集合、实际图候选及 20 候选预算。瞬时容量检查以车辆与允许股道的二分匹配判断可行性：两辆只允许 1 道的车会冲突，即使本站另有空道；重叠子集同样不能高估容量。按图与停靠定义缓存资格，增量换车复用。
+
+折返、出库到首班、末班到回库走行的连续待命取两端允许集合的交集。同一辆车的重复到发投影不额外消耗股道；仅在安全裕量内相接、实际没有重叠的先后停靠不强求交集，裕量继续约束其他车辆。瞬时匹配仍不是整段固定股道的证明；保存编表结果前，受限的停留必须在 `TimetablePlatformPlanner` 排定一条整段可用的合法股道。否则报告无法排台并拒绝本次保存，可放宽允许集合或调整发车间隔再编表。
+
+“受限”统一按 `DynamicStopMatcher#restricts` 判断：落在允许集合里的实际股道少于该站全部数字股道。不限股道、或显式集合覆盖了该站现有全部股道（如两股道站写 `[1,2]`）都不算受限，排不下时照常留给运行时选台。冲突检查只评估前 20 条候选，受限与否仍按完整允许集合判断。排程本身出错时，只有本次编的表用到的交路里有受限停靠才拒绝编表，已发布邻表与无表线路的写法不影响。排台采用既有确定性贪心规则，并非全局最优求解；可能保守拒绝。
+
+计划股道在允许集合内、目标有容量且可达时优先使用。仅进路暂忙时进入普通 Gate Queue；在授权成功前不写 TrainCarts destination。已 materialize 的目标不会因计划源改变而改选。
+
+## 手动回归
+
+1. 建有 1..5 道的测试站与 Depot，执行 `/fta graph build`。
+2. 用 `/fta route define` 的书本写 `STOP DYNAMIC:OP:S:STATION:[1,3,5]`，归档/编辑后确认原文与集合空洞保留。
+3. 占满 1、3、5 道，保持 2、4 空闲：进站车应等待；释放 3 道后仅下发合法股道 destination。
+4. 将列车带到 2 或 4 道：该受限 stop 不推进、不停车开门；经过五段咽喉也不视为到站。
+5. 编表预排 3 道，仅封锁其咽喉进路：列车保持 3 道目标，进路恢复并授权后再写 destination。
+6. 将 `[1,3,5]` 改写为 `[5,3,1,3]`：已有合法目标保持；改为排除当前目标的集合则按定义变化重建选择。
+7. 为两辆车设置只允许同一股道的同时待命：编表不得按本站全部物理股道放行；连续到发集合没有共同可用股道时不得保存。
+
+自动验证：`./gradlew spotlessApply clean check`。本轮未运行实服手动步骤。
 
 ## 示例
 
@@ -237,15 +275,11 @@ DYNAMIC 容量等待: train=Train-001 route=<routeId> index=2 reason=no-availabl
 
 当列车抵达某节点时，`RouteIndexResolver.resolveCurrentIndexWithDynamic()` 会检查该节点是否匹配 route 中的任何 DYNAMIC stop：
 
-1. **普通匹配**：首先尝试精确匹配 `waypointNodeId`
-2. **同站容错**：若精确匹配失败，尝试同站不同轨道匹配（Station/Depot key）
-3. **DYNAMIC 匹配**：若以上都失败，遍历所有 stop 检查 DYNAMIC 规范匹配
+1. 对每个声明 DYNAMIC 的停靠点，先校验实际股道是否在允许集合中；精确占位、stationId 与同站容错均不得绕过此检查。
+2. 对普通停靠点保留原来的精确匹配与同站容错。
+3. 找不到合法到达时不推进，也不触发该站的 AutoStation 停车/开门动作。
 
-DYNAMIC 匹配规则（`DynamicStopMatcher.matches()`）：
-- `operatorCode` 必须匹配（忽略大小写）
-- `nodeType` 必须匹配（S/D）
-- `nodeName` 必须匹配（忽略大小写）
-- `track` 必须在 `[fromTrack, toTrack]` 范围内
+`DynamicStopMatcher.matches()` 同时校验运营商、S/D、站名、四段行为节点与允许集合。五段咽喉不能匹配行为停靠。固定 `CRET <Depot> DYNAMIC:<另一Station>` 仍保留当前固定 Depot 身份。
 
 示例：
 ```
@@ -275,7 +309,7 @@ DYNAMIC stop 在 API 中的表示：
 ```java
 record StopInfo(
     int sequence,
-    String nodeId,              // placeholder nodeId (OP:S/D:NAME:fromTrack)
+    String nodeId,              // placeholder nodeId (OP:S/D:NAME:firstDeclaredTrack)
     Optional<String> stationName, // 从 DynamicSpec.nodeName() 提取
     int dwellSeconds,
     PassType passType,          // 行为：STOP/PASS/TERMINATE
@@ -283,7 +317,7 @@ record StopInfo(
 )
 ```
 
-- `nodeId`：DYNAMIC stop 使用 placeholder（`spec.toPlaceholderNodeId()`，取 `fromTrack`）
+- `nodeId`：DYNAMIC stop 使用 placeholder（`spec.toPlaceholderNodeId()`，取最小声明允许值；不限范围保留 `:1` 声明占位）
 - `stationName`：从 DYNAMIC 规范的 `nodeName` 提取
 - `dynamic`：标识是否为动态站台选择
 
@@ -303,6 +337,10 @@ record TerminalInfo(
 DYNAMIC 终点站会正确解析并填入 EOP 字段。
 
 ## 相关文件
+
+- `TrackSelection.java`：不可变允许集合，严格解析与语义相等
+- `RailGraphPlatformSupport` / `SimpleRailGraph`：图快照内站点索引，避免选台扫描全图
+- `TimetableConflictChecker` / `TimetablePlatformPlanner`：受限容量与连续停留排台
 
 - `DynamicStopMatcher.java`：DYNAMIC 规范解析与匹配工具
 - `RouteIndexResolver.java`：Route 索引解析（支持 DYNAMIC 匹配）

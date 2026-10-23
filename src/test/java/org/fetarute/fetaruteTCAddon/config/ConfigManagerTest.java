@@ -445,6 +445,37 @@ class ConfigManagerTest {
         "负数回退缺省值");
   }
 
+  /** 编表线程数：模板写 auto，缺省也是 auto；非负整数照用（0 表示全部核），负数与写错的回退 auto。 */
+  @Test
+  void timetableBuildThreadsDefaultToAuto() throws Exception {
+    YamlConfiguration template = new YamlConfiguration();
+    try (java.io.InputStream in = ConfigManager.class.getResourceAsStream("/config.yml")) {
+      template.load(new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+    }
+    int auto = ConfigManager.TimetableSettings.AUTO_BUILD_THREADS;
+    assertEquals(
+        auto,
+        ConfigManager.parse(template, Logger.getLogger("config-test"))
+            .timetableSettings()
+            .buildThreads());
+    assertEquals(auto, ConfigManager.TimetableSettings.defaults().buildThreads());
+
+    java.util.function.Function<Object, Integer> parsed =
+        value -> {
+          YamlConfiguration config = new YamlConfiguration();
+          config.set("timetable.build-threads", value);
+          return ConfigManager.parse(config, Logger.getLogger("config-test"))
+              .timetableSettings()
+              .buildThreads();
+        };
+    assertEquals(0, parsed.apply(0), "0 表示全部核");
+    assertEquals(1, parsed.apply(1));
+    assertEquals(6, parsed.apply(6));
+    assertEquals(auto, parsed.apply("AUTO"));
+    assertEquals(auto, parsed.apply(-2), "负数回退 auto");
+    assertEquals(auto, parsed.apply("many"), "写错回退 auto");
+  }
+
   /** 叫车配置：模板与代码缺省一致，缺段用缺省，负数回退缺省。 */
   @Test
   void callSettingsParseWithDefaults() throws Exception {
@@ -472,6 +503,44 @@ class ConfigManagerTest {
     assertEquals(60, parsed.cooldownSeconds(), "负数回退缺省");
     assertEquals(0, parsed.terminalWaitSeconds(), "0 表示到终点就派回库");
     assertEquals(4, parsed.defaultMaxTrains());
+  }
+
+  /** 车钩扳手配置：模板与代码缺省一致，缺段用缺省，取值无效回退缺省。 */
+  @Test
+  void couplerSettingsParseWithDefaults() throws Exception {
+    YamlConfiguration template = new YamlConfiguration();
+    try (java.io.InputStream in = ConfigManager.class.getResourceAsStream("/config.yml")) {
+      template.load(new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+    }
+    assertEquals(
+        ConfigManager.CouplerSettings.defaults(),
+        ConfigManager.parse(template, Logger.getLogger("config-test")).couplerSettings());
+    assertEquals(
+        ConfigManager.CouplerSettings.defaults(),
+        ConfigManager.parse(new YamlConfiguration(), Logger.getLogger("config-test"))
+            .couplerSettings());
+
+    YamlConfiguration explicit = new YamlConfiguration();
+    explicit.set("coupler.enabled", false);
+    explicit.set("coupler.max-cars", 12);
+    explicit.set("coupler.push-max-blocks", -1);
+    explicit.set("coupler.push-speed-blocks-per-second", 0.0);
+    explicit.set("coupler.decouple-seconds", 45);
+    explicit.set("coupler.couple-seconds", -1);
+    explicit.set("coupler.couple-wait-seconds", 60);
+    explicit.set("coupler.approach-speed-blocks-per-second", -2.0);
+    explicit.set("coupler.approach-max-blocks", 80);
+    ConfigManager.CouplerSettings parsed =
+        ConfigManager.parse(explicit, Logger.getLogger("config-test")).couplerSettings();
+    assertEquals(false, parsed.enabled());
+    assertEquals(12, parsed.maxCars());
+    assertEquals(8, parsed.pushMaxBlocks(), "负数回退缺省");
+    assertEquals(1.0, parsed.pushSpeedBlocksPerSecond(), 1e-9, "0 回退缺省");
+    assertEquals(45, parsed.decoupleSeconds());
+    assertEquals(30, parsed.coupleSeconds(), "负数回退缺省");
+    assertEquals(60, parsed.coupleWaitSeconds());
+    assertEquals(3.0, parsed.approachSpeedBlocksPerSecond(), 1e-9, "负数回退缺省");
+    assertEquals(80, parsed.approachMaxBlocks());
   }
 
   /** 模板里的晚点追赶参数与代码缺省值一致。 */

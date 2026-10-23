@@ -1,9 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
@@ -26,9 +28,19 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorityHandoffSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.mockito.stubbing.Answer;
 
 /**
  * 调度回归共用的列车、标签、线性图与配置夹具。
@@ -241,6 +253,103 @@ final class RuntimeDispatchTestFixtures {
         Optional.of(notes));
   }
 
+  /** 两个节点之间只有一条无限速边的图（不带冲突索引）。 */
+  static RailGraph graphWithSingleEdge(NodeId a, NodeId b, int lengthBlocks) {
+    RailEdge edge =
+        new RailEdge(EdgeId.undirected(a, b), a, b, lengthBlocks, -1.0, true, Optional.empty());
+    return new RailGraph() {
+      @Override
+      public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
+        return List.of(new RailNodeTest(a), new RailNodeTest(b));
+      }
+
+      @Override
+      public java.util.Collection<RailEdge> edges() {
+        return List.of(edge);
+      }
+
+      @Override
+      public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
+        if (id == null) {
+          return Optional.empty();
+        }
+        if (id.equals(a)) {
+          return Optional.of(new RailNodeTest(a));
+        }
+        if (id.equals(b)) {
+          return Optional.of(new RailNodeTest(b));
+        }
+        return Optional.empty();
+      }
+
+      @Override
+      public java.util.Set<RailEdge> edgesFrom(NodeId id) {
+        if (id.equals(a) || id.equals(b)) {
+          return java.util.Set.of(edge);
+        }
+        return java.util.Set.of();
+      }
+
+      @Override
+      public boolean isBlocked(EdgeId id) {
+        return false;
+      }
+    };
+  }
+
+  /** 占用判定一律放行（PROCEED）。 */
+  static Answer<OccupancyDecision> allowProceed() {
+    return inv -> {
+      OccupancyRequest request = inv.getArgument(0);
+      return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+    };
+  }
+
+  /** 只登记一个车站节点牌子的注册表。 */
+  static SignNodeRegistry registryWithStation(UUID worldId, NodeId station) {
+    SignNodeRegistry registry = new SignNodeRegistry();
+    registry.put(
+        worldId,
+        "world",
+        0,
+        64,
+        0,
+        new SignNodeDefinition(
+            station,
+            NodeType.STATION,
+            Optional.of(station.value()),
+            Optional.of(WaypointMetadata.station("OP", "CENTRAL", 1))));
+    return registry;
+  }
+
+  /** 换掉运行时配置，其余照旧。 */
+  static ConfigManager.ConfigView withRuntimeSettings(
+      ConfigManager.ConfigView base, ConfigManager.RuntimeSettings runtime) {
+    return new ConfigManager.ConfigView(
+        base.configVersion(),
+        base.debugEnabled(),
+        base.locale(),
+        base.storageSettings(),
+        base.graphSettings(),
+        base.autoStationSettings(),
+        runtime,
+        base.spawnSettings(),
+        base.trainConfigSettings(),
+        base.reclaimSettings(),
+        base.smartDispatcherSettings(),
+        base.healthSettings());
+  }
+
+  /** 支持授权移交的占用管理器 mock：一律持有硬授权、换 owner 成功。 */
+  static OccupancyManager mockOccupancyManager() {
+    OccupancyManager manager =
+        mock(OccupancyManager.class, withSettings().extraInterfaces(AuthorityHandoffSupport.class));
+    when(((AuthorityHandoffSupport) manager).holdsHardAuthority(any())).thenReturn(true);
+    when(((AuthorityHandoffSupport) manager).migrateAuthorityOwner(anyString(), anyString()))
+        .thenReturn(true);
+    return manager;
+  }
+
   static final class TagStore {
     final TrainProperties properties;
     final List<String> tags;
@@ -311,6 +420,8 @@ final class RuntimeDispatchTestFixtures {
         Optional.of(Set.of(new RailFootprintCell(0, 64, 0)));
     Optional<RailState> railState = Optional.empty();
     OptionalDouble estimatedTrainLengthBlocks = OptionalDouble.of(1.0);
+    OptionalDouble stopCurveRemainingBlocks = OptionalDouble.empty();
+    OptionalDouble headToCenterBlocks = OptionalDouble.empty();
     LinkageError liveRailFootprintFailure;
     LinkageError physicalIdentityFailure;
     boolean physicalIdentityUnavailable;
@@ -374,6 +485,16 @@ final class RuntimeDispatchTestFixtures {
     @Override
     public OptionalDouble estimatedTrainLengthBlocks() {
       return estimatedTrainLengthBlocks;
+    }
+
+    @Override
+    public OptionalDouble stopCurveRemainingBlocks() {
+      return stopCurveRemainingBlocks;
+    }
+
+    @Override
+    public OptionalDouble headToCenterBlocks() {
+      return headToCenterBlocks;
     }
 
     @Override

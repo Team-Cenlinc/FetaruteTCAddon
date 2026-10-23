@@ -14,6 +14,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.stream.IntStream;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -677,8 +678,15 @@ final class RapidStagger {
    *
    * @param improved 比原表好（{@link Candidate#betterThan}）的最好候选；没有时为空
    * @param tried 编了几个候选
+   * @param timedOut 到了时间上限、没搜完就停下（{@code improved} 只从已编过的候选里挑）
    */
-  record Search(Optional<Candidate> improved, int tried) {}
+  record Search(Optional<Candidate> improved, int tried, boolean timedOut) {
+
+    /** 搜完了。 */
+    Search(Optional<Candidate> improved, int tried) {
+      this(improved, tried, false);
+    }
+  }
 
   /**
    * 最终答案：只从比原表好（{@link Candidate#betterThan}）的候选里取 {@link #ORDER} 最前的。
@@ -716,8 +724,8 @@ final class RapidStagger {
       return clear;
     }
 
-    Search finish(int tried) {
-      return new Search(Optional.ofNullable(chosen), tried);
+    Search finish(int tried, boolean timedOut) {
+      return new Search(Optional.ofNullable(chosen), tried, timedOut);
     }
   }
 
@@ -749,25 +757,82 @@ final class RapidStagger {
       Function<Measure, List<Dwell>> dwellPoints,
       boolean turnbackOnly,
       Evaluator evaluator) {
+    return search(
+        periods, base, turnbackPoints, dwellPoints, turnbackOnly, evaluator, BuildPool.serial());
+  }
+
+  /**
+   * 同 {@link #search(Map, Candidate, Function, Function, boolean, Evaluator)}，候选成批并行编。
+   *
+   * <p>每批编 {@link BuildPool#threads()} 个，按原顺序逐个消费、套用同样的早停；早停之后同一批里多编的直接丢掉，"试了几个位置"也只数消费到的。
+   * 所以选中的候选、报告里的数与串行完全相同，只是多编了几个用不上的。平移两轮之间、组与组之间仍是先后关系，各自成批。
+   *
+   * @param pool 并行池；{@code evaluator} 会在池内线程上被并发调用，必须线程安全
+   */
+  static Search search(
+      Map<String, Integer> periods,
+      Candidate base,
+      Function<Measure, List<Dwell>> turnbackPoints,
+      Function<Measure, List<Dwell>> dwellPoints,
+      boolean turnbackOnly,
+      Evaluator evaluator,
+      BuildPool pool) {
+    return search(
+        periods, base, turnbackPoints, dwellPoints, turnbackOnly, evaluator, pool, () -> false);
+  }
+
+  /**
+   * 同上，带时间上限：每编一批之前问一次 {@code expired}，到点就不再编，停在已编过的候选里按同样的规则挑（{@link Search#timedOut}）。
+   *
+   * <p>只在批与批之间停：一批已经交给池子的候选照常编完、照常消费。串行时一批一个，并行时一批 {@link BuildPool#threads()} 个，
+   * 所以到点停下时编到哪一个随线程数而变；不到点时与不限时的搜索逐个候选相同。
+   *
+   * @param expired 到没到时间上限
+   */
+  static Search search(
+      Map<String, Integer> periods,
+      Candidate base,
+      Function<Measure, List<Dwell>> turnbackPoints,
+      Function<Measure, List<Dwell>> dwellPoints,
+      boolean turnbackOnly,
+      Evaluator evaluator,
+      BuildPool pool,
+      BooleanSupplier expired) {
     Picks picks = new Picks(base);
+    int batch = Math.max(1, pool.threads());
     int tried = 0;
     for (Dwell point : turnbackPoints.apply(base.measure())) {
-      for (int margin : TURNBACK_MARGINS) {
-        tried++;
-        Optional<Candidate> candidate =
-            evaluator.dwell(Map.of(), point.withSeconds(point.seconds() + margin));
-        if (candidate.isEmpty()) {
-          continue;
+      boolean reached = false;
+      // 多半第一档（余量 0）就把全网损失压到 0：先只编它，没停下再成批往后试，免得并行时每个点白编一整批。
+      for (int from = 0, size = 1;
+          !reached && from < TURNBACK_MARGINS.size();
+          from += size, size = batch) {
+        if (expired.getAsBoolean()) {
+          return picks.finish(tried, true);
         }
-        picks.offer(candidate.get());
-        if (candidate.get().networkLost() == 0L) {
-          // 余量从小到大：全网已经没有一秒损失，再加只是多停。
-          break;
+        List<Dwell> trials = new ArrayList<>();
+        for (int margin :
+            TURNBACK_MARGINS.subList(from, Math.min(from + size, TURNBACK_MARGINS.size()))) {
+          trials.add(point.withSeconds(point.seconds() + margin));
+        }
+        for (BuildPool.Evaluated<Optional<Candidate>> built :
+            pool.evaluate(trials, trial -> evaluator.dwell(Map.of(), trial))) {
+          tried++;
+          Optional<Candidate> candidate = built.get();
+          if (candidate.isEmpty()) {
+            continue;
+          }
+          picks.offer(candidate.get());
+          if (candidate.get().networkLost() == 0L) {
+            // 余量从小到大：全网已经没有一秒损失，再加只是多停。
+            reached = true;
+            break;
+          }
         }
       }
     }
     if (turnbackOnly || picks.settled()) {
-      return picks.finish(tried);
+      return picks.finish(tried, false);
     }
     // 每个候选都带着一整张表：只留排名前几的（第二轮要用），其余算完即丢，免得几十张表一起压在堆上。
     List<Candidate> top = new ArrayList<>();
@@ -785,25 +850,40 @@ final class RapidStagger {
       Integer bestOffset = null;
       for (int round = 0; round < 2; round++) {
         boolean inClearWindow = false;
-        for (int offset : offsets) {
-          Map<String, Integer> next = new TreeMap<>(shift);
-          next.put(group, offset);
-          tried++;
-          Optional<Candidate> candidate = evaluator.shift(next);
-          boolean clear = candidate.isPresent() && candidate.get().measure().seconds() == 0L;
-          if (inClearWindow && !clear) {
-            // 第一段完全错开的窗口扫完了：被卡 0 已到底，后面的位置只可能在次要指标上略好，不值得每个再编一遍。
-            break;
+        boolean windowPassed = false;
+        for (int from = 0; !windowPassed && from < offsets.size(); from += batch) {
+          if (expired.getAsBoolean()) {
+            return picks.finish(tried, true);
           }
-          inClearWindow |= clear;
-          if (candidate.isEmpty()) {
-            continue;
+          List<Integer> slice = offsets.subList(from, Math.min(from + batch, offsets.size()));
+          List<Map<String, Integer>> trials = new ArrayList<>(slice.size());
+          for (int offset : slice) {
+            Map<String, Integer> next = new TreeMap<>(shift);
+            next.put(group, offset);
+            trials.add(next);
           }
-          keepTop(top, candidate.get());
-          picks.offer(candidate.get());
-          if (shiftBest == null || ORDER.compare(candidate.get(), shiftBest) < 0) {
-            shiftBest = candidate.get();
-            bestOffset = offset;
+          List<BuildPool.Evaluated<Optional<Candidate>>> built =
+              pool.evaluate(trials, evaluator::shift);
+          for (int i = 0; i < built.size(); i++) {
+            int offset = slice.get(i);
+            tried++;
+            Optional<Candidate> candidate = built.get(i).get();
+            boolean clear = candidate.isPresent() && candidate.get().measure().seconds() == 0L;
+            if (inClearWindow && !clear) {
+              // 第一段完全错开的窗口扫完了：被卡 0 已到底，后面的位置只可能在次要指标上略好，不值得每个再编一遍。
+              windowPassed = true;
+              break;
+            }
+            inClearWindow |= clear;
+            if (candidate.isEmpty()) {
+              continue;
+            }
+            keepTop(top, candidate.get());
+            picks.offer(candidate.get());
+            if (shiftBest == null || ORDER.compare(candidate.get(), shiftBest) < 0) {
+              shiftBest = candidate.get();
+              bestOffset = offset;
+            }
           }
         }
         if (bestOffset == null) {
@@ -823,19 +903,32 @@ final class RapidStagger {
     if (!picks.settled()) {
       List<Candidate> starts = new ArrayList<>(top);
       starts.add(base);
+      // 这一步没有早停，各起点、各加停点、各档一个接一个排成一串，成批编、按原顺序收。
+      List<Map.Entry<Map<String, Integer>, Dwell>> trials = new ArrayList<>();
       for (Candidate start : starts) {
         if (start.measure().seconds() == 0L) {
           continue;
         }
         for (Dwell point : dwellPoints.apply(start.measure())) {
           for (int seconds : DWELL_STEPS) {
-            tried++;
-            evaluator.dwell(start.shift(), point.withSeconds(seconds)).ifPresent(picks::offer);
+            trials.add(Map.entry(start.shift(), point.withSeconds(seconds)));
           }
         }
       }
+      for (int from = 0; from < trials.size(); from += batch) {
+        if (expired.getAsBoolean()) {
+          return picks.finish(tried, true);
+        }
+        for (BuildPool.Evaluated<Optional<Candidate>> built :
+            pool.evaluate(
+                trials.subList(from, Math.min(from + batch, trials.size())),
+                trial -> evaluator.dwell(trial.getKey(), trial.getValue()))) {
+          tried++;
+          built.get().ifPresent(picks::offer);
+        }
+      }
     }
-    return picks.finish(tried);
+    return picks.finish(tried, false);
   }
 
   /** 把候选放进按 {@link #ORDER} 排好的前 {@link #DWELL_SHORTLIST} 名里，多出来的丢掉。 */
@@ -858,11 +951,69 @@ final class RapidStagger {
    */
   static String describeSearch(
       Candidate base, Optional<Candidate> chosen, int tried, long millis, boolean turnbackOnly) {
+    return describeSearch(base, chosen, tried, millis, turnbackOnly, 0);
+  }
+
+  /**
+   * 同 {@link #describeSearch(Candidate, Optional, int, long, boolean)}；搜索到了时间上限没搜完时（{@code
+   * timedOutMinutes > 0}），开头写明"错峰超时"与上限，后面的结论只针对已编过的候选（编过几个只在结论里写一次）。
+   *
+   * @param timedOutMinutes 到点停下时的上限分钟数；搜完了为 0
+   */
+  static String describeSearch(
+      Candidate base,
+      Optional<Candidate> chosen,
+      int tried,
+      long millis,
+      boolean turnbackOnly,
+      int timedOutMinutes) {
+    return describeSearch(base, chosen, tried, millis, turnbackOnly, timedOutMinutes, 0);
+  }
+
+  /**
+   * 同 {@link #describeSearch(Candidate, Optional, int, long, boolean,
+   * int)}；超时时另写有几个候选到点未重编：中途加停的候选从原表相位热启动， 排出来不可用时本该整套重选再编一次，到点就不再重编、直接淘汰——它们也算在"试了 N
+   * 个位置"里，但只按原表相位评过。
+   *
+   * @param unrebuilt 到点未重编的候选数；没超时时不写
+   */
+  static String describeSearch(
+      Candidate base,
+      Optional<Candidate> chosen,
+      int tried,
+      long millis,
+      boolean turnbackOnly,
+      int timedOutMinutes,
+      int unrebuilt) {
+    boolean timedOut = timedOutMinutes > 0;
+    String line = describeConclusion(base, chosen, tried, millis, turnbackOnly, timedOut);
+    if (!timedOut) {
+      return line;
+    }
+    String head = "快车错峰：";
+    return head
+        + "错峰超时（约 "
+        + timedOutMinutes
+        + " 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑"
+        + (unrebuilt > 0 ? "；其中 " + unrebuilt + " 个按原表相位排出来不可用、到点未重编" : "")
+        + "），"
+        + line.substring(head.length());
+  }
+
+  private static String describeConclusion(
+      Candidate base,
+      Optional<Candidate> chosen,
+      int tried,
+      long millis,
+      boolean turnbackOnly,
+      boolean timedOut) {
     if (chosen.isEmpty()) {
       String scope =
           turnbackOnly
               ? tried == 0
-                  ? "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；也没有可加长的原地折返端（或折返时间由 --turnaround 固定），这次没有搜"
+                  ? timedOut
+                      ? "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；只试原地折返端加长折返，到点时一档也还没编"
+                      : "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；也没有可加长的原地折返端（或折返时间由 --turnaround 固定），这次没有搜"
                   : String.format(
                       Locale.ROOT,
                       "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；只试了原地折返端加长折返 %d 档，没有在目标间隔下排得开、比原表好的",

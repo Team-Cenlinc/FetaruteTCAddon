@@ -123,6 +123,11 @@ public final class QueuedAnimations {
     return playNamed(targets, options, true);
   }
 
+  /** 同 {@link #playNamed(Collection, AnimationOptions)}，但只在存了这个动画的附件上播，不退回默认动画。 */
+  static Ticket playStored(Collection<Attachment> targets, AnimationOptions options) {
+    return playNamed(targets, options, false);
+  }
+
   private static Ticket playNamed(
       Collection<Attachment> targets, AnimationOptions options, boolean useDefault) {
     if (targets == null || options == null || options.getName() == null) {

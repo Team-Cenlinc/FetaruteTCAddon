@@ -175,6 +175,24 @@ public final class BossBarTrainHudManager implements Listener {
     state =
         HudStateTracker.applyOutOfService(
             state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
+    state =
+        HudStateTracker.applyJoin(
+            state,
+            !context.joinStation().isEmpty(),
+            template.defines(HudState.JOIN_ARRIVING),
+            template.defines(HudState.AT_JOIN_STATION));
+    state =
+        HudStateTracker.applyDivision(
+            state,
+            placeholders,
+            template.defines(HudState.DIVIDE_ARRIVING),
+            template.defines(HudState.AT_DIVIDE_STATION));
+    state =
+        HudStateTracker.applyCarEnd(
+            state,
+            placeholders,
+            template.defines(HudState.CAR_ENDS_ARRIVING),
+            template.defines(HudState.AT_CAR_END));
     String templateLine =
         template.resolveLine(state, HudLanguageRotation.nowTicks(), placeholders).orElse("");
     Component title = HudText.render(templateLine, placeholders, debugLogger);

@@ -6,7 +6,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -20,9 +22,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectivePars
 /**
  * 把 build 输入的 route 按交路组分组、按（起点站台组, 终点站台组）分方向。
  *
- * <p>分类落在 route 上，不在组上：OPERATION 与中途有 STOP 的 CREATE / RETURN 是<b>带客 route</b>，它是班次，上它所属组的子网格； 中途没有
- * STOP 的 CREATE / RETURN 是<b>纯走行</b>，只做交路的两头。CREATE / RETURN / CRET / DSTY 只决定车的生灭，不决定它是不是班次——DS 那种
- * {@code CREATE → RETURN} 完整生灭的一对和 WS 用 {@code OPERATION + CRET} 写的出库班是同一回事。
+ * <p>OPERATION 与未标记按运营调度的带客 CREATE/RETURN 参与子网格；纯走行和 {@code dispatchByOperation} 出入库只做交路两头。后者即使带中途
+ * STOP，也保留停站与乘客展示， 不形成独立周期或分摊运营频率。
  *
  * <p>组名取 route metadata 的 {@code spawn_group}；没配的一律进 {@link #DEFAULT_GROUP}——一条线没分组就是一个组，
  * 往返对才能锚在一起。 按起点站推导是错的：正向从 A 出发、反向从 B 出发会被拆成两组，谁也锚不到谁。纯数据，确定性：组按名字、方向按键、候选按 code 排序。
@@ -37,32 +38,64 @@ public final class ServiceGroupClassifier {
   /**
    * 一个方向：同组内起点站台组与终点站台组相同的带客 route 共用一张子网格，按 weight 切份额。
    *
+   * <p><b>方向键在全部交路组里唯一</b>：相位表、往返对锚定、跨组按车接续、周期模板都按方向键跨组查找。 两个组在同一对站台组之间往返（例如慢车与快车共用两端终点站）时，
+   * 光凭"起点→终点"会同名，后放的组覆盖前一组的相位，反向找到的也可能是别组的方向。所以这样的方向带上本组组名（{@code qualifier}）；
+   * 没有同名的方向不带，键与只看起终点时完全相同。
+   *
    * @param originGroup 起点站台组（解析不出组时用节点 id）
    * @param terminalGroup 终点站台组
    * @param candidates 该方向的候选，按 code 排序；weight 是方向内的目标比例
    * @param routeIds 与 candidates 对齐
+   * @param qualifier 区分同名方向的组名：别的组也在这一对站台组之间开行（任一走向）时为本组组名，否则为空
    */
   public record Direction(
       String originGroup,
       String terminalGroup,
       List<WeightedTripAllocator.Candidate> candidates,
-      List<UUID> routeIds) {
+      List<UUID> routeIds,
+      String qualifier) {
 
     public Direction {
       originGroup = originGroup == null ? "" : originGroup;
       terminalGroup = terminalGroup == null ? "" : terminalGroup;
       candidates = candidates == null ? List.of() : List.copyOf(candidates);
       routeIds = routeIds == null ? List.of() : List.copyOf(routeIds);
+      qualifier = qualifier == null ? "" : qualifier;
     }
 
-    /** 方向键：相位表与报告用。 */
+    /** 不与别组同名的方向。 */
+    public Direction(
+        String originGroup,
+        String terminalGroup,
+        List<WeightedTripAllocator.Candidate> candidates,
+        List<UUID> routeIds) {
+      this(originGroup, terminalGroup, candidates, routeIds, "");
+    }
+
+    /** 方向键：相位表与报告用；与别组同名时带组名，如 {@code A→B（组名）}。 */
     public String key() {
-      return originGroup + "→" + terminalGroup;
+      return keyOf(originGroup, terminalGroup);
     }
 
-    /** 反方向的键：往返对锚定用。 */
+    /** 反方向的键：往返对锚定用。与本方向带同一个组名，只会找到同组的反向。 */
     public String reverseKey() {
-      return terminalGroup + "→" + originGroup;
+      return keyOf(terminalGroup, originGroup);
+    }
+
+    private String keyOf(String from, String to) {
+      return from + "→" + to + (qualifier.isEmpty() ? "" : "（" + qualifier + "）");
+    }
+
+    /** 同一个方向带上组名：别的组也在这一对站台组之间开行时用。 */
+    Direction qualifiedBy(String group) {
+      return new Direction(originGroup, terminalGroup, candidates, routeIds, group);
+    }
+
+    /** 不分走向的一对站台组：同名判定用，正反两个走向落到同一个值。 */
+    String endpointPair() {
+      return originGroup.compareTo(terminalGroup) <= 0
+          ? originGroup + "\n" + terminalGroup
+          : terminalGroup + "\n" + originGroup;
     }
   }
 
@@ -71,7 +104,7 @@ public final class ServiceGroupClassifier {
    *
    * @param name 组名
    * @param directions 带客 route 的方向，按键排序
-   * @param pureLegs 纯走行 route（只做交路两头）
+   * @param pureLegs 交路走行 route（含按运营调度的带客出入库）
    */
   public record Group(String name, List<Direction> directions, List<UUID> pureLegs) {
     public Group {
@@ -116,7 +149,7 @@ public final class ServiceGroupClassifier {
         continue;
       }
       String group = groupNameOf(route);
-      if (!carriesPassengers(route)) {
+      if (route.dispatchByOperation() || !carriesPassengers(route)) {
         pureLegsByGroup.computeIfAbsent(group, key -> new ArrayList<>()).add(route.routeId());
         continue;
       }
@@ -126,7 +159,7 @@ public final class ServiceGroupClassifier {
           .computeIfAbsent(key, ignored -> new ArrayList<>())
           .add(route);
     }
-    List<Group> groups = new ArrayList<>();
+    Map<String, List<Direction>> directionsByGroup = new TreeMap<>();
     for (String name :
         new TreeMap<>(merge(byGroupAndDirection.keySet(), pureLegsByGroup.keySet())).keySet()) {
       List<Direction> directions = new ArrayList<>();
@@ -144,6 +177,29 @@ public final class ServiceGroupClassifier {
         directions.add(
             new Direction(
                 originGroupOf(sorted.get(0)), terminalGroupOf(sorted.get(0)), candidates, ids));
+      }
+      directionsByGroup.put(name, directions);
+    }
+    // 方向键要在全部组里唯一（见 Direction）：同一对站台组（不分走向）出现在两个以上组里时，这些方向都带上组名。
+    // 按不分走向判：只带一个走向的组名，往返对另一走向的键就对不上，reverseKey 会找到别组的反向。
+    Map<String, Set<String>> groupsByPair = new TreeMap<>();
+    directionsByGroup.forEach(
+        (name, directions) -> {
+          for (Direction direction : directions) {
+            groupsByPair
+                .computeIfAbsent(direction.endpointPair(), ignored -> new TreeSet<>())
+                .add(name);
+          }
+        });
+    List<Group> groups = new ArrayList<>();
+    for (Map.Entry<String, List<Direction>> entry : directionsByGroup.entrySet()) {
+      String name = entry.getKey();
+      List<Direction> directions = new ArrayList<>(entry.getValue().size());
+      for (Direction direction : entry.getValue()) {
+        directions.add(
+            groupsByPair.get(direction.endpointPair()).size() > 1
+                ? direction.qualifiedBy(name)
+                : direction);
       }
       directions.sort(Comparator.comparing(Direction::key));
       List<UUID> legs = pureLegsByGroup.getOrDefault(name, List.of());
@@ -210,8 +266,7 @@ public final class ServiceGroupClassifier {
    * 起点站台组：第一个<b>落在车站上的停靠点</b>（STOP / TERMINATE；DYNAMIC 取它的目标站）；都找不到才退回首路径点。
    *
    * <p>方向是乘客看到的"从哪到哪"，<b>车库与走行路径点不是站</b>。按首末路径点取会把同一条线的往返拆成互不相识的两个方向：
-   * 出库端从车库出发、入库端到车库结束，两者的键都不是站，于是往返对锚不到一起，第二层的组间错开也找不到共用起点。 MT-1N_Short 与 MT-1N_ShortR
-   * 就是这么被拆成两个方向、把进站流量算成两倍的。
+   * 出库端从车库出发、入库端到车库结束，两者的键都不是站，于是往返对锚不到一起，第二层的组间错开也找不到共用起点， 同一条交路的出库班与回库班还会被拆成两个方向、把进站流量算成两倍。
    */
   static String originGroupOf(TimetableBuilder.RouteInput route) {
     return passengerEndpointGroup(route, true);

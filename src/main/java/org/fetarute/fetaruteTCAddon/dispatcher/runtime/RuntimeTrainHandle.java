@@ -47,6 +47,24 @@ public interface RuntimeTrainHandle {
   }
 
   /**
+   * 第一节车厢中心到车中心（首尾两节车厢中心的中点）沿车身的距离（格）：车站停车对准车中心时，停车点在站牌之后这么远。
+   *
+   * <p>相邻车厢中心之间按直线距离累加，弯道上比沿轨道略短——偏短只会让车压上站牌时慢一点（由 AutoStation 接着刹完）， 不会以过高的速度压上站牌。读不到位置时为空，调用方按
+   * 0（停车点就在站牌处）处理。
+   */
+  default OptionalDouble headToCenterBlocks() {
+    return OptionalDouble.empty();
+  }
+
+  /**
+   * AutoStation 的停站刹车动作（{@link StopCurveAction}）还要走多远（格）：压上站牌后由它把车刹到停车点，这段距离比按车中心估的更准
+   * （对准停车位置标时可能远于半个车长）。没有这个动作在走时为空。
+   */
+  default OptionalDouble stopCurveRemainingBlocks() {
+    return OptionalDouble.empty();
+  }
+
+  /**
    * 返回整列车头到列尾当前覆盖的 TrainCarts RailPath 栅格足迹。
    *
    * <p>该证据用于启动/迟加载现场占用水合；只要任一车厢未被有效轨迹覆盖、轨迹断开、跨世界或无效，实现就必须返回 empty，调用方不得用实体位置或 routeIndex 猜测。

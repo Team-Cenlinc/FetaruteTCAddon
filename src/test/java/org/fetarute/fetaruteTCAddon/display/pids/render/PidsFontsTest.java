@@ -77,4 +77,15 @@ class PidsFontsTest {
     assertEquals("A very long…", fonts.ellipsizeWords(font, text, width));
     assertEquals("A very long…", fonts.ellipsizeWords(font, text, width + 3), "不截在词中间");
   }
+
+  @Test
+  void aCutDoesNotLeaveADanglingJoiner() {
+    Font font = fonts.font(Script.LATIN, 12);
+    String text = "Neo Fueya - Hor Huu";
+
+    assertEquals(
+        "Neo Fueya…",
+        fonts.ellipsizeWords(font, text, fonts.width(font, "Neo Fueya -…")),
+        "省略号前不挂连字符");
+  }
 }

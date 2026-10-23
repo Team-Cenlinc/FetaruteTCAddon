@@ -49,8 +49,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusSource;
  * #MINOR_DELAY_SECONDS} 秒以上为轻微延误；近一小时有取消为部分班次取消；有在运营的列车为运行正常；
  * 没有时，有时刻表且此刻不在任何一张的运营时段内为已结束运营，否则为暂无列车。
  *
- * <p>列车与时刻表每 {@link #REFRESH} 汇总一次（各屏共用，主线程调用）；取消同样缓存，车次取消或重新绑定时由 {@link
- * #invalidateCancellations()} 立即作废。汇总失败时沿用上一份并留下调试日志。
+ * <p>列车与时刻表每 {@link #REFRESH} 汇总一次（各屏与只读 HTTP 接口共用；可在任意线程调用，两边同时过期时各算一次、后写的为准）；取消同样缓存，车次取消或重新绑定时由
+ * {@link #invalidateCancellations()} 立即作废。汇总失败时沿用上一份并留下调试日志。
  */
 public final class PidsLineStatusProvider implements PidsLineStatusSource {
 
@@ -74,6 +74,11 @@ public final class PidsLineStatusProvider implements PidsLineStatusSource {
   private final Consumer<String> debugLogger;
   private volatile Facts facts = Facts.EMPTY;
   private volatile Cancelled cancelled = Cancelled.EMPTY;
+
+  /** 作废取消缓存与写回之间的锁：汇总期间被作废过的那一份不写回。 */
+  private final Object cancelledLock = new Object();
+
+  private long cancelledEpoch;
 
   /**
    * @param trains 列车接口
@@ -109,7 +114,10 @@ public final class PidsLineStatusProvider implements PidsLineStatusSource {
 
   /** 丢弃缓存的取消：车次取消或重新绑定时调用，下一次取状况就能看到。 */
   public void invalidateCancellations() {
-    cancelled = Cancelled.EMPTY;
+    synchronized (cancelledLock) {
+      cancelledEpoch++;
+      cancelled = Cancelled.EMPTY;
+    }
   }
 
   /**
@@ -196,6 +204,10 @@ public final class PidsLineStatusProvider implements PidsLineStatusSource {
     if (fresh(current.takenAt(), now)) {
       return current;
     }
+    long epoch;
+    synchronized (cancelledLock) {
+      epoch = cancelledEpoch;
+    }
     try {
       Map<String, Integer> byLine = new HashMap<>();
       for (TimetableApi.CancelledTrip trip :
@@ -214,7 +226,12 @@ public final class PidsLineStatusProvider implements PidsLineStatusSource {
       debugLogger.accept("PIDS_LINE_STATUS_CANCELLATIONS_FAILED error=" + ex);
       current = new Cancelled(now, current.byLine());
     }
-    cancelled = current;
+    // 汇总期间被作废过（别的线程正好取消了车次）：这一份可能是作废前的，不写回，下一次重算
+    synchronized (cancelledLock) {
+      if (cancelledEpoch == epoch) {
+        cancelled = current;
+      }
+    }
     return current;
   }
 

@@ -48,6 +48,65 @@ class PhasePlannerTest {
     assertTrue(phases.notes().stream().anyMatch(note -> note.contains("锚定")));
   }
 
+  /** 两组在同一对站台组之间往返（分类器给方向键带上组名）：各组的反向按本组的走行 + 折返锚定，后放的组不覆盖先放的。 没带组名的同名方向直接拒绝，不悄悄算错。 */
+  @Test
+  void groupsSharingEndpointsAnchorTheirOwnPairs() {
+    String a = "OP:S:A";
+    String c = "OP:S:C";
+    ServiceGroupClassifier.Group slow =
+        new ServiceGroupClassifier.Group(
+            "slow",
+            List.of(
+                direction(a, c, "RA", RA).qualifiedBy("slow"),
+                direction(c, a, "RB", RB).qualifiedBy("slow")),
+            List.of());
+    ServiceGroupClassifier.Group fast =
+        new ServiceGroupClassifier.Group(
+            "fast",
+            List.of(
+                direction(a, c, "RS", RS).qualifiedBy("fast"),
+                direction(c, a, "RT", RT).qualifiedBy("fast")),
+            List.of());
+    Map<UUID, Integer> runs = Map.of(RA, 500, RB, 500, RS, 300, RT, 300);
+
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            List.of(fast, slow),
+            Map.of("slow", 1200, "fast", 1200),
+            runs,
+            TurnaroundTable.fixed(60),
+            7200,
+            Map.of());
+
+    Map<String, Integer> byKey = phases.phaseByDirection();
+    assertEquals(4, byKey.size(), byKey::toString);
+    String slowForward = slow.directions().get(0).key();
+    String slowBack = slow.directions().get(0).reverseKey();
+    String fastForward = fast.directions().get(0).key();
+    String fastBack = fast.directions().get(0).reverseKey();
+    assertEquals(
+        500 + 60, Math.floorMod(byKey.get(slowBack) - byKey.get(slowForward), 1200), "慢车锚定");
+    assertEquals(
+        300 + 60, Math.floorMod(byKey.get(fastBack) - byKey.get(fastForward), 1200), "快车锚定");
+
+    ServiceGroupClassifier.Group bareSlow =
+        new ServiceGroupClassifier.Group(
+            "slow", List.of(direction(a, c, "RA", RA), direction(c, a, "RB", RB)), List.of());
+    ServiceGroupClassifier.Group bareFast =
+        new ServiceGroupClassifier.Group(
+            "fast", List.of(direction(a, c, "RS", RS), direction(c, a, "RT", RT)), List.of());
+    org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            PhasePlanner.plan(
+                List.of(bareFast, bareSlow),
+                Map.of("slow", 1200, "fast", 1200),
+                runs,
+                TurnaroundTable.fixed(60),
+                7200,
+                Map.of()));
+  }
+
   /** 正线折返端锚定：C→A 方向（键较大）里的 RS 终到正线折返点，它当正向、锚点放在正线那端；锚定走行与折返取 RS 自己的， 不取同方向更快、但不在正线折返的 RT。 */
   @Test
   void returnPairIsAnchoredAtTheMainlineTurnbackEnd() {

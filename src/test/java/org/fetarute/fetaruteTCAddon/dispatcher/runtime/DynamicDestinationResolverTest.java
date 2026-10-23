@@ -21,7 +21,6 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -42,7 +41,7 @@ class DynamicDestinationResolverTest {
     OccupancyManager occupancyManager = mock(OccupancyManager.class);
     RailGraph graph = mock(RailGraph.class);
     UUID worldId = UUID.randomUUID();
-    RailGraphService railGraphService = new RailGraphService(mock(RailGraphBuilder.class));
+    RailGraphService railGraphService = new RailGraphService();
     World world = mock(World.class);
     when(world.getUID()).thenReturn(worldId);
     railGraphService.putSnapshot(world, graph, Instant.parse("2026-01-01T00:00:00Z"));
@@ -89,7 +88,7 @@ class DynamicDestinationResolverTest {
     OccupancyManager occupancyManager = mock(OccupancyManager.class);
     RailGraph graph = mock(RailGraph.class);
     UUID worldId = UUID.randomUUID();
-    RailGraphService railGraphService = new RailGraphService(mock(RailGraphBuilder.class));
+    RailGraphService railGraphService = new RailGraphService();
     World world = mock(World.class);
     when(world.getUID()).thenReturn(worldId);
     railGraphService.putSnapshot(world, graph, Instant.parse("2026-01-01T00:00:00Z"));
@@ -136,7 +135,7 @@ class DynamicDestinationResolverTest {
     OccupancyManager occupancyManager = mock(OccupancyManager.class);
     RailGraph graph = mock(RailGraph.class);
     UUID worldId = UUID.randomUUID();
-    RailGraphService railGraphService = new RailGraphService(mock(RailGraphBuilder.class));
+    RailGraphService railGraphService = new RailGraphService();
     World world = mock(World.class);
     when(world.getUID()).thenReturn(worldId);
     railGraphService.putSnapshot(world, graph, Instant.parse("2026-01-01T00:00:00Z"));
@@ -191,7 +190,7 @@ class DynamicDestinationResolverTest {
   @Test
   void resolverBlocksDeclaredDynamicStopWhenGraphSnapshotIsMissing() {
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
-    RailGraphService railGraphService = new RailGraphService(mock(RailGraphBuilder.class));
+    RailGraphService railGraphService = new RailGraphService();
     NodeId fromId = NodeId.of("OP:W:FROM:1:0");
     RouteId routeId = RouteId.of("DYNAMIC-GRAPH-MISSING");
     RouteDefinition route = mock(RouteDefinition.class);

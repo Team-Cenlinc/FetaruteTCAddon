@@ -12,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
+import org.fetarute.fetaruteTCAddon.drive.session.SeatExitGuard;
 
 /**
  * 一名车掌的值乘：在哪列车、预留的是哪个座位、开着哪侧的门、快捷栏此刻的样子。
@@ -42,7 +43,15 @@ public final class GuardSession implements DriveDoors.Cab {
     /** 车掌考试没有通过（考试期间临时有车掌权限）。 */
     EXAM,
     /** 车掌任务值乘到交班站。 */
-    HANDOVER
+    HANDOVER,
+    /** 列车分行后选择结束值乘。 */
+    SPLIT_END,
+    /** 列车分行后改为值乘解下的一段：这一段的值乘结束。 */
+    SPLIT_SWITCH,
+    /** 列车分行后未在时限内选择。 */
+    SPLIT_TIMEOUT,
+    /** 回程支线车并入主干（身份作废）：进站前结束值乘。 */
+    COUPLING
   }
 
   private final UUID playerId;
@@ -57,6 +66,10 @@ public final class GuardSession implements DriveDoors.Cab {
   private boolean leftDoorOpen;
   private boolean rightDoorOpen;
   private long doorsClosingUntilTick;
+
+  /** 发车铃上一次响的 tick（按住期间按固定间隔补响）。 */
+  private long buzzedAt;
+
   private volatile HotbarRewriter<ItemStack> rewriter;
   private volatile int menuTopSize;
   private GuardHotbar.View view;
@@ -72,6 +85,7 @@ public final class GuardSession implements DriveDoors.Cab {
   private long platformPlacementTick = Long.MIN_VALUE;
   private boolean forcedSignalHandled;
   private boolean sneakHeld;
+  private final SeatExitGuard exitGuard = new SeatExitGuard();
   private com.bergerkiller.bukkit.tc.controller.MinecartGroup lastGroup;
   private boolean closingWatchActive;
   private DepartureWatch departureWatch;
@@ -255,6 +269,14 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public BuzzerPress buzzer() {
     return buzzer;
+  }
+
+  public long buzzedAt() {
+    return buzzedAt;
+  }
+
+  public void setBuzzedAt(long tick) {
+    this.buzzedAt = tick;
   }
 
   public long startedTick() {
@@ -469,6 +491,11 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public void setSneakHeld(boolean held) {
     this.sneakHeld = held;
+  }
+
+  /** 行驶中按 Shift 被拦时的提示节流（与驾驶员同一套）：按住不放时每拍都有离座请求，同一次按键只提示一次，连按也隔一段时间才再提示。 */
+  public SeatExitGuard exitGuard() {
+    return exitGuard;
   }
 
   /** 这一站发车铃超时代发后，已把车掌传送回座位。 */

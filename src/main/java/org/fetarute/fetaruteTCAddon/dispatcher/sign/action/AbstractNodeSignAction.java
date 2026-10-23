@@ -68,6 +68,11 @@ abstract class AbstractNodeSignAction extends SignAction {
     debugLogger.accept(message);
   }
 
+  /** 语言文本；未注入时为 {@code null}。 */
+  protected LocaleManager locale() {
+    return locale;
+  }
+
   AbstractNodeSignAction(
       String header,
       SignNodeRegistry registry,

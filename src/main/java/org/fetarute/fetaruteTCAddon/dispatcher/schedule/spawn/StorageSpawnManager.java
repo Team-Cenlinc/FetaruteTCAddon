@@ -23,6 +23,8 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -55,6 +57,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * <p>这意味着它不会修改列车的生命周期标签，也不会触碰 pending layover 或 reclaim 状态。
  *
  * <p>长期运行时会按票据首次 due 时间清理过旧队列项，并同步释放对应 service 的 backlog，避免堵塞 route 在数天后形成幽灵积压。
+ *
+ * <p>线程：出票、改队列都在主线程；站牌预测（{@link #snapshotForecast}、{@link #snapshotQueue}）也可能来自后台线程（只读 HTTP
+ * 接口），所以公开方法都在本对象上同步。预测与快照只做内存遍历，持锁很短。
  */
 public final class StorageSpawnManager
     implements SpawnManager, SpawnForecastSupport, SpawnResetSupport {
@@ -89,7 +94,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public List<SpawnTicket> pollDueTickets(StorageProvider provider, Instant now) {
+  public synchronized List<SpawnTicket> pollDueTickets(StorageProvider provider, Instant now) {
     if (provider == null || now == null) {
       return List.of();
     }
@@ -100,7 +105,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public void requeue(SpawnTicket ticket) {
+  public synchronized void requeue(SpawnTicket ticket) {
     if (ticket == null) {
       return;
     }
@@ -108,7 +113,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public void complete(SpawnTicket ticket) {
+  public synchronized void complete(SpawnTicket ticket) {
     // 按需票（叫车）不占服务的 backlog：它不是这个服务生成的
     if (ticket == null || ticket.service() == null || onDemand(ticket)) {
       return;
@@ -121,7 +126,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public boolean withdraw(UUID ticketId) {
+  public synchronized boolean withdraw(UUID ticketId) {
     return ticketId != null
         && queue.removeIf(ticket -> ticket != null && ticketId.equals(ticket.id()));
   }
@@ -132,12 +137,12 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public SpawnPlan snapshotPlan() {
+  public synchronized SpawnPlan snapshotPlan() {
     return plan;
   }
 
   @Override
-  public List<SpawnTicket> snapshotQueue() {
+  public synchronized List<SpawnTicket> snapshotQueue() {
     if (queue.isEmpty()) {
       return List.of();
     }
@@ -153,7 +158,7 @@ public final class StorageSpawnManager
   }
 
   @Override
-  public ReplacementSnapshot snapshotForReplacement() {
+  public synchronized ReplacementSnapshot snapshotForReplacement() {
     Map<SpawnServiceKey, Instant> cursors = new HashMap<>();
     states.forEach(
         (key, state) -> {
@@ -171,7 +176,7 @@ public final class StorageSpawnManager
    * 服务从重载时间重新起算，不能根据很久以前的 firstDueAt 追补历史班次。
    */
   @Override
-  public void restoreForReplacement(
+  public synchronized void restoreForReplacement(
       ReplacementSnapshot snapshot, List<SpawnTicket> additionalTickets, Instant restoredAt) {
     ReplacementSnapshot safeSnapshot =
         snapshot == null ? new ReplacementSnapshot(List.of(), Map.of(), 0L) : snapshot;
@@ -212,14 +217,17 @@ public final class StorageSpawnManager
       }
       ServiceState state = states.get(ticket.service().key());
       if (state != null && state.nextDueAt == null) {
-        state.nextDueAt = restoreBase.plus(ticket.service().baseHeadway());
+        ticket
+            .service()
+            .baseHeadway()
+            .ifPresent(headway -> state.nextDueAt = restoreBase.plus(headway));
       }
     }
     globalSequence = Math.max(globalSequence, safeSnapshot.nextSequence());
   }
 
   @Override
-  public SpawnResetResult reset(Instant now) {
+  public synchronized SpawnResetResult reset(Instant now) {
     int queueSize = queue.size();
     int stateSize = states.size();
     queue.clear();
@@ -240,7 +248,8 @@ public final class StorageSpawnManager
    * <p>注意：该列表不进入真实队列，不会影响实际出车与 backlog。
    */
   @Override
-  public List<SpawnTicket> snapshotForecast(Instant now, Duration horizon, int maxPerService) {
+  public synchronized List<SpawnTicket> snapshotForecast(
+      Instant now, Duration horizon, int maxPerService) {
     if (now == null || horizon == null || horizon.isZero() || horizon.isNegative()) {
       return List.of();
     }
@@ -255,14 +264,14 @@ public final class StorageSpawnManager
     Instant cutoff = now.plus(horizon);
     List<SpawnTicket> out = new ArrayList<>();
     for (SpawnService service : planSnapshot.services()) {
-      if (service == null) {
+      if (service == null || service.baseHeadway().isEmpty()) {
         continue;
       }
       Instant nextDueAt = resolveForecastStart(service, now);
       if (nextDueAt.isAfter(cutoff)) {
         continue;
       }
-      Duration headway = service.baseHeadway();
+      Duration headway = service.baseHeadway().orElseThrow();
       Instant due = nextDueAt;
       int count = 0;
       long seq = 0;
@@ -385,7 +394,7 @@ public final class StorageSpawnManager
       nextDueAt = initialDueAt(service, now);
     }
     if (nextDueAt.isBefore(now)) {
-      nextDueAt = alignToNextSlot(nextDueAt, now, service.baseHeadway());
+      nextDueAt = alignToNextSlot(nextDueAt, now, service.baseHeadway().orElseThrow());
     }
     return nextDueAt;
   }
@@ -452,7 +461,7 @@ public final class StorageSpawnManager
    * <p>票据追赶由外层轮转多轮完成，这样在 {@code maxGeneratePerTick} 较小时，长期积压的第一条服务不会独占全部生成预算。
    */
   private boolean tryGenerateOneTicket(SpawnService service, Instant now) {
-    if (service == null) {
+    if (service == null || service.baseHeadway().isEmpty()) {
       return false;
     }
     ServiceState state = states.computeIfAbsent(service.key(), key -> new ServiceState());
@@ -476,7 +485,7 @@ public final class StorageSpawnManager
             Optional.empty());
     queue.add(ticket);
     state.backlog++;
-    state.nextDueAt = dueAt.plus(service.baseHeadway());
+    state.nextDueAt = dueAt.plus(service.baseHeadway().orElseThrow());
     return true;
   }
 
@@ -654,6 +663,22 @@ public final class StorageSpawnManager
     Map<String, List<RouteSelection>> byGroup = new HashMap<>();
     for (RouteSelection selection : selections) {
       if (selection == null) {
+        continue;
+      }
+      if (RouteDispatchMetadata.enabled(selection.route())) {
+        services.add(
+            new SpawnService(
+                new SpawnServiceKey(selection.route().id()),
+                company.id(),
+                company.code(),
+                operator.id(),
+                operator.code(),
+                line.id(),
+                line.code(),
+                selection.route().id(),
+                selection.route().code(),
+                Optional.empty(),
+                selection.depotNodeId()));
         continue;
       }
       String group = resolveCirculationGroupKey(line, selection);
@@ -938,26 +963,10 @@ public final class StorageSpawnManager
     return stationKey.orElse(normalized);
   }
 
+  /** DYNAMIC 起点的分组键：站（车库）一级的 {@code op:s/d:name}，与选台、终点匹配同一个解析器。 */
   private static Optional<String> parseDynamicGroupKey(String dynamicSpec) {
-    if (dynamicSpec == null || dynamicSpec.isBlank()) {
-      return Optional.empty();
-    }
-    String normalized = dynamicSpec.trim().toLowerCase(Locale.ROOT);
-    if (!normalized.startsWith("dynamic:")) {
-      return Optional.empty();
-    }
-    String rest = normalized.substring("dynamic:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3) {
-      return Optional.empty();
-    }
-    String operator = parts[0].trim();
-    String type = parts[1].trim();
-    String name = parts[2].trim();
-    if (operator.isBlank() || type.isBlank() || name.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.of(operator + ":" + type + ":" + name);
+    return DynamicStopMatcher.parseDynamicSpec(dynamicSpec)
+        .map(DynamicStopMatcher.DynamicSpec::toTerminalKey);
   }
 
   private Optional<String> readString(Map<String, Object> meta, String key) {
@@ -1005,6 +1014,20 @@ public final class StorageSpawnManager
     }
     List<RouteSelection> operationCandidates = new ArrayList<>();
     List<RouteSelection> createCandidates = new ArrayList<>();
+    Map<UUID, List<RouteStop>> stopsByRoute = new HashMap<>();
+    Set<String> decoupleTargets = new HashSet<>();
+    for (Route route : routes) {
+      if (route == null) {
+        continue;
+      }
+      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      stopsByRoute.put(route.id(), stops);
+      for (RouteStop stop : stops) {
+        RouteCouplingDirectives.decouple(stop)
+            .flatMap(RouteCouplingDirectives.Decouple::target)
+            .ifPresent(target -> decoupleTargets.add(target.toLowerCase(Locale.ROOT)));
+      }
+    }
     for (Route route : routes) {
       if (route == null) {
         continue;
@@ -1013,8 +1036,14 @@ public final class StorageSpawnManager
           && route.operationType() != RouteOperationType.CREATE) {
         continue;
       }
-      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      List<RouteStop> stops = stopsByRoute.getOrDefault(route.id(), List.of());
       if (stops.isEmpty()) {
+        continue;
+      }
+      if (decoupleTargets.contains(route.code().toLowerCase(Locale.ROOT))) {
+        // 解编 GOTO 指向的交路由解下的车跑，不单独发车
+        debugLogger.accept(
+            "SpawnPlan 跳过解编目标 route: line=" + line.code() + " route=" + route.code());
         continue;
       }
       RouteStop first = stops.get(0);
@@ -1237,8 +1266,7 @@ public final class StorageSpawnManager
       return stop.waypointNodeId().get();
     }
     // 尝试解析 DYNAMIC
-    Optional<org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.DynamicSpec> specOpt =
-        org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.parseDynamicSpec(stop);
+    Optional<DynamicStopMatcher.DynamicSpec> specOpt = DynamicStopMatcher.parseDynamicSpec(stop);
     if (specOpt.isPresent()) {
       return specOpt.get().toPlaceholderNodeId();
     }

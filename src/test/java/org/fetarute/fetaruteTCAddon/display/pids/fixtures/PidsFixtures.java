@@ -8,6 +8,7 @@ import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutParser;
+import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 
 /** 站台屏测试夹具。 */
 public final class PidsFixtures {
@@ -20,6 +21,10 @@ public final class PidsFixtures {
    * @throws IllegalStateException 布局有问题（内置布局必须合法）
    */
   public static PidsLayout builtInLayout(String id) {
+    String original = PidsLayoutRegistry.MIRRORED.get(id);
+    if (original != null) {
+      return PidsLayoutRegistry.mirror(id, builtInLayout(original));
+    }
     return parse(id, builtInText(id));
   }
 

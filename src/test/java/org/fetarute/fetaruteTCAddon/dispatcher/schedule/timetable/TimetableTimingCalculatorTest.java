@@ -116,6 +116,65 @@ class TimetableTimingCalculatorTest {
         result.stops().stream().map(TimetableStop::stationCode).toList());
   }
 
+  /**
+   * 出库后第一站：AutoStation 给车门附件与动画预热，停稳后比中途站多等一会儿才开门（dwell 从开门起算），表上这一站多算这几秒；
+   * 之后的车站、以及从车站出发（接续运行，早已开过门）的交路不加。
+   */
+  @Test
+  void theFirstStationAfterTheDepotWaitsLongerForTheDoors() {
+    RunTimeModel base = RunTimeModel.perEdge(RailTravelTimeModels.constantSpeed(10.0));
+    RunTimeModel model =
+        new RunTimeModel() {
+          @Override
+          public Optional<double[]> nodeTimes(RailGraph graph, RunTimeModel.Run run) {
+            return base.nodeTimes(graph, run);
+          }
+
+          @Override
+          public int stationStopOverheadSeconds() {
+            return 1;
+          }
+
+          @Override
+          public int firstStationStopExtraSeconds() {
+            return 2;
+          }
+        };
+    List<String> fromDepot = List.of("OP:D:AAA:1", "OP:S:BBB:1", "OP:S:CCC:1", "OP:S:DDD:1");
+    TimetableTimingCalculator.TimingResult depotRun =
+        new TimetableTimingCalculator()
+            .compute(
+                TimetableTestFixtures.chain(
+                    fromDepot,
+                    List.of(NodeType.DEPOT, NodeType.STATION, NodeType.STATION, NodeType.STATION),
+                    new int[] {100, 100, 100},
+                    new double[] {10, 10, 10}),
+                model,
+                TimetableTestFixtures.route("R1", fromDepot),
+                TimetableTestFixtures.stops(ROUTE, 4, 20),
+                Duration.ZERO);
+    assertTrue(depotRun.ok(), () -> depotRun.failure().toString());
+    assertEquals(20 + 1 + 2, stopSeconds(depotRun.stops().get(1)), "出库后第一站多等开门");
+    assertEquals(20 + 1, stopSeconds(depotRun.stops().get(2)), "之后的车站照常");
+
+    List<String> fromStation = List.of("OP:S:BBB:1", "OP:S:CCC:1", "OP:S:DDD:1");
+    TimetableTimingCalculator.TimingResult stationRun =
+        new TimetableTimingCalculator()
+            .compute(
+                TimetableTestFixtures.chain(
+                    fromStation, new int[] {100, 100}, new double[] {10, 10}),
+                model,
+                TimetableTestFixtures.route("R2", fromStation),
+                TimetableTestFixtures.stops(ROUTE, 3, 20),
+                Duration.ZERO);
+    assertTrue(stationRun.ok(), () -> stationRun.failure().toString());
+    assertEquals(20 + 1, stopSeconds(stationRun.stops().get(1)), "从车站出发的车早已开过门");
+  }
+
+  private static int stopSeconds(TimetableStop stop) {
+    return stop.departureOffsetSeconds() - stop.arrivalOffsetSeconds();
+  }
+
   /** 单一限速：时分 = 长度 / 限速，停站单独叠加。 */
   @Test
   void singleSpeedLimitSegment() {
@@ -342,10 +401,10 @@ class TimetableTimingCalculatorTest {
   }
 
   /**
-   * 走行从静止起步：100 格、限速 10、加速度 1。恒加速度时 10 秒加到限速、共 15 秒；S 形起步（{@code SpeedCurve}） 起步与到速两端渐变，约 15.6 秒，取整
-   * 16。
+   * 走行从静止起步、到站刹停：100 格、限速 10、加减速 1。恒加减速度时各 10 秒加到限速、刹到 0，共 20 秒；S 形（{@code SpeedCurve}） 两端渐变，约 21.4
+   * 秒，与区间停车点（{@link #waypointStopBrakesToStandstill}）相同。
    *
-   * <p>旧口径每站都按限速"飞"出去，同一段只算 10 秒——实服 32 个站间区段合计少算了 42%，少的就是这一段起步。
+   * <p>旧口径每站都按限速"飞"出去，同一段只算 10 秒——实服 32 个站间区段合计少算了 42%，少的就是起步与刹停。
    */
   @Test
   void runCurveStartsFromRest() {
@@ -364,30 +423,30 @@ class TimetableTimingCalculatorTest {
                 Duration.ZERO);
 
     assertTrue(result.ok(), () -> result.failure().toString());
-    assertEquals(16, result.stops().get(1).arrivalOffsetSeconds());
+    assertEquals(21, result.stops().get(1).arrivalOffsetSeconds());
   }
 
   /**
-   * 进站限速区从"离触发节点不超过窗口的第一个图节点"起算，与运行时逐节点判断同一口径。
+   * 进站限速区从"离触发节点不超过窗口的第一个图节点"起算，与运行时逐节点判断同一口径。车站没有进站限速区，这里用车库（进库限速 10）。
    *
-   * <p>A→M 150 格、M→B 50 格，限速 20，B 前 50 格内限 10，加减速都是 1：起步加速、在 M 前按 S 形制动降到 10，M→B 按 10 走 5 秒。M 约
-   * 19.3 秒，B 约 24.3 秒（恒加减速度时为 18.3 / 23.3）。
+   * <p>A→M 150 格、M→车库 50 格，限速 20，车库前 50 格内限 10，加减速都是 1：起步加速、在 M 前按 S 形制动降到 10，M→车库按 10 走 5 秒。M 约
+   * 19.1 秒，车库约 24.1 秒（恒加减速度时为 18.3 / 23.3）。
    */
   @Test
   void approachWindowStartsAtTheFirstGraphNodeWithinReach() {
     RailGraph graph =
         TimetableTestFixtures.chain(
-            List.of("OP:S:A:1", "OP:A:B:1:001", "OP:S:B:1"),
-            List.of(NodeType.STATION, NodeType.WAYPOINT, NodeType.STATION),
+            List.of("OP:S:A:1", "OP:A:B:1:001", "OP:D:B:1"),
+            List.of(NodeType.STATION, NodeType.WAYPOINT, NodeType.DEPOT),
             new int[] {150, 50},
             new double[] {20.0, 20.0});
-    RouteDefinition route = TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:S:B:1"));
+    RouteDefinition route = TimetableTestFixtures.route("R1", List.of("OP:S:A:1", "OP:D:B:1"));
 
     TimetableTimingCalculator.TimingResult result =
         new TimetableTimingCalculator()
             .compute(
                 graph,
-                curve(new StopApproach.Rule(50.0, 0, 10.0, 5.0), 0),
+                curve(new StopApproach.Rule(50.0, 0, 5.0, 10.0), 0),
                 route,
                 TimetableTestFixtures.stops(ROUTE, 2, 20),
                 Duration.ZERO);
@@ -400,8 +459,9 @@ class TimetableTimingCalculatorTest {
   /**
    * 途中的 PASS 点不打断走行：车按线路速度开过去，不在那里起步第二次。
    *
-   * <p>A→W→B 各 100 格、限速 10、加减速 1：W 是 PASS 时一次起步，W 约 15.6 秒、B 约 25.6 秒到。W 若是区间停车点（停 0 秒）， 车要在 W
-   * 前刹停再重新起步：A→W 约 22.1 秒（刹到 0 两端柔和），W→B 再约 15.6 秒，B 在 22 + 16 = 38 秒到。
+   * <p>A→W→B 各 100 格、限速 10、加减速 1，B 是车站、刹到 0：W 是 PASS 时一次起步，W 约 15.6 秒、B 约 32.1 秒到（比按线路速度开到 B 多出
+   * 刹停的约 6.5 秒）。W 若是区间停车点（停 0 秒），车要在 W 前刹停再重新起步：A→W 约 22.1 秒（刹到 0 两端柔和），W→B 同样约 22.1 秒，B 在 22 + 22
+   * = 44 秒到。
    */
   @Test
   void passWaypointsDoNotSplitTheRun() {
@@ -437,12 +497,12 @@ class TimetableTimingCalculatorTest {
 
     assertEquals(16, passing.stops().get(1).arrivalOffsetSeconds(), "W 按线路速度通过");
     assertEquals(16, passing.stops().get(1).departureOffsetSeconds());
-    assertEquals(26, passing.stops().get(2).arrivalOffsetSeconds());
-    assertEquals(22, stopping.stops().get(1).arrivalOffsetSeconds(), "W 前刹停到 0");
-    assertEquals(38, stopping.stops().get(2).arrivalOffsetSeconds(), "W 之后重新起步");
+    assertEquals(31, passing.stops().get(2).arrivalOffsetSeconds());
+    assertEquals(21, stopping.stops().get(1).arrivalOffsetSeconds(), "W 前刹停到 0");
+    assertEquals(42, stopping.stops().get(2).arrivalOffsetSeconds(), "W 之后重新起步");
   }
 
-  /** 区间停车点由调度层在节点处刹停，终点速度为 0：100 格、限速 10、加减速 1，S 形起步与刹停约 22.1 秒（恒加减速度时 20 秒）。 */
+  /** 区间停车点由调度层在节点处刹停，终点速度为 0：100 格、限速 10、加减速 1，S 形起步与刹停约 21.4 秒（恒加减速度时 20 秒）。 */
   @Test
   void waypointStopBrakesToStandstill() {
     RailGraph graph =
@@ -462,7 +522,7 @@ class TimetableTimingCalculatorTest {
                 TimetableTestFixtures.stops(ROUTE, 2, 20),
                 Duration.ZERO);
 
-    assertEquals(22, result.stops().get(1).arrivalOffsetSeconds());
+    assertEquals(21, result.stops().get(1).arrivalOffsetSeconds());
   }
 
   /**

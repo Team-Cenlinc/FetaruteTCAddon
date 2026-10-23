@@ -499,7 +499,8 @@ public final class RailGraphBuildJob implements Runnable, RailGraphBuildTask {
       }
       RailBlockPos center = new RailBlockPos(node.x(), node.y(), node.z());
       int anchorRadius = resolveAnchorRadius(node.nodeType());
-      Set<RailBlockPos> anchors = currentAccess.findNearestRailBlocks(center, anchorRadius);
+      Set<RailBlockPos> anchors =
+          currentAccess.findNodeRailAnchors(center, node.nodeType(), anchorRadius);
       if (anchors.isEmpty()) {
         missingAnchors++;
         continue;
@@ -538,7 +539,8 @@ public final class RailGraphBuildJob implements Runnable, RailGraphBuildTask {
             anchorIndex,
             switcherNodes,
             EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
-            debugLogger);
+            debugLogger,
+            plugin.getLogger()::warning);
 
     // 添加所有节点作为探索起点
     for (Map.Entry<NodeId, Set<RailBlockPos>> entry : anchorsByNode.entrySet()) {
@@ -586,7 +588,7 @@ public final class RailGraphBuildJob implements Runnable, RailGraphBuildTask {
     for (RailNodeRecord node : discovered) {
       RailBlockPos center = new RailBlockPos(node.x(), node.y(), node.z());
       Set<RailBlockPos> anchors =
-          access.findNearestRailBlocks(center, resolveAnchorRadius(node.nodeType()));
+          access.findNodeRailAnchors(center, node.nodeType(), resolveAnchorRadius(node.nodeType()));
       if (anchors.isEmpty()) {
         continue;
       }

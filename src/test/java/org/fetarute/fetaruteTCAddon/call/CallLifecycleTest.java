@@ -60,14 +60,18 @@ class CallLifecycleTest {
     assertTrue(CallService.acceptsStandby(turnback, true, BOUND, id -> false), "留给的那一单没了就当普通的叫来的车");
   }
 
-  /** 折返车在终点就绪满 90 秒还没被接走算等太久；正在交接的不算。 */
+  /** 折返车在终点就绪满 call.turnback-hold-seconds（默认 90 秒）还没被接走算等太久；正在交接的不算；设为 0 不设上限。 */
   @Test
   void aTurnbackIsHeldForAtMostTheHoldTime() {
     LayoverRegistry.LayoverCandidate waiting = candidate("tb-1", Map.of());
-    Instant limit = T.plus(CallService.TURNBACK_HOLD);
+    Duration hold = Duration.ofSeconds(90);
+    Instant limit = T.plus(hold);
 
-    assertFalse(CallService.turnbackHeldTooLong(waiting, limit));
-    assertTrue(CallService.turnbackHeldTooLong(waiting, limit.plusSeconds(1)));
+    assertFalse(CallService.turnbackHeldTooLong(waiting, limit, hold));
+    assertTrue(CallService.turnbackHeldTooLong(waiting, limit.plusSeconds(1), hold));
+    assertFalse(
+        CallService.turnbackHeldTooLong(waiting, limit.plusSeconds(3600), Duration.ZERO),
+        "设为 0 时等到叫车超时");
     assertFalse(
         CallService.turnbackHeldTooLong(
             new LayoverRegistry.LayoverCandidate(
@@ -77,9 +81,10 @@ class CallLifecycleTest {
                 T,
                 Map.of(),
                 Optional.of(new LayoverRegistry.DispatchAttempt("ticket", "tb-1", limit))),
-            limit.plusSeconds(1)),
+            limit.plusSeconds(1),
+            hold),
         "这一单的票正在接它");
-    assertFalse(CallService.turnbackHeldTooLong(null, limit.plusSeconds(1)));
+    assertFalse(CallService.turnbackHeldTooLong(null, limit.plusSeconds(1), hold));
   }
 
   /** 回库途中：跑在回库交路上、又不是这一趟叫车跑的交路。叫车方向本身是回库交路时那一趟照常算叫来的车。 */

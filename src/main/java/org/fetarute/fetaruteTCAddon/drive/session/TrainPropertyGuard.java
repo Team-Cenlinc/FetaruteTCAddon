@@ -11,7 +11,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
  * <p>手动驾驶由我们自己积分速度，所以要关掉 TrainCarts 的自然减速（否则与惰行阻力叠加），并把速度上限抬到列车的最高速度（TrainCarts 默认上限很低）。
  * 调整前的原值写进列车标签：服务器在会话中途崩溃时标签随列车保存，下一次驾驶或还原会沿用这份原值，而不是把调整后的值当作原值。
  */
-final class TrainPropertyGuard {
+public final class TrainPropertyGuard {
 
   static final String TAG_SLOWDOWN = "FTA_DRIVE_SLOWDOWN_ORIG";
   static final String TAG_SPEED_LIMIT = "FTA_DRIVE_SPEEDLIMIT_ORIG";
@@ -36,8 +36,8 @@ final class TrainPropertyGuard {
     }
   }
 
-  /** 还原留存的原值并清掉标签。没有留存（从未应用过）时什么也不做。 */
-  static void restore(TrainProperties properties) {
+  /** 还原留存的原值并清掉标签。没有留存（从未应用过）时什么也不做。拆分时拆下的一半照搬了原车改过的属性与留存，也用它还原。 */
+  public static void restore(TrainProperties properties) {
     restore(properties, OptionalDouble.empty());
   }
 

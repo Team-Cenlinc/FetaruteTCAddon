@@ -123,7 +123,8 @@ public final class SpeedCeiling {
     double fraction = position - index;
     double from = speeds[index];
     double to = speeds[index + 1];
-    return Math.sqrt(from * from + (to * to - from * from) * fraction);
+    // 末速度为 0、fraction 贴近 1 时舍入可能得到极小的负数：开方前截到 0。
+    return Math.sqrt(Math.max(0.0, from * from + (to * to - from * from) * fraction));
   }
 
   /**

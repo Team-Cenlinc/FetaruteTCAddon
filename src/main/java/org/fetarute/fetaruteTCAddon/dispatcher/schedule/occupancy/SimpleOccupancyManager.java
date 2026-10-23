@@ -74,6 +74,9 @@ public final class SimpleOccupancyManager
       switcherQueueSignatures = new LinkedHashMap<>();
   private final AtomicLong version = new AtomicLong();
 
+  /** 同股道列车对的豁免；拆挂服务启用时接入，停用时恢复为 {@link CoLocationPolicy#NONE}。 */
+  private volatile CoLocationPolicy coLocationPolicy = CoLocationPolicy.NONE;
+
   /** 净变化统计（见 {@link #netChangeVersion()}）：窗口嵌套层数、开窗时的语义指纹、已计入的原始版本、净变化版本。 */
   private int netChangeWindowDepth;
 
@@ -595,6 +598,34 @@ public final class SimpleOccupancyManager
   }
 
   /**
+   * 接入同股道列车对的豁免（见 {@link CoLocationPolicy}）；{@code null} 恢复为没有。
+   *
+   * @param policy 豁免策略
+   */
+  public void setCoLocationPolicy(CoLocationPolicy policy) {
+    coLocationPolicy = policy == null ? CoLocationPolicy.NONE : policy;
+  }
+
+  @Override
+  public boolean exemptsCoLocated(
+      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
+    return coLocatedPartner(request, resource, claim);
+  }
+
+  /** 这条别的列车的占用是同股道列车对的共用占用、且请求方正背向对方走：不挡请求方。策略出错时按挡处理。 */
+  private boolean coLocatedPartner(
+      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
+    if (request == null || resource == null || claim == null) {
+      return false;
+    }
+    try {
+      return coLocationPolicy.exempts(request, resource, claim);
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  /**
    * 原子替换单列现场逻辑保护与稀疏物理 footprint，同时保留所有其它 owner 的 claim 与排队状态。
    *
    * <p>全部校验与 claim 构建在修改 live map 之前完成；进入提交段后方法受同一 monitor 保护，外部观察不到“先删后加”的中间状态。现场重叠仍会保留多个 {@link
@@ -740,6 +771,9 @@ public final class SimpleOccupancyManager
             return traceDecision(
                 "canEnter:self-owned-single-opposite-direction", request, selfBlocked.get());
           }
+          continue;
+        }
+        if (coLocatedPartner(request, resource, claim)) {
           continue;
         }
         if (singleRegionOppositeOrUnknownExternalBarrier(request, resource, claim)) {
@@ -945,6 +979,9 @@ public final class SimpleOccupancyManager
             return traceDecision(
                 "canEnterPreview:self-owned-single-opposite-direction", request, selfBlocked.get());
           }
+          continue;
+        }
+        if (coLocatedPartner(request, resource, claim)) {
           continue;
         }
         if (singleRegionOppositeOrUnknownExternalBarrier(request, resource, claim)) {
@@ -2688,6 +2725,15 @@ public final class SimpleOccupancyManager
     return Optional.ofNullable(list.get(0));
   }
 
+  @Override
+  public synchronized List<OccupancyClaim> claimsOn(OccupancyResource resource) {
+    if (resource == null) {
+      return List.of();
+    }
+    List<OccupancyClaim> list = claims.get(resource);
+    return list == null || list.isEmpty() ? List.of() : List.copyOf(list);
+  }
+
   /**
    * 获取全部占用快照。
    *
@@ -3796,6 +3842,10 @@ public final class SimpleOccupancyManager
     if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
       return false;
     }
+    // 与 canEnter 同一口径：硬授权放行的同股道列车对、联挂进站的对方，前瞻也不当成前方风险
+    if (coLocatedPartner(request, resource, claim)) {
+      return false;
+    }
     ClaimRole role = claim.role();
     if (role == ClaimRole.LOOKAHEAD_PREVIEW
         || role == ClaimRole.QUEUE_POSITION
@@ -4768,7 +4818,8 @@ public final class SimpleOccupancyManager
     }
     for (OccupancyClaim claim : existing) {
       if (claim == null
-          || TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+          || TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())
+          || coLocatedPartner(request, resource, claim)) {
         continue;
       }
       addUniqueClaim(blockers, claim);
@@ -4856,8 +4907,9 @@ public final class SimpleOccupancyManager
           traceSelfOwnedBlockerFiltered(request, resource, claim, "SELF_OWNED_BLOCKER_FILTERED");
           continue;
         }
-        if (BlockerClassifier.classify(request, resource, claim)
-            == BlockerRelation.STALE_PROTECTIVE_CLAIM) {
+        BlockerRelation relation = BlockerClassifier.classify(request, resource, claim);
+        if (relation == BlockerRelation.STALE_PROTECTIVE_CLAIM
+            || coLocatedPartner(request, resource, claim)) {
           continue;
         }
         if (ignoreSameDirectionFront
@@ -4890,7 +4942,8 @@ public final class SimpleOccupancyManager
     if (existing != null) {
       for (OccupancyClaim claim : existing) {
         if (claim != null
-            && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+            && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())
+            && !coLocatedPartner(request, resource, claim)) {
           return true;
         }
       }
@@ -4928,6 +4981,9 @@ public final class SimpleOccupancyManager
         }
         continue;
       }
+      if (coLocatedPartner(request, resource, claim)) {
+        continue;
+      }
       CorridorDirection claimDirection =
           claim.corridorDirection().orElse(CorridorDirection.UNKNOWN);
       if (claimDirection == CorridorDirection.UNKNOWN || claimDirection != requestedDirection) {
@@ -4958,7 +5014,8 @@ public final class SimpleOccupancyManager
     if (existing != null) {
       for (OccupancyClaim claim : existing) {
         if (claim != null
-            && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+            && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())
+            && !coLocatedPartner(request, resource, claim)) {
           return "claim:" + claim.trainName() + "@" + claim.role();
         }
       }

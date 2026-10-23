@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.PlatformStyle
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.RowStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsBulletinView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDivisionView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
@@ -81,6 +82,12 @@ public final class PidsRenderer {
   private static final int VACANCY_FOOT_TOP = 88;
 
   private static final int VACANCY_CHIP = 8;
+
+  /** 解编页：站台线与分段括号之间的空隙。 */
+  private static final int DIVISION_BRACKET_GAP = 3;
+
+  /** 解编页：分段括号的高度（两端竖线连底边）。 */
+  private static final int DIVISION_BRACKET = 4;
 
   /** 空位页首行的色牌样式（布局没有到发表时用）。 */
   private static final BadgeStyle VACANCY_BADGE = new BadgeStyle(42, 28, 24, 12, 10, 1, 0);
@@ -483,6 +490,246 @@ public final class PidsRenderer {
   }
 
   /**
+   * 解编页（站台屏轮播的一页，与空位页同一位置）：下一班列车在本站或前方某站分行（分开运行）时，画出整列车并按去向分段。
+   *
+   * <ul>
+   *   <li>第一行：线路色牌与标题（“本次列车在 XX 分行”，中英两行，放不下改小一号再省略）；右侧多久到达，与空位页相同。色牌、标题与多久到达三者上下居中对齐。
+   *   <li>列车：与空位页同一画法（等宽圆角车厢、车头小窗、短编组居中）。留下继续本交路的一段用线路色实心，解下另走的一段空心描线路色， 不靠颜色区分。
+   *   <li>站台线：车厢下方一条线。
+   *   <li>分段：站台线下方每段一个括号，括号下写这一段开往哪里（中英两行，对着这一段居中，相邻两段挤不下时往两边让）。色带与主页同一位置。
+   * </ul>
+   */
+  public BufferedImage renderDivision(PidsLayout layout, PidsDivisionView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    int width = layout.width();
+    Optional<PidsLayout.LineBand> band = lineBand(layout);
+    BadgeStyle badgeStyle =
+        layout
+            .departures()
+            .filter(d -> !d.rows().isEmpty())
+            .map(d -> d.rows().get(0).badge())
+            .orElse(VACANCY_BADGE);
+    boolean frontRight = view.front().filter(PidsVacancyView.Front.RIGHT::equals).isPresent();
+    return paint(
+        width,
+        layout.height(),
+        view.theme(),
+        layout.boldFrom(),
+        p -> {
+          int left = VACANCY_INSET;
+          int right = width - VACANCY_INSET;
+          // 色牌、标题（中英两行）与多久到达（中英两行）三者上下居中对齐
+          int arrivalHeight = CARD_TITLE + 2 + CARD_SMALL;
+          int headerHeight = Math.max(badgeStyle.height(), arrivalHeight);
+          int center = VACANCY_TOP + headerHeight / 2;
+          drawBadgeAt(p, left, center - badgeStyle.height() / 2, badgeStyle, view.badge());
+          int titleRight =
+              drawStackedArrival(
+                  p,
+                  view.arrival(),
+                  view.minutes(),
+                  new TextStyle(CARD_TITLE, CARD_SMALL, 2),
+                  VACANCY_NUMBER,
+                  NOTICE_GAP,
+                  0,
+                  right,
+                  center - arrivalHeight / 2);
+          int titleX = left + badgeStyle.width() + VACANCY_INSET;
+          int titleWidth = titleRight - VACANCY_INSET - titleX;
+          int titleSize =
+              p.width(view.title().primary(), CARD_TITLE) <= titleWidth ? CARD_TITLE : CARD_TEXT;
+          boolean english = !view.title().secondary().isBlank();
+          int titleHeight = titleSize + (english ? 2 + CARD_SMALL : 0);
+          int titleTop = center - titleHeight / 2;
+          p.text(
+              p.ellipsize(view.title().primary(), titleSize, titleWidth),
+              titleSize,
+              titleX,
+              titleTop,
+              p.theme.text());
+          if (english) {
+            p.regular(
+                p.ellipsizeWords(view.title().secondary(), CARD_SMALL, titleWidth),
+                CARD_SMALL,
+                titleX,
+                titleTop + titleSize + 2,
+                p.theme.muted(),
+                false);
+          }
+          List<int[]> spans =
+              drawDividedTrain(p, view.segments(), view.badge().color(), frontRight, left, right);
+          int platformTop = VACANCY_TRAIN_TOP + VACANCY_CAR_HEIGHT + VACANCY_PLATFORM_GAP;
+          p.fill(left, platformTop, right - left, VACANCY_PLATFORM, p.theme.muted());
+          drawSegmentLabels(p, view.segments(), spans, platformTop + VACANCY_PLATFORM, left, right);
+          band.ifPresent(found -> drawLineBand(p, found, view.bandColors()));
+        });
+  }
+
+  /**
+   * 分段的列车示意图：几何与空位页相同。留下的一段实心（线路色），解下的一段空心（描线路色）。
+   *
+   * @return 各段在屏幕上的左右缘（与 {@code segments} 同序）
+   */
+  private List<int[]> drawDividedTrain(
+      Painter p,
+      List<PidsDivisionView.Segment> segments,
+      int color,
+      boolean frontRight,
+      int left,
+      int right) {
+    int count = segments.stream().mapToInt(PidsDivisionView.Segment::cars).sum();
+    List<int[]> spans = new ArrayList<>();
+    if (count <= 0) {
+      return spans;
+    }
+    int available = right - left;
+    int gap = VACANCY_CAR_GAP;
+    int widest = (available - (VACANCY_FULL_TRAIN - 1) * gap) / VACANCY_FULL_TRAIN;
+    int carWidth = Math.min(widest, (available - (count - 1) * gap) / count);
+    if (carWidth < 6) {
+      gap = 1;
+      carWidth = (available - (count - 1) * gap) / count;
+    }
+    if (carWidth < 2) {
+      return spans;
+    }
+    // 已经拆开的两段之间留空：占三节之间的间距，从车厢宽度里匀出来
+    int splits = (int) segments.stream().filter(PidsDivisionView.Segment::gapBefore).count();
+    int split = gap * 3;
+    if (splits > 0) {
+      carWidth = Math.min(carWidth, (available - (count - 1) * gap - splits * split) / count);
+    }
+    int trainWidth = count * carWidth + (count - 1) * gap + splits * split;
+    int start = left + (available - trainWidth) / 2;
+    int top = VACANCY_TRAIN_TOP;
+    int height = VACANCY_CAR_HEIGHT;
+    int background = p.theme.background();
+    // 空心段只有 1 像素描边：线路色与底色对比不够（浅色主题上的浅色线路）时改用正文色
+    int stroke = contrast(color, background) >= 3.0 ? color : p.theme.text();
+    int index = 0;
+    int offset = 0;
+    for (PidsDivisionView.Segment segment : segments) {
+      if (segment.gapBefore() && index > 0) {
+        offset += split;
+      }
+      int spanLeft = Integer.MAX_VALUE;
+      int spanRight = Integer.MIN_VALUE;
+      for (int k = 0; k < segment.cars(); k++, index++) {
+        int slot = index * (carWidth + gap) + offset;
+        int x = frontRight ? start + trainWidth - slot - carWidth : start + slot;
+        spanLeft = Math.min(spanLeft, x);
+        spanRight = Math.max(spanRight, x + carWidth);
+        int outline =
+            switch (segment.style()) {
+              case SOLID -> color;
+              case HOLLOW, DASHED -> stroke;
+              case INACTIVE -> p.theme.muted();
+            };
+        if (segment.style() == PidsDivisionView.Style.SOLID) {
+          p.fill(x, top, carWidth, height, color);
+        } else if (segment.style() == PidsDivisionView.Style.HOLLOW) {
+          p.fill(x, top, carWidth, height, outline);
+          p.fill(x + 1, top + 1, carWidth - 2, height - 2, background);
+        } else {
+          drawDashedBox(p, x, top, carWidth, height, outline);
+        }
+        p.fill(x, top, 1, 1, background);
+        p.fill(x + carWidth - 1, top, 1, 1, background);
+        p.fill(x, top + height - 1, 1, 1, background);
+        p.fill(x + carWidth - 1, top + height - 1, 1, 1, background);
+        if (index == 0) {
+          int windowWidth = Math.min(VACANCY_WINDOW_WIDTH, carWidth / 4);
+          int windowX =
+              frontRight
+                  ? x + carWidth - VACANCY_WINDOW_INSET - windowWidth
+                  : x + VACANCY_WINDOW_INSET;
+          p.fill(
+              windowX,
+              top + VACANCY_WINDOW_INSET,
+              windowWidth,
+              VACANCY_WINDOW_HEIGHT,
+              segment.style() == PidsDivisionView.Style.SOLID ? background : outline);
+        }
+      }
+      spans.add(new int[] {spanLeft, spanRight});
+    }
+    return spans;
+  }
+
+  /** 1 像素虚线框：2 像素画、1 像素空，四边各自从角上起画。 */
+  private static void drawDashedBox(Painter p, int x, int y, int width, int height, int color) {
+    for (int i = 0; i < width; i++) {
+      if (i % 3 != 2) {
+        p.fill(x + i, y, 1, 1, color);
+        p.fill(x + i, y + height - 1, 1, 1, color);
+      }
+    }
+    for (int j = 0; j < height; j++) {
+      if (j % 3 != 2) {
+        p.fill(x, y + j, 1, 1, color);
+        p.fill(x + width - 1, y + j, 1, 1, color);
+      }
+    }
+  }
+
+  /** 两色的对比度（WCAG 口径）。 */
+  private static double contrast(int first, int second) {
+    double a = PidsTheme.relativeLuminance(first);
+    double b = PidsTheme.relativeLuminance(second);
+    return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+  }
+
+  /** 站台线下方每段一个括号，括号下写这一段开往哪里；相邻两段挤不下时从左往右依次让开，仍放不下就省略。 */
+  private void drawSegmentLabels(
+      Painter p,
+      List<PidsDivisionView.Segment> segments,
+      List<int[]> spans,
+      int below,
+      int left,
+      int right) {
+    if (spans.size() != segments.size()) {
+      return;
+    }
+    int bracketTop = below + DIVISION_BRACKET_GAP;
+    for (int[] span : spans) {
+      int x0 = span[0] + 1;
+      int x1 = span[1] - 1;
+      p.fill(x0, bracketTop, 1, DIVISION_BRACKET, p.theme.muted());
+      p.fill(x1 - 1, bracketTop, 1, DIVISION_BRACKET, p.theme.muted());
+      p.fill(x0, bracketTop + DIVISION_BRACKET - 1, x1 - x0, 1, p.theme.muted());
+    }
+    // 屏幕上从左往右排：车头在右时段的顺序与屏幕顺序相反
+    List<Integer> order = new ArrayList<>();
+    for (int i = 0; i < spans.size(); i++) {
+      order.add(i);
+    }
+    order.sort(java.util.Comparator.comparingInt(i -> spans.get(i)[0]));
+    int top = VACANCY_FOOT_TOP;
+    int cursor = left;
+    for (int n = 0; n < order.size(); n++) {
+      int i = order.get(n);
+      PidsView.Names names = segments.get(i).destination();
+      int share = n + 1 < order.size() ? spans.get(order.get(n + 1))[0] - cursor : right - cursor;
+      // 不伸过屏幕右缘：前面的标签已把起点推到靠右时，这一段只剩到右缘的宽度
+      int maxWidth = Math.min(Math.max(share, spans.get(i)[1] - spans.get(i)[0]), right - cursor);
+      if (maxWidth <= 0) {
+        continue;
+      }
+      String primary = p.ellipsize(names.primary(), CARD_TEXT, maxWidth);
+      String secondary = p.ellipsizeWords(names.secondary(), CARD_SMALL, maxWidth);
+      int labelWidth = Math.max(p.width(primary, CARD_TEXT), p.regularWidth(secondary, CARD_SMALL));
+      int center = (spans.get(i)[0] + spans.get(i)[1]) / 2;
+      int x = Math.max(cursor, Math.min(center - labelWidth / 2, right - labelWidth));
+      int primaryX = x + (labelWidth - p.width(primary, CARD_TEXT)) / 2;
+      int secondaryX = x + (labelWidth - p.regularWidth(secondary, CARD_SMALL)) / 2;
+      p.text(primary, CARD_TEXT, primaryX, top, p.theme.text());
+      p.regular(secondary, CARD_SMALL, secondaryX, top + CARD_TEXT + 2, p.theme.muted(), false);
+      cursor = x + labelWidth + VACANCY_INSET;
+    }
+  }
+
+  /**
    * 多久到达，与左侧中英文两行等高：
    *
    * <ul>
@@ -545,8 +792,9 @@ public final class PidsRenderer {
             Math.max(
                 p.width(text.primary(), unit.size()),
                 p.regularWidth(text.secondary(), unit.secondarySize()));
-        p.textRight(text.primary(), unit.size(), right, top, p.theme.text());
-        p.regularRight(
+        // 中英文按墨迹右缘对齐：中文字形右边自带留白，按步进宽度对齐时英文会多伸出一两个像素
+        p.textInkRight(text.primary(), unit.size(), right, top, p.theme.text());
+        p.regularInkRight(
             text.secondary(), unit.secondarySize(), right, secondaryTop, p.theme.muted());
         return right - width;
       }
@@ -886,8 +1134,18 @@ public final class PidsRenderer {
       return;
     }
     int box = platform.box();
+    boolean right = platform.align() == PidsLayout.Align.RIGHT;
     for (int i = 0; i < platforms.size(); i++) {
-      int x = platform.x() + (i % platform.perRow()) * (box + platform.gap());
+      int column = i % platform.perRow();
+      int x;
+      if (right) {
+        // 靠右：每行最后一个方块贴右缘（最后一行不满时也贴右缘）
+        int row = i / platform.perRow();
+        int inRow = Math.min(platform.perRow(), platforms.size() - row * platform.perRow());
+        x = platform.x() - (inRow - column) * (box + platform.gap()) + platform.gap();
+      } else {
+        x = platform.x() + column * (box + platform.gap());
+      }
       int y = platform.y() + (i / platform.perRow()) * (box + platform.gap());
       p.fill(x, y, box, box, p.theme.inverseBackground());
       // 站台号原字号放不下时（如“12”“A1”）改用 12 号，仍放不下再省略
@@ -907,13 +1165,27 @@ public final class PidsRenderer {
       return;
     }
     int rows = (platforms.size() + platform.perRow() - 1) / platform.perRow();
-    p.stacked(
-        caption,
-        platform.label(),
-        platform.x(),
-        platform.y() + rows * box + (rows - 1) * platform.gap() + platform.labelGap(),
-        p.theme.text(),
-        p.theme.muted());
+    int top = platform.y() + rows * box + (rows - 1) * platform.gap() + platform.labelGap();
+    if (right) {
+      // 靠右的标签往左伸：最多伸到画布左缘，放不下时省略
+      TextStyle style = platform.label();
+      p.textInkRight(
+          p.ellipsize(caption.primary(), style.size(), platform.x()),
+          style.size(),
+          platform.x(),
+          top,
+          p.theme.text());
+      if (style.hasSecondary() && !caption.secondary().isEmpty()) {
+        p.regularInkRight(
+            p.ellipsizeWords(caption.secondary(), style.secondarySize(), platform.x()),
+            style.secondarySize(),
+            platform.x(),
+            top + style.size() + style.gap(),
+            p.theme.muted());
+      }
+      return;
+    }
+    p.stacked(caption, platform.label(), platform.x(), top, p.theme.text(), p.theme.muted());
   }
 
   private void drawStationTitle(Painter p, PidsLayout.StationTitle title, Names names) {
@@ -1700,6 +1972,16 @@ public final class PidsRenderer {
 
     void regularRight(String text, int size, int right, int top, int rgb) {
       regular(text, size, right - regularWidth(text, size), top, rgb, false);
+    }
+
+    /** 主文字按墨迹右缘对齐到 {@code right}（中英文上下叠放时两行右缘对齐，见 {@link PidsFonts#trailing}）。 */
+    void textInkRight(String text, int size, int right, int top, int rgb) {
+      textRight(text, size, right + fonts.trailing(font(text, size), text), top, rgb);
+    }
+
+    /** 次要文字按墨迹右缘对齐到 {@code right}。 */
+    void regularInkRight(String text, int size, int right, int top, int rgb) {
+      regularRight(text, size, right + fonts.trailing(font(text, size), text), top, rgb);
     }
 
     /** 中英文上下叠放，返回较宽一行的宽度。 */

@@ -200,7 +200,7 @@ final class StuckTrainCleanupPolicy {
     }
   }
 
-  private static int operationRank(RouteOperationType operationType) {
+  static int operationRank(RouteOperationType operationType) {
     if (operationType == RouteOperationType.RETURN) {
       return 0;
     }

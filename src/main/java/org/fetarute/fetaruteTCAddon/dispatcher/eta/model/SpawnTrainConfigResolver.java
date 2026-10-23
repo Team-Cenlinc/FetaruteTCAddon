@@ -38,7 +38,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectivePars
  *   <li>只缓存推断出的车种；加减速每次按当前配置取，配置重载不必失效。
  *   <li>交路定义变化时由调用方 {@link #invalidateAll()}。
  *   <li>每条结果 {@link #TTL} 后重新推断，车库牌子被改写最迟在这么久后生效。
- *   <li>车库牌子所在区块未加载时不加载区块，沿用这条交路上次的结果；从未读到过时按默认车种。
+ *   <li>车库牌子所在区块未加载时不加载区块，沿用这条交路上次的结果；从未读到过时按默认车种。不在主线程时不读牌子，按上次的结果或默认车种，不写缓存、也不续期。
  * </ul>
  */
 public final class SpawnTrainConfigResolver {
@@ -95,6 +95,10 @@ public final class SpawnTrainConfigResolver {
       return cached.type();
     }
     Inference inference = infer(routeUuid);
+    if (inference.offThread()) {
+      // 不在主线程、没读牌子：有旧值用旧值，没有按默认车种；不写缓存、也不续期，留给主线程去读
+      return cached != null ? cached.type() : Optional.empty();
+    }
     Optional<TrainType> type =
         inference.signUnread() && cached != null ? cached.type() : inference.type();
     inferred.put(routeUuid, new Inferred(type, now));
@@ -115,6 +119,9 @@ public final class SpawnTrainConfigResolver {
       return Inference.known(Optional.empty());
     }
     DepotSpawnPattern.SignRead read = depotSigns.apply(depot.get());
+    if (read.offThread()) {
+      return Inference.elsewhere();
+    }
     return read.loaded() ? Inference.known(read.pattern()) : Inference.unread();
   }
 
@@ -171,16 +178,21 @@ public final class SpawnTrainConfigResolver {
    *
    * @param type 推断出的车种；为空表示按默认车种
    * @param signUnread 车库牌子所在区块未加载、这次没读到；此时 {@code type} 没有意义
+   * @param offThread 不在主线程、没读牌子；此时 {@code type} 没有意义
    */
-  private record Inference(Optional<TrainType> type, boolean signUnread) {
+  private record Inference(Optional<TrainType> type, boolean signUnread, boolean offThread) {
 
     static Inference known(Optional<String> pattern) {
       return new Inference(
-          pattern.flatMap(SpawnTrainConfigResolver::inferTrainTypeFromPattern), false);
+          pattern.flatMap(SpawnTrainConfigResolver::inferTrainTypeFromPattern), false, false);
     }
 
     static Inference unread() {
-      return new Inference(Optional.empty(), true);
+      return new Inference(Optional.empty(), true, false);
+    }
+
+    static Inference elsewhere() {
+      return new Inference(Optional.empty(), true, true);
     }
   }
 

@@ -142,7 +142,8 @@ public final class PidsLayoutParser {
               textStyle(node.child("label"), 12, 10, 1),
               node.optInt("max", 1),
               node.optInt("per-row", 2),
-              node.optInt("gap", 4)));
+              node.optInt("gap", 4),
+              node.optAlign("align", Align.LEFT)));
       case "clock" -> Optional.of(
           new PidsLayout.Clock(
               node.requireInt("x"),
@@ -615,7 +616,7 @@ public final class PidsLayoutParser {
                 + p.label().size()
                 + p.label().gap()
                 + p.label().secondarySize();
-        within(path, p.x(), p.y(), width, height);
+        within(path, p.align() == Align.RIGHT ? p.x() - width : p.x(), p.y(), width, height);
         sizes(path, p.numberSize(), p.label().size(), p.label().secondarySize());
       } else if (widget instanceof PidsLayout.Clock c) {
         within(path, c.align() == Align.RIGHT ? c.x() - 1 : c.x(), c.y(), 1, c.size());

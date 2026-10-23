@@ -32,13 +32,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlocking
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /** 管理各世界的 RailGraph 快照，供命令与运行时调度复用。 */
 public final class RailGraphService {
 
-  private final RailGraphBuilder builder;
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<UUID, RailGraphSnapshot> snapshots = new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, RailInterlockingState> lastActivatedInterlockingStates =
@@ -81,25 +79,12 @@ public final class RailGraphService {
       componentCautions = new ConcurrentHashMap<>();
   private volatile BooleanSupplier snapshotActivationGuard = () -> true;
 
-  public RailGraphService(SignNodeRegistry registry, Consumer<String> debugLogger) {
-    this(new SignRegistryRailGraphBuilder(registry, debugLogger), debugLogger);
+  public RailGraphService() {
+    this(message -> {});
   }
 
-  public RailGraphService(RailGraphBuilder builder) {
-    this(builder, message -> {});
-  }
-
-  public RailGraphService(RailGraphBuilder builder, Consumer<String> debugLogger) {
-    this.builder = Objects.requireNonNull(builder, "builder");
+  public RailGraphService(Consumer<String> debugLogger) {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
-  }
-
-  public RailGraph rebuild(World world) {
-    Objects.requireNonNull(world, "world");
-    RailGraph graph = builder.build(world);
-    UUID worldId = world.getUID();
-    activateSnapshot(worldId, graph, Instant.now());
-    return graph;
   }
 
   /** 图快照版本：任何世界的快照切换、移出都会让它变；按它判断按旧图算的缓存是否作废。 */

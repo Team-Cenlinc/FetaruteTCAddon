@@ -40,7 +40,7 @@ import org.fetarute.fetaruteTCAddon.utils.StableCollections;
  *
  * <ul>
  *   <li>长时间静止（stall）：有 PROCEED 信号但速度为 0（排除正在停站的列车）
- *   <li>进度不推进：route 索引与最近经过图节点均长时间不变化（排除正在停站的列车）
+ *   <li>进度不推进：route 索引与最近经过图节点均长时间不变化（排除正在停站与终点待命的列车）
  * </ul>
  *
  * <p>自动修复采用分级策略（带冷却）：
@@ -487,6 +487,12 @@ public final class TrainHealthMonitor {
   private final Map<String, DeadlockFallbackEvidence> deadlockFallbackEvidence =
       new ConcurrentHashMap<>();
 
+  /** 车身重叠的列车对从哪一刻起叠着、最近一次看到，key={@link TrainOverlapDetector.Pair#key()}。 */
+  private final Map<String, OverlapTrack> overlapTracks = new ConcurrentHashMap<>();
+
+  /** 车身重叠的列车对上一次告警的处理结论，同一结论不重复告警。 */
+  private final Map<String, String> overlapVerdicts = new ConcurrentHashMap<>();
+
   /** 列车的物理控制权：有驾驶员在岗的车不做恢复动作，死锁里有它时先请它交还。 */
   private ControlAuthority controlAuthority = ControlAuthority.pluginLookup();
 
@@ -531,6 +537,19 @@ public final class TrainHealthMonitor {
     }
     StationStopCoordinator stationStops = dispatchService.stationStops();
     return stationStops != null && stationStops.holdingForSchedule(trainName);
+  }
+
+  /**
+   * 终点待命：已登记 layover、停着等开出下一趟（含解编后留在中途站待命的车）。
+   *
+   * <p>与互卡判定、停滞清车用同一个判据（{@link RuntimeDispatchService.DeadlockTrainContext#layoverReady}）。
+   * 读不到上下文时按不在待命处理，照常检测。
+   */
+  private boolean inLayoverHold(String trainName) {
+    return dispatchService
+        .deadlockTrainContext(trainName)
+        .map(RuntimeDispatchService.DeadlockTrainContext::layoverReady)
+        .orElse(false);
   }
 
   /** 替换控制权（测试用）。 */
@@ -934,6 +953,23 @@ public final class TrainHealthMonitor {
         recovery.endCreep();
         continue;
       }
+      // 终点待命（已登记 layover、停着等开出下一趟）：静止和进度不变同样是计划内的，开出由发车与回收负责，
+      // 恢复动作对它无效。不发停滞告警、不派恢复动作、不进停滞清车与销毁兜底，时钟与受控停站一样锚定到当前，开出后从零观察。
+      // 互卡判定两侧都不收待命车（isEligibleDeadlockContext），与它成对的车的判定只看自己的时钟，跳过不改变互卡处理。
+      if (!isMoving && inLayoverHold(trainName)) {
+        snapshots.put(
+            key,
+            new TrainSnapshot(
+                currentProgress, currentGraphNode, currentSignal, currentSpeed, now, now, now));
+        recovery.resetStall();
+        recovery.resetProgress();
+        recovery.resetDeadlock();
+        if (endCreepRecovered(trainName, recovery, now)) {
+          fixedCount++;
+        }
+        recovery.endCreep();
+        continue;
+      }
 
       Duration progressDuration = Duration.between(lastProgress, now);
       if (recovery.creepEndPending && !progressed && !isMoving) {
@@ -1138,10 +1174,201 @@ public final class TrainHealthMonitor {
     return new CheckResult(stallCount, progressStuckCount, fixedCount, recoveryDispatchedCount);
   }
 
+  /**
+   * 处理车身叠在一起的列车对（{@link TrainOverlapDetector}）。
+   *
+   * <p>叠上的两列车互相压着对方要走的资源，谁也发不了车，而互卡处理只认单线区对向互卡与道岔区实占环、普通清车不收在等前车的车，
+   * 加上两车多半停在站里（停站、发车门控、按表扣车都不算停滞），没有一条现有路径会动它们。车身重叠本身就是证据： 连续 {@code
+   * deadlock-destroy-threshold-seconds} 都叠着、都没动，就销毁其中一列，另一列随即能走。中途短暂没采到（不超过 {@code
+   * deadlock-episode-grace-seconds}）不从头计时。
+   *
+   * <p>不碰的情形：自动修复或销毁开关关着、在冷却中、调度模式不允许销毁时只告警，也不请驾驶员交还；挑中要删的车有驾驶员在岗时先请交还；
+   * 有玩家乘坐或人工扣车的车不销毁，两列都是就只告警；两组同名的车分不出删哪一组，只告警。销毁与互卡销毁共用全局冷却，一个冷却窗口最多删一列； 销毁失败的这一对也进冷却。
+   *
+   * @param pairs 本轮采样到的重叠列车对（两车都静止）
+   * @return 本轮销毁的列车数
+   */
+  public int resolveTrainOverlaps(List<TrainOverlapDetector.Pair> pairs, Instant now) {
+    Instant effectiveNow = now == null ? Instant.now() : now;
+    List<TrainOverlapDetector.Pair> current = pairs == null ? List.of() : pairs;
+    for (TrainOverlapDetector.Pair pair : current) {
+      overlapTracks.merge(
+          pair.key(),
+          new OverlapTrack(effectiveNow, effectiveNow),
+          (kept, added) -> new OverlapTrack(kept.firstSeen(), effectiveNow));
+    }
+    Instant staleBefore = effectiveNow.minus(deadlockEpisodeGrace);
+    overlapTracks.values().removeIf(track -> track.lastSeen().isBefore(staleBefore));
+    overlapVerdicts.keySet().retainAll(overlapTracks.keySet());
+    Set<String> destroyedThisRound = new java.util.HashSet<>();
+    int destroyed = 0;
+    for (TrainOverlapDetector.Pair pair : current) {
+      if (destroyedThisRound.contains(safeTrainKey(pair.trainA()))
+          || destroyedThisRound.contains(safeTrainKey(pair.trainB()))) {
+        continue;
+      }
+      Duration persisted =
+          Duration.between(overlapTracks.get(pair.key()).firstSeen(), effectiveNow);
+      if (persisted.compareTo(overlapThreshold()) < 0) {
+        continue;
+      }
+      OverlapDecision decision = decideOverlap(pair, effectiveNow);
+      if (decision.victim() == null) {
+        reportOverlap(pair, persisted, decision.verdict());
+        continue;
+      }
+      String victim = decision.victim();
+      String survivor = decision.survivor();
+      dispatchService.scheduleSurvivorRefreshAfterTrainRemoved(victim, survivor);
+      if (!dispatchService.destroyTrainByName(victim, "health-overlap-destroy")) {
+        deadlockPairLastDestroyAt.put(
+            pairKey(safeTrainKey(victim), safeTrainKey(survivor)), effectiveNow);
+        reportOverlap(pair, persisted, "销毁 " + victim + " 失败");
+        continue;
+      }
+      rememberDeadlockDestroy(victim, survivor, effectiveNow);
+      destroyedThisRound.add(safeTrainKey(victim));
+      overlapTracks.remove(pair.key());
+      overlapVerdicts.remove(pair.key());
+      destroyed++;
+      alertBus.publish(
+          HealthAlert.fixed(
+              HealthAlert.AlertType.PROGRESS_STUCK,
+              victim,
+              "车身重叠: 已销毁 与 "
+                  + survivor
+                  + " 重叠约 "
+                  + pair.depthBlocks()
+                  + " 格 持续="
+                  + persisted.toSeconds()
+                  + "秒"));
+    }
+    return destroyed;
+  }
+
+  /** 重叠多久才处理：与互卡销毁同一阈值；阈值为 0（销毁关闭）时仍按默认 60 秒告警。 */
+  private Duration overlapThreshold() {
+    return deadlockDestroyThreshold == null || deadlockDestroyThreshold.isZero()
+        ? Duration.ofSeconds(60)
+        : deadlockDestroyThreshold;
+  }
+
+  /**
+   * 决定这一对怎么处理。不用读运行状态的拦截（开关、冷却、调度模式）排在最前：它们拦住时每轮都会走到这里，不该每轮都去解析两列车；
+   * 请驾驶员交还排在挑车之后、只请要删的那列——反正不会删的车，就不该把驾驶员请下来。
+   */
+  private OverlapDecision decideOverlap(TrainOverlapDetector.Pair pair, Instant now) {
+    if (pair.sameName()) {
+      return OverlapDecision.hold("两组同名的车叠在一起，按车名分不出要删哪一组，需手动处理");
+    }
+    if (!autoFixEnabled) {
+      return OverlapDecision.hold("自动修复未开启（health.auto-fix-enabled）");
+    }
+    if (!trainCleanupEnabled
+        || deadlockDestroyThreshold == null
+        || deadlockDestroyThreshold.isZero()) {
+      return OverlapDecision.hold("销毁未开启（health.deadlock-destroy-enabled）");
+    }
+    if (destroyCooldownRemainingMs(pair.trainA(), pair.trainB(), now) > 0L) {
+      return OverlapDecision.hold("销毁冷却中");
+    }
+    // 不留痕地先看一眼调度模式：观察模式下每轮都会走到这里，带 trace 的闸门只在真要动手时过一次。
+    if (!SmartDispatcherModeGate.allows(
+        smartDispatcherMode(), DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY)) {
+      return OverlapDecision.hold("调度模式不允许销毁");
+    }
+    Optional<RuntimeDispatchService.DeadlockTrainContext> first =
+        dispatchService.deadlockTrainContext(pair.trainA());
+    Optional<RuntimeDispatchService.DeadlockTrainContext> second =
+        dispatchService.deadlockTrainContext(pair.trainB());
+    if (first.isEmpty() || second.isEmpty()) {
+      return OverlapDecision.hold(
+          "运行状态读不到（" + (first.isEmpty() ? pair.trainA() : pair.trainB()) + "），不销毁");
+    }
+    if (first.get().speedBlocksPerTick() > lowSpeedThresholdBpt
+        || second.get().speedBlocksPerTick() > lowSpeedThresholdBpt) {
+      return OverlapDecision.hold("仍在移动");
+    }
+    Optional<String> victim = overlapDestroyTarget(pair, first.get(), second.get());
+    if (victim.isEmpty()) {
+      return OverlapDecision.hold("两列都有玩家乘坐或人工扣车，不销毁");
+    }
+    // 只请要删的那列交还：坐在车上的驾驶员算玩家乘坐，他那列不会被挑中，不必打断他
+    if (requestDriverHandback(List.of(victim.get()))) {
+      return OverlapDecision.hold("要销毁的 " + victim.get() + " 有驾驶员在岗，已请交还自动运行");
+    }
+    if (!smartDispatcherAllowsHealthMutation(
+        victim.get(), DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY, "health-overlap-destroy")) {
+      return OverlapDecision.hold("调度模式不允许销毁");
+    }
+    String survivor = victim.get().equals(pair.trainA()) ? pair.trainB() : pair.trainA();
+    return new OverlapDecision("", victim.get(), survivor);
+  }
+
+  /**
+   * 挑要销毁的那列：有玩家乘坐、人工扣车的不挑；与停滞清车同一口径，回库车先于出库车先于载客运营车，再按与车库相关、优先级低、车名。
+   *
+   * <p>返回的是这一对里的车名（采样时的名字），不是运行状态里的车名：两者在改名过渡期可能不同，幸存车要按同一套名字推出来。 两车停在同一处，进度序号属于各自的运行图，不拿来比。
+   */
+  private static Optional<String> overlapDestroyTarget(
+      TrainOverlapDetector.Pair pair,
+      RuntimeDispatchService.DeadlockTrainContext first,
+      RuntimeDispatchService.DeadlockTrainContext second) {
+    List<Map.Entry<String, RuntimeDispatchService.DeadlockTrainContext>> candidates =
+        new ArrayList<>();
+    if (!first.hasPassengers() && !first.manualHold()) {
+      candidates.add(Map.entry(pair.trainA(), first));
+    }
+    if (!second.hasPassengers() && !second.manualHold()) {
+      candidates.add(Map.entry(pair.trainB(), second));
+    }
+    return candidates.stream()
+        .min(
+            Comparator.comparingInt(
+                    (Map.Entry<String, RuntimeDispatchService.DeadlockTrainContext> entry) ->
+                        StuckTrainCleanupPolicy.operationRank(entry.getValue().operationType()))
+                .thenComparing(entry -> !entry.getValue().depotRelated())
+                .thenComparingInt(entry -> entry.getValue().priority())
+                .thenComparing(entry -> entry.getKey().toLowerCase(Locale.ROOT)))
+        .map(Map.Entry::getKey);
+  }
+
+  /** 叠着的一对列车：从哪一刻起叠着、最近一次看到是什么时候。 */
+  private record OverlapTrack(Instant firstSeen, Instant lastSeen) {}
+
+  /** 这一对的处理：{@code victim} 为空时只告警，{@code verdict} 是告警里的处理结论。 */
+  private record OverlapDecision(String verdict, String victim, String survivor) {
+
+    static OverlapDecision hold(String verdict) {
+      return new OverlapDecision(verdict, null, null);
+    }
+  }
+
+  /** 同一对、同一结论只告警一次；结论变了再告警。 */
+  private void reportOverlap(TrainOverlapDetector.Pair pair, Duration persisted, String verdict) {
+    if (verdict.equals(overlapVerdicts.put(pair.key(), verdict))) {
+      return;
+    }
+    alertBus.publish(
+        HealthAlert.of(
+            HealthAlert.AlertType.PROGRESS_STUCK,
+            pair.trainA(),
+            "车身重叠: 与 "
+                + pair.trainB()
+                + " 重叠约 "
+                + pair.depthBlocks()
+                + " 格 持续="
+                + persisted.toSeconds()
+                + "秒 处理="
+                + verdict));
+  }
+
   /** 清除所有快照。 */
   public void clear() {
     snapshots.clear();
     recoveryStates.clear();
+    overlapTracks.clear();
+    overlapVerdicts.clear();
     deadlockPairLastAttemptAt.clear();
     deadlockPairLastDestroyAt.clear();
     lastDeadlockDestroyAt = Instant.EPOCH;
@@ -4906,6 +5133,10 @@ public final class TrainHealthMonitor {
     }
     deadlockPairLastAttemptAt.replaceAll((key, at) -> shiftInstant(at, gap));
     deadlockPairLastDestroyAt.replaceAll((key, at) -> shiftInstant(at, gap));
+    overlapTracks.replaceAll(
+        (key, track) ->
+            new OverlapTrack(
+                shiftInstant(track.firstSeen(), gap), shiftInstant(track.lastSeen(), gap)));
     traceLastAt.replaceAll((key, at) -> shiftInstant(at, gap));
   }
 

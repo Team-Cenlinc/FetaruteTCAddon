@@ -1,13 +1,14 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.explore;
 
-import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.controller.components.RailJunction;
 import com.bergerkiller.bukkit.tc.controller.components.RailPath;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
+import com.bergerkiller.bukkit.tc.rails.RailLookup;
 import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
 import com.bergerkiller.bukkit.tc.rails.logic.RailLogic;
 import com.bergerkiller.bukkit.tc.rails.type.RailType;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -17,6 +18,9 @@ import java.util.Set;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
+import org.bukkit.block.Sign;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 
 /**
  * 使用 TrainCarts 的轨道判定与连通信息，作为调度图探索阶段的轨道访问实现。
@@ -39,6 +43,44 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
 
   public TrainCartsRailBlockAccess(World world) {
     this.world = Objects.requireNonNull(world, "world");
+  }
+
+  /**
+   * 解析节点所属轨道，建图各入口必须使用相同的关联规则。
+   *
+   * <p>真实节点以 TrainCarts 的牌子关联为准；“最近轨道”可能是另一条平行股道，不能作为真实牌子的回退。 TCC 虚拟节点与 Switcher/Portal
+   * 的记录本身就是轨道坐标，精确取该轨道。 区块未加载或关联丢失时返回空，不加载区块，也不猜另一条轨道。
+   *
+   * @param center 真实牌子方块或虚拟节点轨道坐标
+   * @param type 节点类型
+   * @param radius Switcher/Portal 旧坐标的兼容搜索半径，真实牌子不使用几何回退
+   */
+  @Override
+  public Set<RailBlockPos> findNodeRailAnchors(RailBlockPos center, NodeType type, int radius) {
+    Objects.requireNonNull(center, "center");
+    Objects.requireNonNull(type, "type");
+    if (radius < 0) {
+      throw new IllegalArgumentException("radius 不能为负");
+    }
+    if (!world.isChunkLoaded(center.x() >> 4, center.z() >> 4)) {
+      return Set.of();
+    }
+    Block block = world.getBlockAt(center.x(), center.y(), center.z());
+    if (block.getState() instanceof Sign) {
+      RailPiece piece = RailLookup.discoverRailPieceFromSign(block);
+      if (piece == null || piece.isNone() || piece.block() == null) {
+        return Set.of();
+      }
+      Block rail = piece.block();
+      RailBlockPos anchor = new RailBlockPos(rail.getX(), rail.getY(), rail.getZ());
+      return world.isChunkLoaded(anchor.x() >> 4, anchor.z() >> 4) ? Set.of(anchor) : Set.of();
+    }
+    if (isRail(center)) {
+      return Set.of(center);
+    }
+    return type == NodeType.SWITCHER || type == NodeType.PORTAL
+        ? findNearestRailBlocks(center, radius)
+        : Set.of();
   }
 
   @Override
@@ -286,25 +328,65 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
     if (piece == null || piece.isNone()) {
       return false;
     }
-    // 仅在道岔牌子存在时扩展潜在分支，避免误把并行轨道当成可达分支。
+    // 仅在寻路道岔牌子存在时扩展潜在分支，避免误把并行轨道当成可达分支；写了条件或 tag 的道岔当作没有。
     TrackedSign[] signs = piece.signs();
     if (signs == null || signs.length == 0) {
       return false;
     }
     for (TrackedSign sign : signs) {
-      if (sign == null) {
-        continue;
-      }
-      SignActionHeader header = sign.getHeader();
-      if (header == null || (!header.isTrain() && !header.isCart())) {
-        continue;
-      }
-      String action = safeTrackedLine(sign, 1).trim().toLowerCase(java.util.Locale.ROOT);
-      if (action.equals("switcher")) {
+      if (SwitcherSignDefinitionParser.kindOf(sign)
+          == SwitcherSignDefinitionParser.Kind.PATHFINDING) {
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * 这段轨道上的道岔牌子是否只有写了条件或 tag 的：库里登记在这里的道岔节点已经作废（牌子改写过）。
+   *
+   * <p>节点坐标与 ID 都指向关联轨道，不是实体牌子的方块坐标。使用 {@link RailLookup#discoverSignsAtRailPiece(RailPiece)}
+   * 重新读取节点对应的牌子，不能使用尚未刷新文本或关联关系的 {@link RailPiece#signs()} 缓存。区块未加载、找不到轨道或没有任何道岔牌子时为 {@code
+   * false}：判不了就不动。实体牌面直接读取当前方块，虚拟牌子通过 TrackedSign 读取。
+   */
+  public boolean hasOnlyConditionalSwitchers(RailBlockPos pos) {
+    Objects.requireNonNull(pos, "pos");
+    if (!chunksAroundLoaded(world, pos)) {
+      return false;
+    }
+    RailPiece piece = RailPiece.create(world.getBlockAt(pos.x(), pos.y(), pos.z()));
+    if (piece == null || piece.isNone()) {
+      return false;
+    }
+    TrackedSign[] signs = RailLookup.discoverSignsAtRailPiece(piece);
+    if (signs == null) {
+      return false;
+    }
+    List<SwitcherSignDefinitionParser.Kind> kinds = new ArrayList<>(signs.length);
+    for (TrackedSign sign : signs) {
+      var kind = SwitcherSignDefinitionParser.currentKindOf(sign);
+      if (kind.isEmpty()) {
+        return false;
+      }
+      kinds.add(kind.get());
+    }
+    return SwitcherSignDefinitionParser.onlyConditional(kinds);
+  }
+
+  /**
+   * 轨道 x、z 各 ±1 覆盖的区块是否都已加载。
+   *
+   * <p>TrainCarts 查牌子会读这一圈的牌子柱，遇到没加载的区块会在主线程同步加载；判定作废道岔之前必须先确认这一圈都在内存里。
+   */
+  public static boolean chunksAroundLoaded(World world, RailBlockPos rail) {
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dz = -1; dz <= 1; dz++) {
+        if (!world.isChunkLoaded((rail.x() + dx) >> 4, (rail.z() + dz) >> 4)) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   private Set<RailBlockPos> fallbackNeighborCandidates(Block railBlock) {
@@ -339,15 +421,6 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       }
     }
     return neighbors;
-  }
-
-  private String safeTrackedLine(TrackedSign sign, int index) {
-    try {
-      String value = sign.getLine(index);
-      return value != null ? value : "";
-    } catch (IndexOutOfBoundsException ex) {
-      return "";
-    }
   }
 
   @Override

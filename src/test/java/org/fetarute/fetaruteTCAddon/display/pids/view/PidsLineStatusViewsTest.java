@@ -279,4 +279,25 @@ class PidsLineStatusViewsTest {
   private static PidsView.LineChip chip(String code) {
     return new PidsView.LineChip(code, 0x336699, new Names(code + "线", code + " Line"));
   }
+
+  /** 按运营商轮播时的线路过滤：写成“运营商:线路”的只管那一家，只写线路代码的各家都管；没有管这一家的条目时这一家不过滤。 */
+  @Test
+  void theLineFilterIsWorkedOutPerOperator() {
+    Set<String> filter = Set.of("WS", "SURN:BS", "SURW:XL");
+
+    assertEquals(Set.of("WS"), PidsLineStatusViews.filterFor("SURC", filter));
+    assertEquals(Set.of("WS", "BS"), PidsLineStatusViews.filterFor("surn", filter));
+    assertEquals(Set.of(), PidsLineStatusViews.filterFor("SURN", Set.of("SURW:XL")), "不管这一家：不过滤");
+
+    assertEquals(filter, PidsLineStatusViews.linesFor("surc", "SURC", filter), "屏幕所属的运营商拿全部条目");
+    assertEquals(
+        Set.of("SURN:BS", "SURW:XL"),
+        PidsLineStatusViews.linesFor("SURN", "SURC", filter),
+        "别家不拿只写线路代码的");
+    assertEquals(
+        Set.of(),
+        PidsLineStatusViews.filterFor(
+            "SURN", PidsLineStatusViews.linesFor("SURN", "SURC", Set.of("MT", "WS"))),
+        "本运营商选了线路，别家照常全显示");
+  }
 }

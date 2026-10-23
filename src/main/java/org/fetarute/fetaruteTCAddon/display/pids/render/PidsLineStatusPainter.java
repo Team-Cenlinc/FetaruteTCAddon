@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.display.pids.render;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.OptionalInt;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
@@ -14,7 +15,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
  * 线路运行状况屏主体（{@link PidsLayout.LineStatus}）的画法。
  *
  * <ul>
- *   <li>页标题中英文同行；其下运营商名（次要色），多于一页时右侧写页码“1/2”
+ *   <li>页标题中英文同行；其下运营商名（次要色），多于一页时右侧写页码“1/2”。按运营商轮播时右侧改为一排运营商代码标签（按轮播顺序），
+ *       正在显示的那家反白，这一家多于一页时页码写进它的标签里；标签占到这一行一半以上时只画正在显示的那家，它一个也放不下时不画标签、照常写页码
  *   <li>表头：线路、运行状况、说明，各列中英文同行
  *   <li>每条线路一行，面板色铺底：线路色牌写线路代码；线路名中英文上下叠放，中文放不下时改用小一档字号；
  *       状况中英文上下叠放——延误与取消画琥珀色块、严重延误与停运画红色块（字色按底色亮度取黑白），运行正常写绿字，其余灰字；说明中英文上下叠放
@@ -37,6 +39,15 @@ final class PidsLineStatusPainter {
 
   /** 运营商名与页码之间至少留的空隙。 */
   private static final int PAGE_GAP = 8;
+
+  /** 轮播标签：文字上下、左右各留的空隙，标签之间的空隙，标签里代码与页码之间的空隙。 */
+  private static final int TAB_PAD_Y = 3;
+
+  private static final int TAB_PAD_X = 5;
+
+  private static final int TAB_GAP = 4;
+
+  private static final int TAB_PAGE_GAP = 4;
 
   private final PidsRenderer.Painter p;
   private final PidsTheme theme;
@@ -65,18 +76,89 @@ final class PidsLineStatusPainter {
     }
   }
 
-  /** 运营商名；多于一页时右侧写页码，运营商名让出页码的位置。 */
+  /** 运营商名；多于一页时右侧写页码，按运营商轮播时右侧画轮播标签，运营商名让出它们的位置。 */
   private void drawOperator(
       PidsLayout.LineStatus widget, PidsLineStatusView view, int left, int right) {
     int top = widget.y() + widget.operatorY();
-    int room = right - left;
-    if (view.pages() > 1) {
-      String page = (view.page() + 1) + "/" + view.pages();
-      int size = widget.operator().size();
-      p.textRight(page, size, right, top, theme.text());
-      room -= p.width(page, size) + PAGE_GAP;
+    int size = widget.operator().size();
+    int end = right;
+    OptionalInt tags =
+        view.rotating() ? drawRotation(view, left, right, top, size) : OptionalInt.empty();
+    if (tags.isPresent()) {
+      end = tags.getAsInt() - PAGE_GAP;
+    } else if (view.pages() > 1) {
+      String page = pageText(view);
+      p.textRight(page, size, end, top, theme.text());
+      end -= p.width(page, size) + PAGE_GAP;
     }
-    p.inline(view.operator(), widget.operator(), left, top, room, theme.muted(), theme.muted());
+    p.inline(
+        view.operator(),
+        widget.operator(),
+        left,
+        top,
+        Math.max(0, end - left),
+        theme.muted(),
+        theme.muted());
+  }
+
+  /**
+   * 轮播标签靠右排开：正在显示的那家反白（多于一页时代码后写页码），其余描边灰字。
+   *
+   * @return 标签的左缘；正在显示的那家一个标签也放不下这一行时不画，为空（照不轮播写页码）
+   */
+  private OptionalInt drawRotation(
+      PidsLineStatusView view, int left, int right, int top, int size) {
+    List<String> codes = view.rotation();
+    int current = view.rotationIndex();
+    int[] widths = new int[codes.size()];
+    int total = -TAB_GAP;
+    for (int i = 0; i < codes.size(); i++) {
+      widths[i] = tabWidth(view, codes.get(i), i == current, size);
+      total += widths[i] + TAB_GAP;
+    }
+    int from = 0;
+    int to = codes.size();
+    if (widths[current] > right - left) {
+      return OptionalInt.empty();
+    }
+    if (total > (right - left) / 2) {
+      from = current;
+      to = current + 1;
+      total = widths[current];
+    }
+    int x = right - total;
+    int start = x;
+    int tabTop = top - TAB_PAD_Y;
+    int tabHeight = size + TAB_PAD_Y * 2;
+    for (int i = from; i < to; i++) {
+      String code = codes.get(i);
+      if (i == current) {
+        p.fill(x, tabTop, widths[i], tabHeight, theme.text());
+        int ink = PidsTheme.textOn(theme.text());
+        int textX = x + TAB_PAD_X;
+        textX += p.text(code, size, textX, top, ink);
+        if (view.pages() > 1) {
+          p.regular(pageText(view), size, textX + TAB_PAGE_GAP, top, ink, false);
+        }
+      } else {
+        p.outline(x, tabTop, widths[i], tabHeight, theme.muted());
+        p.regular(code, size, x + TAB_PAD_X, top, theme.muted(), false);
+      }
+      x += widths[i] + TAB_GAP;
+    }
+    return OptionalInt.of(start);
+  }
+
+  private int tabWidth(PidsLineStatusView view, String code, boolean current, int size) {
+    if (!current) {
+      return p.regularWidth(code, size) + TAB_PAD_X * 2;
+    }
+    int width = p.width(code, size) + TAB_PAD_X * 2;
+    return view.pages() > 1 ? width + TAB_PAGE_GAP + p.regularWidth(pageText(view), size) : width;
+  }
+
+  private static String pageText(PidsLineStatusView view) {
+    return (view.page() + 1) + "/" + view.pages();
   }
 
   /** 表头：状况一列与状况文字对齐（色块内缩进）。 */

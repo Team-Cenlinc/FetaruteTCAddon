@@ -92,6 +92,11 @@ display:
         - "<gray>换乘</gray> {?transfer_lines}"
         - "<yellow>晚点 {?delay_minutes} 分钟</yellow>"
         - "<aqua>⇄</aqua> <gray>本站起改为</gray> <{line_color_tag}>█</{line_color_tag}><white>{?line_change}</white> <gray>运行</gray>"
+      # 分行站、联挂站那一行的说明（接在 details 之后）：本节车厢分行后去哪、联挂后接着开往哪里
+      coupling:
+        - "<aqua>⇉</aqua> <gray>本站分行，本节车厢开往</gray> <white>{?stop_car_destination}</white>"
+        - "<gold>⇉</gold> <gray>本站分行，本节车厢在</gray> <white>{?stop_car_terminates}</white> <gray>停止载客</gray>"
+        - "<aqua>⇇</aqua> <gray>本站联挂，继续开往</gray> <white>{?stop_join_destination}</white>"
     empty: "<gray>前方没有停靠站。</gray>"
     more: "<gray>另有 <count> 站未列出。</gray>"
     not-on-train: "<prefix> <gray>请在乘坐列车时查看后续站点。</gray>"
@@ -104,6 +109,8 @@ display:
 
 sign:
   created: "<prefix> <dark_aqua>已注册</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
+  # AutoStation 牌子第 4 行为空或无法识别：停站不会开门
+  autostation-door-missing: "<prefix> <yellow>第 4 行未填写有效的开门方向，列车在此停站时不会开门。</yellow>\n<gray>请填写开门的世界方向（N/E/S/W/NE/NW/SE/SW）或 BOTH；该站台不开门请填写 NONE。</gray>"
   invalid:
     generic: "<prefix> <red>节点格式无效</red>"
     waypoint: "<prefix> <red>区间点格式无效</red> <gray>Waypoint: Operator:From:To:Track:Seq</gray>"
@@ -144,8 +151,8 @@ command:
   common:
     confirm-required: "<prefix> <red>危险操作需要确认：</red><gray>追加参数</gray> <white>--confirm</white>"
     invalid-boolean: "<prefix> <red>无效布尔值：</red><white><value></white> <gray>（仅支持 true/false）</gray>"
-    yes: "是"
-    no: "否"
+    "yes": "是"
+    "no": "否"
   error:
     invalid-syntax: "<prefix> <red>命令语法不正确</red> <gray>正确用法：</gray> <white><syntax></white>"
   help:
@@ -190,6 +197,8 @@ command:
     hover-template: "<gray>点击填入：</gray> <white>/fta template </white>\n<dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
     entry-consist: "<gray>/fta consist</gray> <white>-</white> <dark_aqua>编组方案（车型与比例）</dark_aqua>"
     hover-consist: "<gray>点击填入：</gray> <white>/fta consist </white>\n<dark_aqua>编组方案：用书编写车型与比例，route 用 --consist-plan 绑定</dark_aqua>"
+    entry-coupler: "<gray>/fta coupler wrench</gray> <white>-</white> <dark_aqua>领取车钩扳手（连挂与解挂）</dark_aqua>"
+    hover-coupler: "<gray>点击填入：</gray> <white>/fta coupler wrench</white>\n<dark_aqua>右键端车外端开启或锁闭车钩，右键连接处解挂，Shift+右键推向前方列车并连挂</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
     hover-reload: "<gray>点击执行：</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
@@ -400,6 +409,7 @@ command:
       hover-debug-path: "<gray>点击填入：</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数： \"from\" \"to\"</dark_aqua>"
 
   spawn:
+    dispatch-by-operation: "按运营交路调度"
     not-ready: "<prefix> <red>发车管理器未就绪</red>"
     consist:
       header: "<prefix> <dark_aqua>车型份额</dark_aqua> <gray>（已发班次只记在内存，重启或方案修改后从零计）</gray>"
@@ -521,6 +531,8 @@ command:
       hover-extend: "<gray>点击填入：</gray> <white>/fta graph extend</white>\n<dark_aqua>只往图里还没探索过的方向增补，不改已有区间</dark_aqua>\n<gray>新牌子落在已有区间中间时会拒绝，请改用 build</gray>"
       entry-continue: "<gray>/fta graph continue</gray> <white>-</white> <dark_aqua>续跑 here 扩张构建</dark_aqua>"
       hover-continue: "<gray>点击填入：</gray> <white>/fta graph continue </white>\n<dark_aqua>继续 here 扩张构建</dark_aqua>"
+      entry-activate: "<gray>/fta graph activate</gray> <white>-</white> <dark_aqua>重试已保存候选图的激活</dark_aqua>"
+      hover-activate: "<gray>占用释放后激活候选，仍执行联锁保护校验</gray>"
       entry-status: "<gray>/fta graph status</gray> <white>-</white> <dark_aqua>查看构建进度</dark_aqua>"
       hover-status: "<gray>点击执行：</gray> <white>/fta graph status</white>\n<dark_aqua>查看构建进度</dark_aqua>"
       entry-cancel: "<gray>/fta graph cancel</gray> <white>-</white> <dark_aqua>取消构建任务</dark_aqua>"
@@ -552,6 +564,16 @@ command:
       entry-portal: "<gray>/fta graph portal</gray> <white>-</white> <dark_aqua>跨世界传送门连接</dark_aqua>"
       hover-portal: "<gray>点击填入：</gray> <white>/fta graph portal </white>\n<dark_aqua>子命令：</dark_aqua> <white>list/scan/link/unlink</white>\n<dark_aqua>scan 按 MyWorlds 自动连接；link/unlink 手动连接或删除（节点 ID 可按 Tab 补全）</dark_aqua>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
+    no-world: "<prefix> <red>未找到可用世界</red>"
+    pending:
+      saved: "<prefix> <yellow>有待激活的候选调度图</yellow> <gray>节点 <white><nodes></white> 个、区间 <white><edges></white> 条，构建于 <white><built_at></white>；占用安全释放后可执行 /fta graph activate 激活</gray>"
+      none: "<prefix> <gray>当前世界没有待激活图</gray>"
+      outdated: "<prefix> <yellow>候选图基线已变化，请重新构建；旧候选不会覆盖后来更新的图或节点</yellow>"
+      failed: "<prefix> <red>候选图读取或激活失败</red> <gray><error></gray>"
+      stored: "<prefix> <gray>候选图已保存；占用安全释放后使用 /fta graph activate 重试</gray>"
+      save-failed: "<prefix> <red>候选图保存失败</red> <gray><error>；旧快照保持生效，需要时请重新构建</gray>"
+      still-blocked: "<prefix> <yellow>候选图仍未激活</yellow> <gray>仍有列车占用受影响的联锁资源，旧快照保持生效，候选图保留；占用安全释放后再执行 /fta graph activate</gray>"
+      activated: "<prefix> <dark_aqua>候选调度图已激活</dark_aqua>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>（分段执行，可用 /fta graph status 查看进度）</gray>"
       running: "<prefix> <gray>当前世界已有调度图构建任务在运行</gray> <dark_aqua>请稍后或 /fta graph cancel</dark_aqua>"
@@ -564,7 +586,7 @@ command:
       tcc-player-only: "<prefix> <red>控制台无法使用 --tcc</red>"
       no-tcc-selection: "<prefix> <red>未检测到 TCC 选中的轨道方块</red> <gray>请在 TCC 编辑器中选中一个节点/轨道后重试</gray>"
       failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
-      activation-blocked: "<prefix> <yellow>调度图未切换</yellow> <gray>当前仍有列车占用 claim；请先停车并清空占用后重试，旧快照保持生效</gray>"
+      activation-blocked: "<prefix> <yellow>调度图未切换</yellow> <gray>仍有列车占用受影响的联锁资源，旧快照保持生效；候选图正在后台保存，保存结果另行提示</gray>"
       success: "<prefix> <dark_aqua>调度图已更新</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
       merged: "<prefix> <dark_aqua>已合并到现有调度图</dark_aqua> <gray>(action=<white><action></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
       paused: "<prefix> <yellow>已达到 maxChunks，已保存续跑状态</yellow> <gray>(pending_chunks=<white><pending_chunks></white>)</gray> <dark_aqua>/fta graph continue</dark_aqua>"
@@ -584,11 +606,15 @@ command:
     refresh:
       nodes-changed: "<prefix> <yellow>未刷新</yellow> <gray>刷新期间有节点牌子被增删或移动，结果未写入；请重新执行 /fta graph refresh</gray>"
       coverage-incomplete: "<prefix> <yellow>联锁按不完整发布</yellow> <gray>刷新无法证明区间齐全，按实测覆盖提前释放尾部保护的机制将暂停，列车间隔会偏保守；需要恢复时请执行 /fta graph build</gray>"
+      stale-switchers-removed: "<prefix> <dark_aqua>已随刷新从调度图与节点表移除 <white><count></white> 个作废道岔节点</dark_aqua> <gray>这些道岔的牌子已改为写条件或 tag 的道岔，不再进图</gray>"
     extend:
       no-graph: "<prefix> <red>当前世界没有载入调度图</red> <gray>增补只能在已有调度图上进行，请先执行 /fta graph build</gray>"
       refused: "<prefix> <yellow>未增补</yellow> <gray><reason></gray>"
       started: "<prefix> <dark_aqua>开始增补</dark_aqua> <gray>(新节点 <white><nodes></white> 个；分段执行，可用 /fta graph status 查看进度)</gray>"
       success: "<prefix> <dark_aqua>调度图已增补</dark_aqua> <gray>(world=<white><world></white>, 新节点 <white><added_nodes></white> 个、新区间 <white><added_edges></white> 条；共 nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
+      stale-switchers: "<prefix> <yellow>未增补</yellow> <gray>有 <white><count></white> 个道岔节点的牌子已改为写条件或 tag 的道岔，应从调度图中移除；增补只往未探索的方向延伸，无法移除这些节点，请先执行 /fta graph refresh 或 /fta graph build</gray>"
+    switcher-audit:
+      unverified: "<prefix> <yellow><count> 个道岔节点未能核对</yellow> <gray>相关区块加载失败、超出本次加载上限或判定出错，已保留这些节点；可在附近区块加载后重新执行</gray>"
     continue:
       none: "<prefix> <gray>当前没有可续跑的图构建状态</gray> <dark_aqua>请先执行 /fta graph build</dark_aqua>"
       started: "<prefix> <dark_aqua>续跑已开始</dark_aqua> <gray>（分段执行，可用 /fta graph status 查看进度）</gray>"
@@ -933,6 +959,7 @@ command:
       spawn-pattern: "<gray>车型/编组：</gray> <dark_aqua><pattern></dark_aqua>"
       consist-plan: "<gray>编组方案：</gray> <dark_aqua><plan></dark_aqua>"
       spawn-group: "<gray>交路组：</gray> <dark_aqua><group></dark_aqua>"
+      dispatch-by-operation: "<gray>按运营交路调度：</gray> <dark_aqua><enabled></dark_aqua> <gray>（保留沿途停站，无独立频率）</gray>"
       spawn-group-baseline: "<gray>发车基线（秒）：</gray> <dark_aqua><seconds></dark_aqua>"
       via: "<gray>经由：</gray> <dark_aqua><via></dark_aqua>"
       via-auto: "未配置（站台屏按换乘站、大站与直通站推断）"
@@ -974,15 +1001,18 @@ command:
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
       batch-success: "<prefix> <dark_aqua>已批量更新 <white><count></white> 条运行图：</dark_aqua><white><codes></white>"
+      dispatch-by-operation-type: "<prefix> <red>--dispatch-by-operation 仅允许 CREATE/RETURN；请先关闭该设置再改为 OPERATION。</red>"
       batch-partial: "<prefix> <yellow>批量更新中途停止，以下运行图已经更新：</yellow><white><codes></white>"
+      batch-skipped-operation: "<prefix> <gray>按运营交路调度只适用于出库与回送运行图，以下运营运行图未更改：</gray><white><codes></white>"
       batch-type:
         create: "<code>（出库）"
         return: "<code>（回送）"
-      wildcard-flags: "<prefix> <red>运行图写成通配（* 代表任意个字符，? 代表一个字符）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
+      wildcard-flags: "<prefix> <red>运行图写成通配（* 代表任意个字符，? 代表一个字符）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--dispatch-by-operation、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--dispatch-by-operation/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:
+      power-no-start: "<prefix> <yellow>写了 POWER 但首站没有：出发时沿用列车当前的受电方式，编表按“换成电力不加时、换成内燃加时”估算，与实际可能不符；建议在首站写明出发方式</yellow>"
       success: "<prefix> <dark_aqua>停靠表已写入：</dark_aqua><white><code></white> <gray>（共 <count> 个停靠点）</gray>"
       empty: "<prefix> <red>书中没有可用定义</red> <gray>请至少写入一行站码或节点 ID</gray>"
       book:
@@ -996,14 +1026,35 @@ command:
       cret-not-first: "<prefix> <red>CRET 只能出现在首个停靠点</red> <gray>(seq=<white><seq></white>)</gray>"
       dsty-multi: "<prefix> <red>DSTY 只能出现一次</red>"
       dsty-not-last: "<prefix> <red>DSTY 必须为最后一个停靠点</red> <gray>(seq=<white><seq></white>)</gray>"
+      power-invalid: "<prefix> <red>POWER 的受电方式无法识别：</red><white><value></white> <gray>(seq=<white><seq></white>；可写 ptg5、ptg6、shoe、diesel、supercap)</gray>"
+      power-deferred: "<prefix> <yellow>第 <white><seq></white> 个停靠点不停车，涉及内燃的换模推迟到其后第一个停车点</yellow>"
+      decouple-syntax: "<prefix> <red>DECP 写法有误：</red><white><value></white> <gray>(seq=<white><seq></white>；应写 DECP FRONT|REAR:节数:GOTO:交路、…:IDLE 或 …:RETURN)</gray>"
+      decouple-end: "<prefix> <red>DECP 须指明从车头（FRONT）还是车尾（REAR）切：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      decouple-cars: "<prefix> <red>DECP 的节数须为正整数：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      decouple-action: "<prefix> <red>DECP 的去向须为 GOTO、IDLE 或 RETURN：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      decouple-goto-missing: "<prefix> <red>DECP …:GOTO 须写明交路码：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      couple-syntax: "<prefix> <red>COPL 写法有误：</red><white><value></white> <gray>(seq=<white><seq></white>；应写 COPL FROM:交路 或 COPL FROM:交路:WAIT:秒)</gray>"
+      couple-wait: "<prefix> <red>COPL 的等待秒数须为非负整数：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      coupling-at-end: "<prefix> <red>第 <white><seq></white> 个停靠点是交路首站或末站，不得写 DECP 或 COPL</red>"
+      coupling-at-pass: "<prefix> <red>第 <white><seq></white> 个停靠点不停车（PASS），不得写 DECP 或 COPL</red>"
+      coupling-duplicate: "<prefix> <red>第 <white><seq></white> 个停靠点写了多条 DECP 或 COPL，一站至多各一条</red>"
+      decouple-front-idle: "<prefix> <red>第 <white><seq></white> 个停靠点 DECP 切下车头后就地待命，会挡住本交路继续前行；请改为切车尾，或改用 GOTO、RETURN</red>"
+      coupling-target-missing: "<prefix> <red>第 <white><seq></white> 个停靠点的加解编指向的交路 </red><white><route></white><red> 在本线路中不存在</red>"
+      coupling-target-self: "<prefix> <red>第 <white><seq></white> 个停靠点的加解编不得指向本交路</red>"
+      coupling-target-group: "<prefix> <red>第 <white><seq></white> 个停靠点的加解编指向的交路 </red><white><route></white><red> 不在同一交路组</red>"
+      decouple-target-start: "<prefix> <red>第 <white><seq></white> 个停靠点 DECP 指向的交路 </red><white><route></white><red> 首站须为本站</red>"
+      couple-target-end: "<prefix> <red>第 <white><seq></white> 个停靠点 COPL 指向的交路 </red><white><route></white><red> 末站须为本站</red>"
       graph-missing: "<prefix> <gray>未加载调度图快照，已跳过可达性校验</gray>"
       station-missing: "<prefix> <red>第 <white><seq></white> 个停靠点的站点不存在</red>"
       station-graph-missing: "<prefix> <red>第 <white><seq></white> 个停靠点缺少图节点</red> <gray>(station=<white><station></white>)</gray>"
       node-missing: "<prefix> <red>第 <white><seq></white> 个停靠点缺少节点</red>"
       edge-unreachable: "<prefix> <red>停靠点之间不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
       path-cross-world: "<prefix> <red>停靠点跨世界/跨图，未处于同一调度图内</red>"
+      dynamic-invalid: "<prefix> <red>第 <white><seq></white> 个 DYNAMIC 停靠点的股道写法无效，请按 [1,3,5] 或 [1-3] 的格式填写，不写则不限股道</red>"
+      dynamic-candidate-budget: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点有 <white><valid></white> 条可用股道，运行时只在股道号最小的 <white><limit></white> 条中选台；列车停在其余股道上仍算到站</yellow>"
       dynamic-no-valid-tracks: "<prefix> <red>第 <white><seq></white> 个 DYNAMIC 停靠点所有轨道均不存在</red> <gray>(<white><spec></white> <white><range></white>)</gray>"
       dynamic-partial-tracks: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点部分轨道不存在</yellow> <gray>(缺失： <white><missing></white>, 有效： <white><valid></white>)</gray>"
+      dynamic-partial-tracks-more: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点部分轨道不存在</yellow> <gray>(缺失： <white><missing></white> …（共 <white><total></white> 条）, 有效： <white><valid></white>)</gray>"
       debug:
         start-line: "起步线路"
         header: "<prefix> <dark_aqua>停靠表解析结果</dark_aqua>"
@@ -1026,6 +1077,7 @@ command:
       entry: "<prefix> <gray>[<route>]</gray> <error>"
       more: "<prefix> <gray>已省略 <white><count></white> 条问题</gray>"
       spawn-group-missing: "<prefix> <red>运行图绑定了不存在的交路组</red> <gray>(group=<white><group></white>)</gray>"
+      dispatch-by-operation-type: "<prefix> <red>按运营交路调度仅允许 CREATE/RETURN。</red>"
       spawn-baseline-missing: "<prefix> <red>交路组与线路都缺少发车基线</red> <gray>(group=<white><group></white>)</gray>"
       spawn-weight-missing: "<prefix> <red>同一交路组有多条运营运行图，但本运行图未设置出车权重（spawn_weight）</red> <gray>(group=<white><group></white>)</gray>"
       create-missing-cret: "<prefix> <red>出库运行图的首个停靠点必须写 CRET</red>"
@@ -1087,6 +1139,11 @@ command:
       unreachable: "<red>✗</red> <white><from></white> <dark_aqua>───</dark_aqua> <white><to></white> <red>（不可达）</red>"
       summary: "<prefix> <dark_aqua>总计：</dark_aqua> <white><total_blocks></white> <gray>格</gray> | <gray>原节点：</gray> <white><original_count></white> <gray>扩展后：</gray> <white><expanded_count></white> | <gray>绕行：</gray> <white><has_detour></white>"
 
+  timetable:
+    build:
+      restricted-unplaced: "<prefix> <red>编表失败：限定股道的 DYNAMIC 停靠有 <white><count></white> 段连续停留排不出一条始终空闲的股道，请放宽允许的股道或调整发车间隔</red>"
+      restricted-plan-failed: "<prefix> <red>编表失败：限定股道的 DYNAMIC 停靠排台时出错，无法确认每段停留都有可用股道</red> <gray>(<white><reason></white>)</gray>"
+
   station:
     not-found: "<prefix> <red>未找到站点：</red><white><operator></white><gray>/</gray><white><station></white>"
     list:
@@ -1143,10 +1200,19 @@ command:
         empty: "<gray>（暂无车站组）</gray>"
         entry: "<white><company></white><gray>:</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua><gray>（成员数：<white><count></white>）</gray>"
         all: "全部"
+    link:
+      siding:
+        empty-nodes: "<prefix> <red>请至少指定一个存车线节点</red>"
+        success: "<prefix> <dark_aqua>站点</dark_aqua> <white><station></white> <dark_aqua>已关联存车线池</dark_aqua> <white><pool></white> <gray>（节点 <white><count></white> 个，容量 <white><capacity></white>）</gray>"
+    siding:
+      list:
+        empty: "<prefix> <gray>站点</gray> <white><station></white> <gray>未关联存车线池</gray>"
+        header: "<prefix> <dark_aqua>站点</dark_aqua> <white><station></white> <dark_aqua>的存车线池</dark_aqua>"
+        entry: "<white><pool></white> <gray>-</gray> <dark_aqua><nodes></dark_aqua>"
   pids:
     help:
       header: "<prefix> <dark_aqua>站台屏</dark_aqua> <gray>挂满空展示框后用安装纸安装，再用配置棍调整</gray>"
-      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5、status-3x5 线路运行状况屏或自定义布局）</dark_aqua>"
+      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4 站台屏，加 -right 为站台号在右的版本；platform-group-1x3、platform-group-1x4 多站台屏；platform-2x1 停站屏；station-3x5 车站统屏；status-3x5 线路运行状况屏；或自定义布局）</dark_aqua>"
       stick: "<gray>/fta pids stick</gray> <white>-</white> <dark_aqua>领取配置棍（右键菜单、左键信息、潜行左键拆除）</dark_aqua>"
       list: "<gray>/fta pids list <white>[页]</white></gray> <white>-</white> <dark_aqua>全部站台屏（需管理权限）</dark_aqua>"
       info: "<gray>/fta pids info|menu|remove <white><屏幕></white></gray> <white>-</white> <dark_aqua>按编号查看、配置或拆除</dark_aqua>"
@@ -1175,6 +1241,9 @@ command:
       need-binding: "<prefix> <red>请先绑定车站或运营商再启用显示</red>"
       unknown-operator: "<prefix> <red>未找到运营商</red> <gray>(operator=<white><operator></white>)</gray>"
       operator-line-status-only: "<prefix> <red>只有线路运行状况屏可以不绑车站、只绑运营商</red> <gray>其余布局按车站显示到发信息</gray>"
+      rotate-line-status-only: "<prefix> <red>只有带线路运行状况页的屏幕可以按运营商轮播</red>"
+      rotate-need-operator: "<prefix> <red>请先绑定车站或运营商，再选择轮播的运营商</red>"
+      rotate-other-company: "<prefix> <red>只能轮播与本屏运营商同一公司的运营商</red> <gray>(operator=<white><operator></white>)</gray>"
       need-platform: "<prefix> <red>站台屏须选定站台</red> <gray>站台号写在左上角，不能为空，也不能选全部；需要显示全部站台时请换用车站统屏布局</gray>"
       too-many-platforms: "<prefix> <red>这块屏幕最多显示 <white><max></white> 个站台</red> <gray>请先去掉一个，或换用车站统屏布局</gray>"
       page-is-primary: "<prefix> <red>该布局已是主布局</red> <gray>(layout=<white><layout></white>)，主布局请在“布局”一行改选</gray>"
@@ -1253,6 +1322,26 @@ command:
       route-empty: "<prefix> <red>运行图没有停靠表</red> <gray>(route=<white><route></white>)</gray>"
       route-mismatch: "<prefix> <red>首个 stop 与车库不匹配</red> <gray>(route=<white><route></white>, node=<white><node></white>)</gray>"
       success: "<prefix> <dark_aqua>已生成列车</dark_aqua> <gray>(train=<white><train></white>, route=<white><route></white>, pattern=<white><pattern></white>, dest=<white><dest></white>, run=<white><run_id></white>)</gray>"
+    extra:
+      issued: "<prefix> <dark_aqua>已加开一班</dark_aqua> <white><route></white><gray>：计划 <white><time></white> 自车库 <white><node></white> 出车，跑完全程后回库。编号</gray> <white><id></white> <click:suggest_command:'/fta depot extra cancel <full_id>'><hover:show_text:'<gray>撤销这一班</gray>'><gray>[撤销]</gray></hover></click>"
+      issued-now: "<prefix> <dark_aqua>已加开一班</dark_aqua> <white><route></white><gray>：尽快自车库 <white><node></white> 出车，跑完全程后回库。编号</gray> <white><id></white> <click:suggest_command:'/fta depot extra cancel <full_id>'><hover:show_text:'<gray>撤销这一班</gray>'><gray>[撤销]</gray></hover></click>"
+      pattern-ignored: "<prefix> <gray>加开按交路车型出车，已忽略 --pattern</gray>"
+      at-needs-extra: "<prefix> <yellow>--at 只能与 --extra 一起使用（加开一班时指定发车时刻）</yellow>"
+      invalid-time: "<prefix> <red>时刻写法无效：</red><white><value></white> <gray>写法为 HH:MM（服务器时区），已过的时刻视为次日</gray>"
+      unavailable: "<prefix> <red>加开暂不可用：调度尚未就绪</red>"
+      no-route: "<prefix> <red>交路 <white><route></white> 不在调度的交路缓存中，请确认交路已生效</red>"
+      not-from-depot: "<prefix> <red>交路 <white><route></white> 的首站不是车库，无法加开</red> <gray>加开只从车库出车</gray>"
+      wrong-depot: "<prefix> <red>交路 <white><route></white> 不从车库 <white><node></white> 出车</red> <gray>（出库写法：<white><depot></white>）</gray>"
+      failed: "<prefix> <red>加开 <white><route></white> 失败：发车服务不可用，请查看控制台日志</red>"
+      spawn-disabled: "<prefix> <red>发车已关闭（spawn.enabled），加开的车不会出车</red>"
+      list-header: "<prefix> <dark_aqua>加开</dark_aqua>"
+      list-empty: "<prefix> <gray>当前没有加开的车次</gray>"
+      list-pending: "  <white><id></white> <white><route></white> <gray>计划 <white><time></white> 自 <white><node></white> 出车</gray> <click:suggest_command:'/fta depot extra cancel <full_id>'><hover:show_text:'<gray>撤销这一班</gray>'><gray>[撤销]</gray></hover></click>"
+      list-running: "  <gray>运行中</gray> <white><train></white>"
+      cancelled: "<prefix> <dark_aqua>已撤销加开</dark_aqua> <white><id></white>"
+      cancel-too-late: "<prefix> <yellow>加开 <white><id></white> 已经出车，无法撤销</yellow>"
+      cancel-not-found: "<prefix> <yellow>没有编号以 <white><id></white> 开头的待出车加开</yellow>"
+      cancel-ambiguous: "<prefix> <yellow>编号以 <white><id></white> 开头的加开不止一个，请多写几位</yellow>"
     schedule:
       header: "<prefix> <dark_aqua>车库出库检查</dark_aqua> <gray>(node=<white><node></white>, trips=<white><trips></white>, services=<white><services></white>, queue=<white><queue></white>, pending=<white><pending></white>)</gray>"
       settings: "<gray>-</gray> spawn.enabled=<white><enabled></white> tick=<white><tick></white> maxSpawn=<white><max_spawn></white> maxGenerate=<white><max_generate></white>"
@@ -1306,6 +1395,7 @@ command:
       save-hint: "<gray>只改了这列车；要让以后出库的车也带上标记，请把列车保存回存车</gray> <aqua>[/train save]</aqua>"
       save-hover: "<gray>点击填入 /train save，再写上存车名</gray>"
     config:
+      power-too-many: "<prefix> <red>受电方式最多写 3 种（驾驶台菜单只有 3 个位置）：</red><white><raw></white>"
       set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 配置已更新： type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
       list: "<prefix> 列车 <dark_aqua><train></dark_aqua>: type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
       drive-set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 驾驶参数已更新： mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> power=<white><power></white>"
@@ -1429,6 +1519,100 @@ call:
   not-found: "<prefix> <yellow>该方向已不能叫车，请重新打开叫车对话框</yellow>"
   error: "<prefix> <red>叫车失败，请稍后再试</red>"
 
+  extra:
+    departed: "<prefix> <dark_aqua>加开的一班已出车：</dark_aqua><white><route></white> <gray>（列车 <white><train></white>）</gray>"
+    failed: "<prefix> <yellow>加开的 <white><route></white>（计划 <white><time></white>）未能出车，已撤销</yellow>"
+    timeout: "<prefix> <yellow>加开的 <white><route></white>（计划 <white><time></white>）过了计划时刻 <white><minutes></white> 分钟仍未出车，已撤销</yellow>"
+coupler:
+  item:
+    name: "<dark_aqua>车钩扳手</dark_aqua>"
+    lore-1: "<gray>右键端车外端：开启或锁闭车钩</gray>"
+    lore-2: "<gray>右键两节车厢的连接处：在此解挂</gray>"
+    lore-3: "<gray>Shift+右键车钩已开启的端车：推向前方列车并连挂</gray>"
+    lore-4: "<gray>右键车厢中部：查看车厢信息</gray>"
+  usage:
+    header: "<prefix> <dark_aqua>车钩扳手</dark_aqua> <gray>（调度管理的列车仅限不在运营中的：终点待命车、已过最后载客站的回库车）</gray>"
+    wrench: "  <white>/fta coupler wrench</white> <gray>领取车钩扳手</gray>"
+    toggle: "  <white>右键端车外端</white> <gray>开启或锁闭该端车钩；手持扳手时，附近列车外端的车钩以绿色（开启）与红色（锁闭）粒子标示</gray>"
+    split: "  <white>右键两节车厢的连接处</white> <gray>在此解挂，解挂处两端车钩随即锁闭；调度管理的列车解下的部分改用新车名</gray>"
+    push: "  <white>Shift+右键车钩已开启的端车</white> <gray>将整列车慢速推向前方列车并连挂；对方相对一端的车钩须已开启</gray>"
+    couple: "  <white>开启车钩后点击聊天栏的［连挂］</white> <gray>本列车慢速驶向前方列车并连挂，对方相对一端的车钩随之开启</gray>"
+    info: "  <white>右键车厢中部</white> <gray>查看车厢序号、编组、两端车钩与可否操作</gray>"
+  player-only: "<prefix> <red>车钩扳手只能由玩家领取</red>"
+  unavailable: "<prefix> <red>连挂解挂服务尚未就绪</red>"
+  given: "<prefix> <dark_aqua>已发放车钩扳手</dark_aqua>"
+  given-dropped: "<prefix> <dark_aqua>已发放车钩扳手</dark_aqua> <gray>（背包已满，已掉落在脚下）</gray>"
+  disabled: "<prefix> <yellow>车钩扳手已在配置中停用（config.yml 的 coupler.enabled）</yellow>"
+  no-permission: "<prefix> <red>当前操作者不具备使用车钩扳手的权限</red>"
+  busy: "<prefix> <yellow>该列车正处于推送连挂过程中，请稍候</yellow>"
+  denied: "<prefix> <yellow><train>：<reason></yellow>"
+  deny:
+    allowed: "可以操作"
+    moving: "列车正在运行"
+    driver: "列车由驾驶员值乘"
+    guard: "列车由车掌值乘"
+    dwelling: "列车正在停站"
+    departure-gate: "列车正在等待发车"
+    dispatching: "待命列车正被派往下一趟运行"
+    called: "列车为叫来的列车"
+    early-hold: "列车正在车库等候提前出车"
+    timetable-duty: "列车已排入时刻表班次"
+    in-service: "列车正在运营，须先退出运营"
+  end:
+    outer: "外侧"
+    front: "前端"
+    rear: "后端"
+  toggle:
+    opened: "<prefix> <green>已开启</green> <white><train></white> <gray>第 <car> 节<end>车钩</gray>"
+    closed: "<prefix> <gray>已锁闭</gray> <white><train></white> <gray>第 <car> 节<end>车钩</gray>"
+  split:
+    done: "<prefix> <green>已解挂</green> <white><train></white> <gray>（<kept> 节 + <detached> 节，解下的列车：</gray><white><name></white><gray>）</gray>"
+    rename-failed: "<prefix> <yellow>已解挂</yellow> <white><train></white><yellow>，但解下的 <detached> 节未能取得新车名，调度将按重复列车处理</yellow>"
+    failed: "<prefix> <red>未能解挂</red> <white><train></white>"
+  couple:
+    offer: "<prefix> <gray>前方约 <gap> 格有列车</gray> <white><train></white> <click:run_command:'/fta coupler couple <token>'><hover:show_text:'<gray>本列车将慢速驶向该列车并连挂；对方相对一端的车钩随之开启</gray>'><green>[连挂]</green></hover></click>"
+    none: "<prefix> <yellow>该［连挂］按钮已失效：请用扳手右键重新开启要连挂一端的车钩，再点击新的［连挂］</yellow>"
+    far: "<prefix> <yellow>距离列车过远，请走近后再点击［连挂］</yellow>"
+  push:
+    joint: "<prefix> <yellow>此处为两节车厢的连接处，只能从端车外侧推送</yellow>"
+    closed: "<prefix> <yellow>该端车钩处于锁闭状态，请先右键开启</yellow>"
+    actions: "<prefix> <yellow><train> 正在执行其他动作，请稍后再试</yellow>"
+    mixed: "<prefix> <yellow>调度管理的列车与普通列车不得连挂</yellow>"
+    target-closed: "<prefix> <yellow>前方列车 <train> 相对一端的车钩处于锁闭状态</yellow>"
+    too-long: "<prefix> <yellow>连挂后共 <cars> 节，超过上限 <max> 节</yellow>"
+    path-unguarded: "<prefix> <yellow>推送路径经过道岔或联锁区：须由两车之一占用、且无其他列车占用，方可推送</yellow>"
+    target:
+      no-track: "<prefix> <yellow>端车不在轨道上，或附近区块尚未加载</yellow>"
+      not-found: "<prefix> <yellow>沿轨道 <blocks> 格内前方没有可连挂的列车（道岔须开通至对方）</yellow>"
+      middle-car: "<prefix> <yellow>前方首先遇到的是其他列车的中间车厢，无法连挂</yellow>"
+    started: "<prefix> <dark_aqua>开始推送：前方列车</dark_aqua> <white><train></white> <gray>（间隙约 <gap> 格）</gray>"
+    linked: "<prefix> <green>已连挂</green> <white><train></white> <gray>（共 <cars> 节）</gray>"
+    failed: "<prefix> <red>未能连挂：<reason></red>"
+    reason:
+      overrun: "推送超出预定距离仍未接上"
+      stalled: "列车无法推动"
+      wrong-way: "列车朝反方向移动，已停车"
+      lost: "列车已不存在，或推送被中断"
+      mixed: "调度管理的列车与普通列车不得连挂"
+      too-long: "超过节数上限"
+      refused: "TrainCarts 拒绝连挂"
+  info:
+    header: "<prefix> <white><train></white> <gray>第 <white><car></white>/<white><cars></white> 节 · 编组 <white><consist></white></gray>"
+    couplers: "  <gray>车钩：前端 <white><front></white>，后端 <white><rear></white></gray>"
+    state: "  <gray><state></gray>"
+    coupled: "已与第 <car> 节连挂"
+    open: "开启"
+    closed: "锁闭"
+    unmanaged: "普通 TrainCarts 列车，可以操作"
+    allowed: "调度管理的列车，当前不在运营中，可以操作"
+    denied: "调度管理的列车，暂不可操作："
+  # 运营中解编：值乘的人选择继续哪一段时对两段车的说明（<end>、<cars>、<destination>）
+  decouple:
+    segment: "<end> <cars> 节，开往<destination>"
+    front: "前"
+    rear: "后"
+    idle: "本站待命"
+    return: "回库"
 pids:
   # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
   board:
@@ -1466,6 +1650,8 @@ pids:
       on-time-secondary: "On time"
       on-call: "叫车"
       on-call-secondary: "On call"
+      extra: "加开"
+      extra-secondary: "Extra"
       late: "晚点 <minutes> 分"
       late-secondary: "Late <minutes> min"
       severely-late: "严重晚点 <minutes> 分"
@@ -1498,15 +1684,94 @@ pids:
     # 备注：终点下面英文那一格轮换显示的标签（色块反白），标签后写站名或线路名
     remark:
       last-train: "末班车"
+      division: "分行"
+      division-secondary: "Divides"
+      division-here: "本站分行"
+      division-here-secondary: "Divides here"
       through: "直通"
       through-secondary: "thru"
+      # 联挂：回程支线的车在后面写的那一站挂上主干，乘客留在车上继续前往终点
+      join: "联挂"
+      join-secondary: "Joins"
       via: "经由"
       via-secondary: "via"
-    # 2×1 停站屏：终点下面一行写从哪站起直通；后续列车页的标题
+    # 分行（列车在本站或前方某站拆成两列，各开往不同的地方）：分行页标题、各段说明与到发行备注；
+    # <station> 分行站，<end> 前或后，<cars> 节数，<destination> 分行后开往的车站
+    division:
+      title: "本次列车在<station>分行"
+      title-secondary: "This train divides at <station>"
+      title-here: "本次列车在本站分行"
+      title-here-secondary: "This train divides here"
+      front: "前"
+      front-secondary: "Front"
+      rear: "后"
+      rear-secondary: "Rear"
+      to: "<end> <cars> 节开往<destination>"
+      to-secondary: "<end> <cars> cars to <destination>"
+      to-one-secondary: "<end> <cars> car to <destination>"
+      ends: "<end> <cars> 节至<station>止"
+      ends-secondary: "<end> <cars> cars end at <station>"
+      ends-one-secondary: "<end> <cars> car ends at <station>"
+      ends-here: "<end> <cars> 节本站止"
+      ends-here-secondary: "<end> <cars> cars end here"
+      ends-here-one-secondary: "<end> <cars> car ends here"
+      remark: "<end> <cars> 节往<destination>"
+      # 拆开以后（解下的一段接着载客、另一段还停在站台上）的车厢页：标题、本列车与另一段的说明
+      title-divided: "本站已分行，<end> <cars> 节即将开往<destination>"
+      title-divided-secondary: "Divided · <end> <cars> cars to <destination>"
+      title-divided-one-secondary: "Divided · <end> <cars> car to <destination>"
+      divided-front: "前"
+      divided-front-secondary: "front"
+      divided-rear: "后"
+      divided-rear-secondary: "rear"
+      departing: "开往<destination>，即将发车"
+      departing-secondary: "To <destination> · departing soon"
+      not-in-service: "不载客，请勿上车"
+      not-in-service-secondary: "Not in service"
+    # 联挂页（回程支线的车在前方站挂上主干，或主干在本站挂上回程支线车）：标题与各段说明；
+    # <station> 联挂站，<cars> 节数，<destination> 联挂以后开往的车站
+    join:
+      title: "本次列车在<station>联挂"
+      title-secondary: "This train joins another at <station>"
+      title-here: "本次列车在本站联挂，<cars> 节开往<destination>"
+      title-here-secondary: "Joins another train here · <cars> cars to <destination>"
+      own-ahead: "本列车 <cars> 节，无需换乘"
+      own-ahead-secondary: "This train · stay on board"
+      added: "在<station>挂上 <cars> 节"
+      added-secondary: "<cars> more cars added there"
+      added-one-secondary: "<cars> more car added there"
+      own-here: "本列车 <cars> 节"
+      own-here-secondary: "This train · <cars> cars"
+      own-here-one-secondary: "This train · <cars> car"
+      own-arriving: "本列车 <cars> 节，进站后挂上"
+      own-arriving-secondary: "This train · <cars> cars arriving"
+      own-arriving-one-secondary: "This train · <cars> car arriving"
+      standing: "已在站台的 <cars> 节"
+      standing-secondary: "<cars> cars already here"
+      standing-one-secondary: "<cars> car already here"
+      joining: "即将挂上 <cars> 节"
+      joining-secondary: "<cars> more cars joining"
+      joining-one-secondary: "<cars> more car joining"
+    # 2×1 停站屏：终点下面一行写从哪站起直通；后续列车页的标题；
+    # 分行车与回程支线车的说明（<end> 前或后，<cars> 节数，<destination> 开往的车站）；
+    # 终点下面一行的说明只有约 80 像素宽（10 号中文 8 字），站名已写在上一行，英文不再写 here / there
     stop-list:
       through-from: "<station>起"
       following: "后续列车"
       following-secondary: "Following trains"
+      ends-there: "<end> <cars> 节到此止"
+      ends-there-secondary: "<end> <cars> cars end"
+      ends-there-one-secondary: "<end> <cars> car ends"
+      ends-here: "<end> <cars> 节本站止"
+      ends-here-secondary: "<end> <cars> cars end"
+      ends-here-one-secondary: "<end> <cars> car ends"
+      joins-there: "联挂后无需换乘"
+      joins-there-secondary: "Stay on board"
+      only: "仅<end> <cars> 节"
+      only-secondary: "<end> <cars> only"
+      board-part: "前往<destination>请乘<end> <cars> 节"
+      board-part-secondary: "<end> <cars> cars to <destination>"
+      board-part-one-secondary: "<end> <cars> car to <destination>"
     # 线路运行状况屏（3×5）：本站所属运营商各线路的运行状况；说明栏文案按 12 号中文、10 号英文约 170 像素宽来写
     line-status:
       title: "线路运行状况"
@@ -1564,22 +1829,22 @@ pids:
         title: "排队候车"
         title-secondary: "Queue to board"
         body: "请勿拥挤，依次上车"
-        body-secondary: "Board in turn, without pushing"
+        body-secondary: "Don't push when boarding"
       doors:
         title: "勿挡车门"
         title-secondary: "Keep doors clear"
         body: "车门关闭时请勿抢上"
-        body-secondary: "Don't board as the doors close"
+        body-secondary: "Don't board when the doors are closing"
       check:
         title: "确认终点"
-        title-secondary: "Check your train"
+        title-secondary: "Check destination"
         body: "各次列车停站不同"
-        body-secondary: "Not all trains make the same stops"
+        body-secondary: "Not all trains stop at every station"
       gap:
         title: "注意间隙"
         title-secondary: "Mind the gap"
         body: "上下车请留意脚下"
-        body-secondary: "Watch your step as you board"
+        body-secondary: "Watch your step getting on and off"
       passing:
         title: "列车通过"
         title-secondary: "Train passing"
@@ -1653,6 +1918,8 @@ pids:
     layout: "<gray>布局</gray>"
     pages: "<gray>组合翻页</gray>"
     pages-hint: "<dark_gray>与主布局轮流显示，再点一次取消</dark_gray>"
+    rotation: "<gray>轮播运营商</gray>"
+    rotation-hint: "<dark_gray>线路运行状况依次显示各运营商的线路，再点一次取消</dark_gray>"
     appearance: "<gray>外观</gray>"
     actions: "<gray>操作</gray>"
     station-manual: "手动指定…"
@@ -1678,6 +1945,7 @@ pids:
   info:
     header: "<prefix> <dark_aqua>站台屏 <white><id></white></dark_aqua> <gray>· <white><layout></white>（<size>）· <mode></gray>"
     binding: "<gray>车站：<white><station></white> · <platforms> · 线路：<white><lines></white> · 外观：<white><appearance></white></gray>"
+    rotation: "<gray>轮播运营商：<white><operators></white></gray>"
     location: "<gray>位置：<white><world></white> <white><x></white> <white><y></white> <white><z></white> · 朝 <white><facing></white></gray>"
   remove:
     confirm: "<prefix> <yellow>确认拆除站台屏 <white><id></white>？</yellow><gray>展示框将还原为空，并退回安装纸。</gray> "
@@ -1723,6 +1991,10 @@ pids:
     platform-pending: "<gray>站台待定</gray> "
     arriving: "<aqua>▶</aqua> <platform><line> <gray>开往</gray> <yellow><destination></yellow> <white>的列车即将进站</white>"
     arriving-terminating: "<aqua>▶</aqua> <platform><line> <white>本站终到列车即将进站，请勿上车</white>"
+    # 在本站分行的列车进站：<parts> 为两段说明（与站台屏分行页相同，如“前 4 节开往南渡，后 4 节本站止”）
+    arriving-divides-here: "<aqua>▶</aqua> <platform><line> <gray>开往</gray> <yellow><destination></yellow> <white>的列车即将进站</white> <dark_gray>┃</dark_gray> <white>本站分行：<parts></white>"
+    # 在本站与另一列车联挂的列车进站
+    arriving-joins-here: "<aqua>▶</aqua> <platform><line> <gray>开往</gray> <yellow><destination></yellow> <white>的列车即将进站</white> <dark_gray>┃</dark_gray> <white>本站联挂</white>"
     arriving-out-of-service: "<aqua>▶</aqua> <platform><white>回库列车即将进站，请勿上车</white>"
     passing: "<gold>⚠</gold> <platform><white>有列车通过，请在安全线以内候车</white>"
     cancelled: "<gray>[<station>]</gray> <platform><line> <white><time></white> <gray>开往</gray> <white><destination></white> <red>的班次已取消</red>"
@@ -1748,6 +2020,8 @@ drive:
     b4: "<gold>B4 常用制动 4 档</gold>"
     eb: "<red>EB 紧急制动</red>"
   hud:
+    power:
+      pending: "<yellow>本区段改用<mode>：停车后在驾驶台菜单切换</yellow>"
     line: "<speed> <gray>/</gray> <limit> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
     line-no-limit: "<speed> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
     direction-tag: "<aqua><direction></aqua>"
@@ -1873,6 +2147,22 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
+  power:
+    short:
+      ptg5: "5米弓"
+      ptg6: "6米弓"
+      shoe: "第三轨"
+      diesel: "内燃"
+      supercap: "电容"
+    name:
+      ptg5: "受电弓（5 米接触网）"
+      ptg6: "受电弓（6 米接触网）"
+      shoe: "第三轨"
+      diesel: "内燃"
+      supercap: "超级电容"
+    pending: "<yellow>本区段改用<white><mode></white>受电，请停车后在驾驶台菜单第三排切换</yellow>"
+    switching: "<green>开始切换为<white><mode></white>受电，受电接通前不能牵引</green>"
+    switched: "<gray>已切换为<white><mode></white>受电</gray>"
   supercap:
     low: "<yellow>超级电容电量偏低（<white><percent>%</white>），请在下一站开门充电</yellow>"
     depleted: "<red>超级电容电量耗尽，牵引已切除，制动不受影响</red>"
@@ -1905,6 +2195,7 @@ drive:
     title: "<gold><bold>驾驶台</bold></gold> <gray><train></gray>"
     row: "<gray><label></gray> <value>"
     label:
+      power: "受电"
       train: "列车"
       signal: "信号"
       next-station: "下一站"
@@ -1923,6 +2214,9 @@ drive:
       door-bypass: "门旁路"
       supercap: "电容"
     value:
+      power:
+        current: "<white><mode></white>"
+        pending: "<white><mode></white> <gray>→</gray> <yellow><target></yellow>"
       text: "<white><text></white>"
       supercap:
         normal: "<green><percent>%</green>"
@@ -1981,6 +2275,8 @@ drive:
         left: "<red>左侧开</red>"
         right: "<red>右侧开</red>"
         both: "<red>两侧开</red>"
+        guard-open: "<red>车掌已开门</red>"
+        guard-closed: "<green>关闭</green> <gray>（车掌开关）</gray>"
       air:
         ok: "<white><mr></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
         warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
@@ -2023,6 +2319,9 @@ drive:
   menu:
     title: "驾驶台"
     item:
+      power-mode-on: "<green>受电方式：<mode>（当前）</green>"
+      power-mode-off: "<gray>受电方式：<mode></gray>"
+      power-mode-busy: "<yellow>受电方式：<mode>（接通中）</yellow>"
       reverser-forward: "<green>换向手柄：前进</green>"
       reverser-neutral: "<gray>换向手柄：零位</gray>"
       reverser-reverse: "<aqua>换向手柄：后退</aqua>"
@@ -2076,6 +2375,8 @@ drive:
       door-bypass-on: "<gold>门旁路：已旁路</gold>"
       door-bypass-off: "<gray>门旁路：未旁路</gray>"
     hint:
+      power-mode-current: "<gray>列车当前使用的受电方式</gray>"
+      power-mode-select: "<gray>点击切换为这种受电方式；simulation 级受电重新接通期间不能牵引</gray>"
       reverser: "<gray>点击选择方向</gray>"
       door: "<gray>点击开关车门</gray>"
       stopped: "<gray>停稳后才能操作</gray>"
@@ -2096,6 +2397,9 @@ drive:
       gauge: "<gray>表计只显示读数，不能操作</gray>"
       faults: "<gray>故障指示只显示，不能操作</gray>"
     detail:
+      power-required: "<yellow>本区段要求使用这种受电方式</yellow>"
+      guard-doors: "<gray>车门由车掌开关</gray>"
+      guard-doors-open: "<red>车掌已开门</red> <gray>（车门由车掌开关）</gray>"
       reservoir: "<gray>主风缸 <white><mr></white> kPa</gray>"
       parking-needs: "<gray>缓解需要主风缸 ≥ <white><need></white> kPa（当前 <white><mr></white>）</gray>"
       brake-test-not-done: "<gray>制动缸 <white><bc></white> kPa</gray>"
@@ -2365,6 +2669,23 @@ drive:
       cab-change: "<prefix> <red>换端时未能坐进车尾驾驶室，值乘已结束（未完成）</red> <gray>完成 <stops> 站</gray>"
       exam: "<prefix> <yellow>车掌考试未通过，值乘已结束</yellow>"
       handover: "<prefix> <green>已到交班站，值乘结束，车门交还站台</green> <gray>完成 <stops> 站</gray>"
+      split-end: "<prefix> <green>列车已分行，值乘结束</green> <gray>完成 <stops> 站</gray>"
+      split-switch: "<prefix> <green>本段值乘已结算，正前往解下的一段</green> <gray>完成 <stops> 站</gray>"
+      split-timeout: "<prefix> <yellow>列车分行后未在时限内选择继续值乘的一段，值乘已结束</yellow> <gray>完成 <stops> 站</gray>"
+      coupling: "<prefix> <green>列车即将并入主干，值乘结束</green> <gray>完成 <stops> 站</gray>"
+    couple:
+      moved: "<prefix> <gray>连挂后已换到列车车尾的驾驶室</gray>"
+      seat-failed: "<prefix> <yellow>连挂后车尾没有可用的驾驶座，请自行前往车尾驾驶室</yellow>"
+    # 列车在本站分行（解编）后选择继续值乘哪一段（<kept>、<detached>、<segment> 为“前 4 节，开往南渡”之类的说明）
+    split:
+      offer: "<prefix> <white>列车已在本站分行。请在 <yellow><seconds></yellow> 秒内选择：</white> <click:run_command:'/fta guard split keep'><hover:show_text:'<gray>点击执行：</gray> <white>/fta guard split keep</white>'><green>[继续值乘 <kept>]</green></hover></click> <click:run_command:'/fta guard split switch'><hover:show_text:'<gray>点击执行：</gray> <white>/fta guard split switch</white>'><aqua>[改为值乘 <detached>]</aqua></hover></click> <click:run_command:'/fta guard split end'><hover:show_text:'<gray>点击执行：</gray> <white>/fta guard split end</white>'><red>[结束值乘]</red></hover></click> <gray>超时未选择将结束值乘；未选择列车即开出视为继续值乘留下的一段</gray>"
+      kept: "<prefix> <green>继续值乘 <white><segment></white></green>"
+      switched: "<prefix> <green>已改为值乘 <white><segment></white></green>"
+      seat-failed: "<prefix> <red>留下一段的车尾没有可用的驾驶座，值乘已结束</red>"
+      switch-gone: "<prefix> <red>解下的一段已不存在，请选择继续值乘或结束值乘</red>"
+      switch-failed: "<prefix> <red>未能送入解下一段的驾驶室，请自行入座后输入 /fta guard on 上岗</red>"
+      not-choosing: "<prefix> <red>当前没有待选择的分行</red>"
+      usage: "<prefix> <red>用法：/fta guard split keep|switch|end</red>"
     timeout:
       open: "<red>开门超时，已由站台代开车门</red>"
       close: "<red>关门超时，已由站台代关车门</red>"
@@ -2499,6 +2820,7 @@ drive:
         stop: "<yellow>/fta guard stop <玩家></yellow> <gray>撤下车掌</gray>"
         tasks: "<yellow>/fta guard tasks [车站]</yellow> <gray>打开车掌任务板，领取一班车掌</gray>"
         task: "<yellow>/fta guard task [status|abandon|goto]</yellow> <gray>查看、放弃车掌任务或前往上岗</gray>"
+        split: "<yellow>/fta guard split <keep|switch|end></yellow> <gray>列车分行后选择继续值乘留下的一段、改为值乘解下的一段或结束值乘</gray>"
       start:
         started: "<prefix> <green>已上岗当车掌</green> <gray>快捷栏选中后右键：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃（按住右键约一秒）、9 紧急停车；F 打开车掌菜单；作业提示见侧边栏。中途结束值乘：F 菜单点两次「结束值乘」，或输入 /fta guard off</gray>"
         disabled: "<prefix> <red>车掌功能已关闭</red>"
@@ -2663,6 +2985,7 @@ drive:
       away: "<prefix> <yellow>已连续 <count> 站未确认发车，判定为离开：此后的里程与停站不计奖励，确认一次发车即恢复</yellow>"
       back: "<prefix> <green>已确认发车，恢复计算奖励</green>"
       forfeited: "<prefix> <gray>本趟判为未完成，不发奖励</gray>"
+      crew-bonus: "<prefix> <gray>含驾驶员与车掌同车加成：同车的停站与里程多发 <white><percent>%</white></gray>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:
@@ -3137,6 +3460,26 @@ drive:
     task-complete: "<prefix> <green>已到达终点站，任务完成，列车交还自动运行</green>"
     service-end: "<prefix> <green>列车已到达收车地点，本次驾驶结束</green>"
     settled: "<prefix> <green>本趟成绩已结算，驾驶结束，列车交还自动运行</green>"
+    split-timeout: "<prefix> <yellow>列车分行后未在时限内选择继续驾驶的一段，驾驶结束，两段列车均交还自动运行</yellow>"
+    coupling: "<prefix> <yellow>列车由调度进站连挂，本趟成绩已结算；连挂完成后如合并的列车无人驾驶，将交还给你</yellow>"
+  # 联挂（COPL）：进站与挂车由调度控车，挂上后交还驾驶
+  couple:
+    rejoined: "<prefix> <green>连挂完成，已交还驾驶；自本站起另行记分</green>"
+    taken: "<prefix> <yellow>连挂完成，合并后的列车由 <white><driver></white> 驾驶，本次驾驶结束</yellow>"
+    rejoin-failed: "<prefix> <yellow>连挂完成，未能送入驾驶室；请在 <seconds> 秒内自行入座后输入 /fta drive on</yellow>"
+    not-rejoined: "<prefix> <yellow>连挂完成，当前无法交还驾驶，列车由调度运行</yellow>"
+    not-coupled: "<prefix> <yellow>连挂未完成，列车已交由调度运行</yellow>"
+    moved-cab: "<prefix> <gray>连挂后已换到列车前端的驾驶室</gray>"
+  # 列车在本站分行（解编）后选择继续驾驶哪一段（<kept>、<detached>、<segment> 为“前 4 节，开往南渡”之类的说明）
+  split:
+    offer: "<prefix> <white>列车已在本站分行，本趟成绩已结算。请在 <yellow><seconds></yellow> 秒内选择：</white> <click:run_command:'/fta drive split keep'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive split keep</white>'><green>[继续驾驶 <kept>]</green></hover></click> <click:run_command:'/fta drive split switch'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive split switch</white>'><aqua>[改驾 <detached>]</aqua></hover></click> <click:run_command:'/fta drive split end'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive split end</white>'><red>[结束驾驶]</red></hover></click> <gray>超时未选择将结束驾驶；未选择即开车视为继续驾驶留下的一段</gray>"
+    kept: "<prefix> <green>继续驾驶 <white><segment></white></green>"
+    switched: "<prefix> <green>已改驾 <white><segment></white>，另一段已交还自动运行；本段开出下一趟时另行记分</green>"
+    seat-failed: "<prefix> <yellow>未能送入留下一段的驾驶室，请自行前往车头驾驶室</yellow>"
+    switch-gone: "<prefix> <red>解下的一段已不存在，请选择继续驾驶或结束驾驶</red>"
+    not-split: "<prefix> <yellow>列车未能在本站分行，请继续驾驶本趟</yellow>"
+    not-choosing: "<prefix> <red>当前没有待选择的分行</red>"
+    usage: "<prefix> <red>用法：/fta drive split keep|switch|end</red>"
   command:
     player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
     unavailable: "<prefix> <red>驾驶功能尚未就绪</red>"
@@ -3146,6 +3489,7 @@ drive:
       entry-off: "  <gray>•</gray> <white>/fta drive off</white> <gray>- 结束驾驶</gray>"
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- 查看当前驾驶状态</gray>"
       entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- 停稳后设置换向手柄</gray>"
+      entry-split: "  <gray>•</gray> <white>/fta drive split <keep|switch|end></white> <gray>- 列车分行后选择继续驾驶留下的一段、改驾解下的一段或结束驾驶</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- 列出全部驾驶会话</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [玩家]</white> <gray>- 强制结束某名玩家的驾驶</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- 开关驾驶输入诊断日志</gray>"
@@ -3254,4 +3598,5 @@ drive:
   seat-exit:
     moving: "<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座；需要立即结束驾驶时，输入 /fta drive off</yellow>"
     confirm: "<prefix> <yellow>两秒内再按一次 Shift 离座；离座后本趟任务按放弃处理</yellow>"
+    confirm-handback: "<prefix> <yellow>两秒内再按一次 Shift 离座；离座后驾驶结束，列车交还自动运行</yellow>"
     confirm-terminal: "<prefix> <yellow>已到终点站：请先开门结算本趟成绩，再离座换端；现在离座本趟按放弃处理，两秒内再按一次 Shift 离座</yellow>"

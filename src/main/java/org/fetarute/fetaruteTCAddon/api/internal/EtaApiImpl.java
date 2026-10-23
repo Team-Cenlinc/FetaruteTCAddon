@@ -3,10 +3,15 @@ package org.fetarute.fetaruteTCAddon.api.internal;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
+import org.fetarute.fetaruteTCAddon.coupler.DivisionForecast;
+import org.fetarute.fetaruteTCAddon.coupler.JoinForecast;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaConfidence;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaReason;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
@@ -24,8 +29,70 @@ public final class EtaApiImpl implements EtaApi {
 
   private final EtaService etaService;
 
+  /** 运行中列车的分行预测（按车名查）。 */
+  private final Function<String, Optional<DivisionForecast>> divisions;
+
+  /** 表上还没出车的一班的分行预测（按票据与预测行的车次标识查）。 */
+  private final Function<String, Optional<DivisionForecast>> plannedDivisions;
+
+  /** 运行中列车的联挂预测（按车名查）。 */
+  private final Function<String, Optional<JoinForecast>> joinings;
+
+  /** 表上还没出车的一班的联挂预测（按票据与预测行的车次标识查）。 */
+  private final Function<String, Optional<JoinForecast>> plannedJoinings;
+
   public EtaApiImpl(EtaService etaService) {
+    this(etaService, name -> Optional.empty());
+  }
+
+  /**
+   * @param divisions 运行中列车的分行预测（按车名查，任意线程可调）
+   */
+  public EtaApiImpl(EtaService etaService, Function<String, Optional<DivisionForecast>> divisions) {
+    this(etaService, divisions, trip -> Optional.empty());
+  }
+
+  /**
+   * @param divisions 运行中列车的分行预测（按车名查，任意线程可调）
+   * @param plannedDivisions 表上还没出车的一班的分行预测（按车次标识查，任意线程可调）
+   */
+  public EtaApiImpl(
+      EtaService etaService,
+      Function<String, Optional<DivisionForecast>> divisions,
+      Function<String, Optional<DivisionForecast>> plannedDivisions) {
+    this(etaService, divisions, plannedDivisions, name -> Optional.empty());
+  }
+
+  /**
+   * @param divisions 运行中列车的分行预测（按车名查，任意线程可调）
+   * @param plannedDivisions 表上还没出车的一班的分行预测（按车次标识查，任意线程可调）
+   * @param joinings 运行中列车的联挂预测（按车名查，任意线程可调）
+   */
+  public EtaApiImpl(
+      EtaService etaService,
+      Function<String, Optional<DivisionForecast>> divisions,
+      Function<String, Optional<DivisionForecast>> plannedDivisions,
+      Function<String, Optional<JoinForecast>> joinings) {
+    this(etaService, divisions, plannedDivisions, joinings, trip -> Optional.empty());
+  }
+
+  /**
+   * @param divisions 运行中列车的分行预测（按车名查，任意线程可调）
+   * @param plannedDivisions 表上还没出车的一班的分行预测（按车次标识查，任意线程可调）
+   * @param joinings 运行中列车的联挂预测（按车名查，任意线程可调）
+   * @param plannedJoinings 表上还没出车的一班的联挂预测（按车次标识查，任意线程可调）
+   */
+  public EtaApiImpl(
+      EtaService etaService,
+      Function<String, Optional<DivisionForecast>> divisions,
+      Function<String, Optional<DivisionForecast>> plannedDivisions,
+      Function<String, Optional<JoinForecast>> joinings,
+      Function<String, Optional<JoinForecast>> plannedJoinings) {
     this.etaService = Objects.requireNonNull(etaService, "etaService");
+    this.divisions = divisions == null ? name -> Optional.empty() : divisions;
+    this.plannedDivisions = plannedDivisions == null ? trip -> Optional.empty() : plannedDivisions;
+    this.joinings = joinings == null ? name -> Optional.empty() : joinings;
+    this.plannedJoinings = plannedJoinings == null ? trip -> Optional.empty() : plannedJoinings;
   }
 
   @Override
@@ -164,17 +231,34 @@ public final class EtaApiImpl implements EtaApi {
     if (board == null) {
       return new BoardResult(List.of());
     }
+    List<org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow> internal =
+        board.rows().stream().filter(Objects::nonNull).toList();
+    List<Optional<DivisionForecast>> divisions = internal.stream().map(this::divisionOf).toList();
+    // 主干在本站分行的那一行已经写了解下那一段的去向：子交路首班就是这几节车，它的票据、预测行不再另列
+    Set<String> continued = new HashSet<>();
+    for (int i = 0; i < internal.size(); i++) {
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow row = internal.get(i);
+      divisions
+          .get(i)
+          .filter(found -> !found.divided() && found.stopIndex() == row.stopIndex())
+          .flatMap(DivisionForecast::detachedTrip)
+          .ifPresent(continued::add);
+    }
     List<BoardRow> rows = new ArrayList<>();
-    for (org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow row : board.rows()) {
-      if (row == null) {
+    for (int i = 0; i < internal.size(); i++) {
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow row = internal.get(i);
+      if (row.trainName().isEmpty()
+          && row.serviceTripId().filter(continued::contains).isPresent()) {
         continue;
       }
+      Optional<DivisionForecast> division = divisions.get(i);
+      Optional<DivisionForecast.Part> onward = onwardPart(row, division);
       rows.add(
           new BoardRow(
               row.lineName(),
               row.routeId(),
-              row.destination(),
-              row.destinationId(),
+              onward.map(DivisionForecast.Part::destination).orElse(row.destination()),
+              onward.flatMap(DivisionForecast.Part::destinationId).or(row::destinationId),
               row.endRoute(),
               row.endRouteId(),
               row.endOperation(),
@@ -186,7 +270,7 @@ public final class EtaApiImpl implements EtaApi {
               convertPhase(row.phase()),
               row.stopIndex(),
               row.passing(),
-              row.terminating(),
+              row.terminating() && onward.isEmpty(),
               row.outOfService(),
               row.trainName(),
               row.delaySeconds(),
@@ -199,9 +283,119 @@ public final class EtaApiImpl implements EtaApi {
                           load.cars().stream()
                               .map(car -> new EtaApi.CarLoad(car.seats(), car.occupied()))
                               .toList())
-                  .orElse(List.of())));
+                  .orElse(List.of()),
+              division.map(EtaApiImpl::division),
+              joiningOf(row)));
     }
     return new BoardResult(List.copyOf(rows));
+  }
+
+  /**
+   * 这一行的联挂：回程支线的行写前方的联挂站（站牌服务按交路给出），再从联挂预测补上节数；主干在本站联挂时写本站。运行中的车按现场预测；
+   * 票据与预测行、折返站上按下一趟列出还没停到本站的车按表上那一班（与分行同一口径，见 {@link #divisionOf}）。
+   */
+  private Optional<EtaApi.Joining> joiningOf(
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow row) {
+    Optional<JoinForecast> forecast =
+        row.trainName()
+            .flatMap(joinings)
+            .filter(found -> found.routeId().equalsIgnoreCase(row.routeId()));
+    boolean standing =
+        row.trainName().isPresent()
+            && row.phase() == org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardPhase.AT_STATION;
+    if (forecast.isEmpty() && !standing) {
+      forecast =
+          row.serviceTripId()
+              .flatMap(plannedJoinings)
+              .filter(found -> found.routeId().equalsIgnoreCase(row.routeId()));
+    }
+    if (row.joining().isPresent()) {
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.Joining ahead = row.joining().get();
+      Optional<JoinForecast> cars =
+          forecast.filter(found -> !found.trunk() && found.stopIndex() == ahead.stopIndex());
+      return Optional.of(
+          new EtaApi.Joining(
+              ahead.stopIndex(),
+              ahead.stationId().orElse(""),
+              ahead.station(),
+              cars.map(JoinForecast::ownCars).orElse(0),
+              cars.map(JoinForecast::joiningCars).orElse(0),
+              cars.map(JoinForecast::joiningStanding).orElse(false),
+              ahead.continuesOn(),
+              ahead.continuesFrom()));
+    }
+    return forecast
+        .filter(found -> found.trunk() && found.stopIndex() == row.stopIndex())
+        .map(
+            here ->
+                new EtaApi.Joining(
+                    here.stopIndex(),
+                    here.stationId(),
+                    here.station(),
+                    here.ownCars(),
+                    here.joiningCars(),
+                    here.joiningStanding(),
+                    Optional.empty(),
+                    -1));
+  }
+
+  /**
+   * 列车分行时主目的地改写为主段（分行后开得更远的一段，{@link DivisionForecast#primary}）的去向；主段就是这一行原来的终点、或两段都不载客时为空。
+   * 在运营终点分行、解下的一段接着载客时，主段就是解下的一段，本站也就不再是终到。
+   */
+  private static Optional<DivisionForecast.Part> onwardPart(
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow row,
+      Optional<DivisionForecast> division) {
+    return division
+        .filter(found -> !found.divided())
+        .flatMap(DivisionForecast::primary)
+        .filter(primary -> !primary.destinationId().equals(row.destinationId()));
+  }
+
+  /**
+   * 这一行的列车在本站或前方分行：同一交路、分行站不在本站之前。运行中的车按车名查现场预测（按车上编组切）；票据与预测行按表上那一班。
+   * 折返站上按下一趟列出、还在开来路上的车，现场预测要等这一趟跑完才算下一趟，这时也按表上的下一趟；车停在终点以后只认现场预测（编组切不开就不写）。
+   */
+  private Optional<DivisionForecast> divisionOf(
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow row) {
+    if (row.stopIndex() < 0) {
+      return Optional.empty();
+    }
+    Optional<DivisionForecast> live =
+        row.trainName().flatMap(divisions).filter(division -> covers(division, row));
+    if (live.isPresent()
+        || (row.trainName().isPresent()
+            && row.phase() == org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardPhase.AT_STATION)) {
+      return live;
+    }
+    return row.serviceTripId().flatMap(plannedDivisions).filter(division -> covers(division, row));
+  }
+
+  private static boolean covers(
+      DivisionForecast division,
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow row) {
+    return division.routeId().equalsIgnoreCase(row.routeId())
+        && division.stopIndex() >= row.stopIndex();
+  }
+
+  private static EtaApi.Division division(DivisionForecast found) {
+    return new EtaApi.Division(
+        found.stopIndex(),
+        found.stationId(),
+        found.station(),
+        found.parts().stream()
+            .map(
+                part ->
+                    new EtaApi.DivisionPart(
+                        part.cars(),
+                        part.detached(),
+                        part.destinationId(),
+                        part.destination(),
+                        part.stops(),
+                        part.route(),
+                        part.fromIndex()))
+            .toList(),
+        found.divided());
   }
 
   private static BoardPhase convertPhase(

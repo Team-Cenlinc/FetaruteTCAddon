@@ -8,8 +8,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 
 /**
  * 残余冲突的分类：运行时能不能让、在哪让、让多久。
@@ -31,15 +34,26 @@ import java.util.UUID;
  *   <li><b>容量 1 的端点</b>：<b>后车要等的地方</b>只有一股道 → 不可吸收，在这里等就是堵死岔线。判不出后车在哪等时
  *       （手上没有成品表），退回看冲突落在不落在这类端点的站台或进站单线上。
  *   <li><b>预计等待超过 {@code --max-wait}</b> → 不可吸收。与让车修复同一个预算。
- *   <li><b>让车点没有容量</b>：后车要等的地方在那一刻已经站满 → 不可吸收。
+ *   <li><b>让车点没有容量</b>：让车点无法在等待窗口内停在合格股道上 → 不可吸收。冲突在后车某个途中停车点之后时，让车点是冲突资源之前最后一个停车的车站
+ *       （运行时在那一站的发车门控前被挡住，或驶出后在区间信号前等），不再看起点——残余不写进表，车按原时刻离开起点；
+ *       冲突在第一个停车点之前时让车点是起点。第二条的"后车要等的地方"也是同一个让车点。途中站只算这段等待新挡住、且会与它互等或交叉的车
+ *       （对向、进路穿过本车去路、邻表、待命、判不清方向，或这一站是端点、折返站）；本车停固定股道时，只在站台组一层超员、在自己股道上没新增冲突的车
+ *       不算被挡；与本车同一行进方向的后车（不论经哪条进路汇入）只是排队，不算放不下，它要多等的秒数照样受第三条的上限与第五条的连锁约束（{@link
+ *       TimetableWaitingCapacity#room}）。
  *   <li><b>顺推超限</b>：这一等让后续班次赶不上表定时刻（本班到达 + 折返 + 等待 &gt; 下一班发车），而表上没有推后它 → 不可吸收。
- *       写得进去的顺推已由让车修复的必等顺推写进表（{@link ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait}
- *       或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
+ *       途中站上被这一等挡住的同方向后车同样算：它晚到多少，就按它自己的交路链判一遍，取最深的。 写得进去的顺推已由让车修复的必等顺推写进表（{@link
+ *       ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait} 或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
+ *       <p>同一班在几处都要等时，按这一班已判可吸收的等待之和往后推（同一对车在相邻几个资源上重复报的冲突只算一次，取最长的那次），
+ *       不各算各的。运行时晚点的车途中车站压缩停站（{@code timetable.recovery.min-dwell-seconds}）：顶到下一班的晚点不超过那一班的可追回量
+ *       （{@link Recovery#recoverableSeconds}）时，算在那一班里追回、不顶后面。同一辆车靠追回吸收的秒数全表累计不超过这一交路可追回总量的 {@value
+ *       #RECOVERABLE_BUDGET_PERCENT}%，超出的那几处仍判顺推超限。
  * </ol>
  *
  * <p>单线对向本身是<b>可吸收</b>的：运行时按区段互斥，后车在区段外等。不可吸收的是"等的地方是容量 1 站台"那一种， 已被第 2 条覆盖。
  *
- * <p>本类不落库：build 与 publish 重检各算一遍，两边必须得到同一结果——所以它只依赖成品表、投影与图索引， 不依赖构建过程里的任何中间状态。
+ * <p>本类不落库，只在 build 里算（成功判据、相位第三层、严格模式取消都用它）；publish 时的作用域检查（{@code
+ * FtaTimetableCommand#scopeCheck}）只扫与已发布邻表的外部冲突，不再分类。它只依赖成品表、投影与图索引，不依赖构建过程里的任何中间状态，
+ * 同一份输入分类两次得到同一结果。
  */
 public final class ConflictAbsorption {
 
@@ -47,11 +61,112 @@ public final class ConflictAbsorption {
    * 表上没写进去的顺推允许几班：0。
    *
    * <p>判据拿"下一班发车"去比"本班到达 + 折返 + 等待"，而不是"本班<b>发车</b> + 等待"：一趟车的走行远长于等待，后者永远不会成立，
-   * 顺推超限就一次都判不出来——同一处冲突每一圈都在，晚点一圈圈累积直到被作废，表上却看不出来。 写得进去的顺推已经写进表，剩下一班都不放过。
+   * 顺推超限就一次都判不出来——同一处冲突每一圈都在，晚点一圈圈累积直到被作废，表上却看不出来。 写得进去的顺推已经写进表，剩下一班都不放过；
+   * 只有在下一班里靠压缩停站追得回、且这辆车的累计没超过 {@link #RECOVERABLE_BUDGET_PERCENT} 那条上限的，不算顶掉。
    */
   public static final int MAX_CHAIN_DEPTH = 0;
 
+  /**
+   * 同一辆车（同一交路）全表靠运行时追回吸收的顺推秒数上限，占这一交路可追回总量（除首班外各班 {@link Recovery#recoverableSeconds} 之和）的百分比。
+   *
+   * <p>按交路累计而不是按处放行：周期表上同一处冲突每一圈都在，每一处单看都追得回，一圈圈叠在同一辆车上就是追不完的晚点。
+   * 追回也不是白来的——压缩停站压的是乘客上下车的时间，运行时还要靠同一份压缩去追随机的晚点（起步慢、乘降久、临时扣车），编表最多用掉一半，
+   * 另一半留给运行时。上限随交路的班次数与各班可压缩的停站等比伸缩，不是全天一个定值；交路只有一班、或运行时不压缩停站时为 0，退化成顺推一班也不放过。
+   */
+  public static final int RECOVERABLE_BUDGET_PERCENT = 50;
+
   private ConflictAbsorption() {}
+
+  /**
+   * 运行时晚点追赶里编表能算进去的那一半：途中车站压缩停站。
+   *
+   * <p>只算停站压缩、不算放宽线路限速：后者要晚点超过 {@code recovery.engage-delay-seconds} 才启用，追回多少取决于线路限速与车型，
+   * 编表算不准，保守地不算。压缩与运行时同一口径（AutoStation 站停时的 {@code StationStopCoordinator#dwellSecondsFor}）：
+   * 只在车站做（区间停车点不压）；起点就是发车，终到之后是折返，都不压；从车库出车的班次出库后第一个车站不压（开门延迟更长）；
+   * 下限是最短停站与车门走完一个开关过程取大；换模加时加在压缩之后，压不掉。
+   *
+   * @param minDwellSeconds 晚点车途中站最少停多少秒，即 {@code timetable.recovery.min-dwell-seconds}；0
+   *     表示运行时不压缩停站，可追回量恒为 0
+   * @param stopOverheadSeconds 档案里车站停站多算的开销（居中刹停与开门延迟，{@code station-stop-overhead-seconds}）：
+   *     压缩从开门起算，这一段压不掉
+   * @param doorFloorSeconds 车门走完一个开关过程至少要多少秒：运行时按车上的车门动画算，编表拿不到车型的动画，取运行时的缺省 （{@link
+   *     #RUNTIME_DOOR_FLOOR_SECONDS}）；车上用的是更长的旧式动画时，运行时的下限更高，这里会多算几秒
+   * @param switchDwellByRoute 基础 route → 各停靠序号上的换模加时（{@code RoutePowerModes#switchDwellPlan}）；没有换模的
+   *     route 不在里面
+   */
+  public record Recovery(
+      int minDwellSeconds,
+      int stopOverheadSeconds,
+      int doorFloorSeconds,
+      Map<UUID, List<Integer>> switchDwellByRoute) {
+
+    /** 运行时车门开关过程的缺省下限（秒），与 AutoStation 同一口径：关门动画提前开始的时长加车门至少全开的时长，按秒向上取整。 */
+    public static final int RUNTIME_DOOR_FLOOR_SECONDS =
+        AutoStationSignAction.DEFAULT_DOOR_FLOOR_SECONDS;
+
+    /** 不按追回量判：顺推一班也不放过。 */
+    public static final Recovery NONE = new Recovery(0, 0, 0, Map.of());
+
+    public Recovery {
+      minDwellSeconds = Math.max(0, minDwellSeconds);
+      stopOverheadSeconds = Math.max(0, stopOverheadSeconds);
+      doorFloorSeconds = Math.max(0, doorFloorSeconds);
+      switchDwellByRoute = switchDwellByRoute == null ? Map.of() : Map.copyOf(switchDwellByRoute);
+    }
+
+    /** 车门下限按运行时缺省、没有换模加时。 */
+    public Recovery(int minDwellSeconds, int stopOverheadSeconds) {
+      this(minDwellSeconds, stopOverheadSeconds, RUNTIME_DOOR_FLOOR_SECONDS, Map.of());
+    }
+
+    /** 运行时会不会压缩停站。 */
+    public boolean enabled() {
+      return minDwellSeconds > 0;
+    }
+
+    /**
+     * 这条 route 跑一趟最多能追回多少秒：各途中车站 {@code max(0, 表定停站 − 换模加时 − 开销 − max(最短停站, 车门下限))} 之和。
+     *
+     * <p>表定停站取档案的到发之差，与编表同一口径：喂车多停也在里面，运行时晚点车本来就不等，算作可追回。
+     *
+     * @param plan route 的时分档案
+     * @return 秒数；不压缩停站时为 0
+     */
+    public int recoverableSeconds(TimetableRoutePlan plan) {
+      if (!enabled() || plan == null || plan.stops().isEmpty()) {
+        return 0;
+      }
+      OptionalInt terminating = plan.terminatingSequence();
+      if (terminating.isEmpty()) {
+        return 0;
+      }
+      int origin = plan.stops().get(0).stopSequence();
+      int floor = Math.max(minDwellSeconds, doorFloorSeconds);
+      List<Integer> switches = switchDwellByRoute.getOrDefault(plan.baseRouteId(), List.of());
+      boolean firstStationAfterDepot = plan.startsAtDepot();
+      int total = 0;
+      for (TimetableStop stop : plan.stops()) {
+        if (stop.stopSequence() <= origin || !stop.stops()) {
+          continue;
+        }
+        if (stop.stopSequence() >= terminating.getAsInt()) {
+          break;
+        }
+        if (stop.stationCode().isEmpty()) {
+          continue;
+        }
+        if (firstStationAfterDepot) {
+          firstStationAfterDepot = false;
+          continue;
+        }
+        int sequence = stop.stopSequence();
+        int switching = sequence < switches.size() ? Math.max(0, switches.get(sequence)) : 0;
+        int dwell = stop.departureOffsetSeconds() - stop.arrivalOffsetSeconds() - switching;
+        total += Math.max(0, dwell - stopOverheadSeconds - floor);
+      }
+      return total;
+    }
+  }
 
   /** 判决。 */
   public enum Verdict {
@@ -63,7 +178,7 @@ public final class ConflictAbsorption {
     STUB_TERMINAL,
     /** 预计等待超过单步上限。 */
     OVER_MAX_WAIT,
-    /** 让车点在那一刻没有空位。 */
+    /** 始发等待窗口内没有合格的空位。 */
     NO_WAITING_CAPACITY,
     /** 顺推超限：后续班次赶不上表定时刻、而表上没有推后它们（推迟超 {@code --max-wait} 或会截断）。 */
     CHAIN_TOO_DEEP
@@ -106,7 +221,7 @@ public final class ConflictAbsorption {
    *
    * @param report 让车修复之后剩下的冲突报告
    * @param timetable 最终表：用来找后车所在的交路与它的起点
-   * @param occupancy 最终表的投影：数让车点在那一刻有几辆车在待命
+   * @param occupancy 最终表及邻表的完整投影：检查整个始发等待窗口，按车辆身份去重
    * @param index 图索引：站台组容量
    * @param separationSeconds 相邻占用裕量
    * @param maxWaitSeconds 单步让车上限
@@ -121,11 +236,63 @@ public final class ConflictAbsorption {
       int separationSeconds,
       int maxWaitSeconds,
       TurnaroundTable turnaround) {
+    return classify(
+        report,
+        timetable,
+        occupancy,
+        index,
+        separationSeconds,
+        maxWaitSeconds,
+        turnaround,
+        Map.of());
+  }
+
+  /**
+   * 带完整 route 档案的分类：编表必须使用它。
+   *
+   * @param profiles 与占用投影一致的全部档案，包含车型变体与邻表；保留 DYNAMIC 股道资格和途中停站占用
+   */
+  public static List<Residual> classify(
+      TimetableConflictChecker.Report report,
+      Timetable timetable,
+      TimetableOccupancyProjector.Occupancy occupancy,
+      TimetableConflictChecker.GraphIndex index,
+      int separationSeconds,
+      int maxWaitSeconds,
+      TurnaroundTable turnaround,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles) {
+    return classify(
+        report,
+        timetable,
+        occupancy,
+        index,
+        separationSeconds,
+        maxWaitSeconds,
+        turnaround,
+        profiles,
+        Recovery.NONE);
+  }
+
+  /**
+   * 同上，顺推按运行时可追回量判（判据第五条）：编表必须使用它，传的是运行时的晚点追赶参数。
+   *
+   * @param recovery 运行时的停站压缩；{@link Recovery#NONE} 时顺推一班也不放过
+   */
+  public static List<Residual> classify(
+      TimetableConflictChecker.Report report,
+      Timetable timetable,
+      TimetableOccupancyProjector.Occupancy occupancy,
+      TimetableConflictChecker.GraphIndex index,
+      int separationSeconds,
+      int maxWaitSeconds,
+      TurnaroundTable turnaround,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      Recovery recovery) {
     if (report == null || report.conflicts().isEmpty()) {
       return List.of();
     }
     return classify(
-        Context.of(timetable, occupancy, index, turnaround),
+        Context.of(timetable, occupancy, index, turnaround, profiles, recovery),
         report,
         separationSeconds,
         maxWaitSeconds);
@@ -164,11 +331,31 @@ public final class ConflictAbsorption {
       TimetableConflictChecker.GraphIndex index,
       int separationSeconds,
       int maxWaitSeconds) {
+    return classify(
+        report, waitingPointByCode, List.of(), Map.of(), index, separationSeconds, maxWaitSeconds);
+  }
+
+  /**
+   * 同上，再给铺开的运行与档案：途中让车点（冲突之前最后一个停车站）因此与成品表同一口径认得出来。
+   *
+   * <p>相位第三层必须走这条：只给始发站台组的话，冲突在途中停车点之后的那些仍按起点判，与成功判据的结论分叉。
+   *
+   * @param movements 铺开的运行，与 {@code report} 出自同一次检查
+   * @param profiles 这些运行的档案
+   */
+  public static List<Residual> classify(
+      TimetableConflictChecker.Report report,
+      Map<String, String> waitingPointByCode,
+      List<TimetableConflictChecker.Movement> movements,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      TimetableConflictChecker.GraphIndex index,
+      int separationSeconds,
+      int maxWaitSeconds) {
     if (report == null || report.conflicts().isEmpty()) {
       return List.of();
     }
     return classify(
-        Context.ofWaitingPoints(waitingPointByCode, index),
+        Context.ofWaitingPoints(waitingPointByCode, movements, profiles, index),
         report,
         separationSeconds,
         maxWaitSeconds);
@@ -193,12 +380,14 @@ public final class ConflictAbsorption {
       TimetableOccupancyProjector.Occupancy occupancy,
       TimetableConflictChecker.GraphIndex index,
       int separationSeconds,
-      int maxWaitSeconds) {
+      int maxWaitSeconds,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles) {
     if (conflicts == null || conflicts.isEmpty()) {
       return List.of();
     }
     return classify(
-        Context.of(timetable, occupancy, index, TurnaroundTable.none()).withoutChain(),
+        Context.of(timetable, occupancy, index, TurnaroundTable.none(), profiles, Recovery.NONE)
+            .withoutChain(),
         new TimetableConflictChecker.Report(conflicts),
         separationSeconds,
         maxWaitSeconds);
@@ -212,8 +401,10 @@ public final class ConflictAbsorption {
     int separation = Math.max(0, separationSeconds);
     int maxWait = Math.max(0, maxWaitSeconds);
     List<Residual> out = new ArrayList<>(report.conflicts().size());
+    // 同一班的累计等待与各交路的追回累计按报告顺序（CONFLICT_ORDER，全序）逐处记：与遍历、线程无关，同一输入记出同一结果。
+    Ledger ledger = new Ledger();
     for (TimetableConflictChecker.Conflict conflict : report.conflicts()) {
-      out.add(classifyOne(conflict, context, separation, maxWait));
+      out.add(classifyOne(conflict, context, separation, maxWait, ledger));
     }
     return List.copyOf(out);
   }
@@ -306,7 +497,11 @@ public final class ConflictAbsorption {
   // ------------------------------------------------------------------ 判据
 
   private static Residual classifyOne(
-      TimetableConflictChecker.Conflict conflict, Context context, int separation, int maxWait) {
+      TimetableConflictChecker.Conflict conflict,
+      Context context,
+      int separation,
+      int maxWait,
+      Ledger ledger) {
     // 1. 邻表：谁先发布谁占路权，我挪不动它。
     if (conflict.external()) {
       return new Residual(conflict, moverOf(conflict), 0, Optional.empty(), 0, Verdict.EXTERNAL);
@@ -315,7 +510,15 @@ public final class ConflictAbsorption {
     String mover = moverOf(conflict);
     int wait = conflict.firstTo() + separation - conflict.secondFrom();
     wait = Math.max(0, wait);
-    Optional<String> waitingPoint = context.waitingPointOf(mover);
+    Optional<String> origin = context.waitingPointOf(mover);
+    // 后车在哪等：冲突在它某个途中停车点之后时，运行时它在那一站的发车门控前被挡住（或驶出后在区间信号前等），
+    // 不会回到起点去等，让车点就是那一站。这时不再看起点：残余不写进表（只顺推后续班次，这一班自身仍按原时刻），
+    // 运行时也不读让车点——车准点离开起点、到这一站被挡，起点有空位兑现不了。中间别的车站同理不用。
+    // 冲突在第一个停车点之前时让车点是起点。
+    Optional<TimetableWaitingCapacity.EnRoute> enRoute =
+        context.enRoute(mover, conflict.secondFrom());
+    Optional<String> waitingPoint =
+        enRoute.isPresent() ? Optional.of(enRoute.get().group()) : origin;
 
     // 2. 容量 1 的端点：后车要在只有一股道的地方等，那才是堵死岔线。
     //
@@ -325,27 +528,152 @@ public final class ConflictAbsorption {
     //
     // 车库（空串）算"知道在哪等"，不算"判不出"：车在库里等不堵任何人。
     // 只有连后车在哪等都判不出来时（相位第三层评估时手上没有成品表），才退回按资源保守判。
-    boolean waitsOnStub =
+    boolean onStub =
         waitingPoint.isPresent()
             ? context.isStubGroup(waitingPoint.get())
             : context.isStubResource(conflict.resource());
-    if (waitsOnStub) {
+    if (onStub) {
       return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.STUB_TERMINAL);
     }
     // 3. 预算：与让车修复同一个上限。
     if (wait > maxWait) {
       return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.OVER_MAX_WAIT);
     }
-    // 4. 让车点有没有空位。
-    if (waitingPoint.isPresent() && !context.hasRoom(waitingPoint.get(), conflict.secondFrom())) {
+    // 4. 让车点有没有空位。途中站上被这一等挡住的同方向后车不算放不下（它在后面排队），它要多等的交给第 3、5 条。
+    Map<String, Integer> followers = Map.of();
+    if (enRoute.isPresent()) {
+      TimetableWaitingCapacity.EnRouteRoom room =
+          context.waitingCapacity().room(mover, enRoute.get(), wait, separation);
+      if (!room.fits()) {
+        return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.NO_WAITING_CAPACITY);
+      }
+      followers = room.followers();
+    } else if (origin.isPresent()
+        && !context.hasRoom(
+            origin.get(),
+            mover,
+            context.departureByCode().getOrDefault(mover, conflict.secondFrom()),
+            wait,
+            separation)) {
       return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.NO_WAITING_CAPACITY);
     }
-    // 5. 连锁：这一等会顶掉后面几班。
-    int depth = context.chainDepthAfter(mover, wait);
+    for (int followerWait : followers.values()) {
+      if (followerWait > maxWait) {
+        return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.OVER_MAX_WAIT);
+      }
+    }
+    // 5. 连锁：这一等会顶掉后面几班；被它挡住的后车各自晚到，也顶得掉它们交路里的后面几班，取最深的。
+    // 同一班在别处已判可吸收的等待一并算上：晚点按这一班累计的等待往后推。
+    // 顶到下一班的晚点在那一班里追得回来就不算顶掉，追回的秒数记到那辆车的交路上，累计有上限。
+    Map<String, Integer> delays = new TreeMap<>(followers);
+    delays.merge(mover, wait, Math::max);
+    String leader = leaderOf(conflict);
+    int depth = 0;
+    Map<String, Integer> late = new TreeMap<>();
+    Map<String, Integer> recovered = new TreeMap<>();
+    Map<String, Integer> charge = new TreeMap<>();
+    for (Map.Entry<String, Integer> delay : delays.entrySet()) {
+      String code = delay.getKey();
+      // 后车是被本车（mover）挡住的：同一辆后车被同一个 mover 挡几处，只算最长的那次。
+      int total = ledger.lateWith(code, code.equals(mover) ? leader : mover, delay.getValue());
+      Chain chain = context.chainAfter(code, total, true);
+      depth = Math.max(depth, chain.depth());
+      late.put(code, total);
+      recovered.put(code, chain.recovered());
+      int added = chain.recovered() - ledger.recoveredOf(code);
+      if (added > 0) {
+        charge.merge(context.dutyOf(code), added, Integer::sum);
+      }
+    }
     if (depth > MAX_CHAIN_DEPTH) {
       return new Residual(conflict, mover, wait, waitingPoint, depth, Verdict.CHAIN_TOO_DEEP);
     }
+    for (Map.Entry<String, Integer> duty : charge.entrySet()) {
+      if (ledger.recoveredOfDuty(duty.getKey()) + duty.getValue()
+          > context.recoveryBudgetOf(duty.getKey())) {
+        // 累计用完：这一处不再靠追回，按不追回的链报深度（至少顶掉下一班）。
+        int unrecovered = 0;
+        for (Map.Entry<String, Integer> delay : late.entrySet()) {
+          unrecovered =
+              Math.max(
+                  unrecovered, context.chainAfter(delay.getKey(), delay.getValue(), false).depth());
+        }
+        return new Residual(
+            conflict, mover, wait, waitingPoint, unrecovered, Verdict.CHAIN_TOO_DEEP);
+      }
+    }
+    for (Map.Entry<String, Integer> delay : delays.entrySet()) {
+      String code = delay.getKey();
+      ledger.commit(
+          code,
+          code.equals(mover) ? leader : mover,
+          delay.getValue(),
+          recovered.get(code),
+          context.dutyOf(code));
+    }
     return new Residual(conflict, mover, wait, waitingPoint, depth, Verdict.ABSORBABLE);
+  }
+
+  /** 前车的身份：同一对车在相邻资源上重复报的冲突按它归并。邻表的车带上表名，与同名的本表车次分开。 */
+  private static String leaderOf(TimetableConflictChecker.Conflict conflict) {
+    boolean moverIsSecond = conflict.secondOwner().isEmpty();
+    String code = moverIsSecond ? conflict.first() : conflict.second();
+    Optional<String> owner = moverIsSecond ? conflict.firstOwner() : conflict.secondOwner();
+    return owner.map(name -> name + "/" + code).orElse(code);
+  }
+
+  /**
+   * 分类过程中按报告顺序记下的账：每一班已判可吸收的等待（按挡它的车归并），每一班的晚点在下一班里追回了多少，每个交路累计追回了多少。
+   *
+   * <p>只有判成可吸收的那一处才记账；判成不可吸收的不记——它反正要让这次尝试失败或被取消，不该再挤占别处。
+   */
+  private static final class Ledger {
+    private final Map<String, Map<String, Integer>> waitsByTrip = new HashMap<>();
+    private final Map<String, Integer> recoveredByTrip = new HashMap<>();
+    private final Map<String, Integer> recoveredByDuty = new HashMap<>();
+
+    /** 这一班再在 {@code leader} 那里等 {@code wait} 秒之后累计等多久：同一前车取最长，不同前车相加。 */
+    int lateWith(String trip, String leader, int wait) {
+      Map<String, Integer> waits = new HashMap<>(waitsByTrip.getOrDefault(trip, Map.of()));
+      waits.merge(leader, Math.max(0, wait), Math::max);
+      long total = 0L;
+      for (int seconds : waits.values()) {
+        total += seconds;
+      }
+      return (int) Math.min(Integer.MAX_VALUE, total);
+    }
+
+    /** 这一班的晚点已在下一班里追回了多少。 */
+    int recoveredOf(String trip) {
+      return recoveredByTrip.getOrDefault(trip, 0);
+    }
+
+    /** 这个交路累计追回了多少。 */
+    int recoveredOfDuty(String duty) {
+      return recoveredByDuty.getOrDefault(duty, 0);
+    }
+
+    /** 记下一处可吸收的等待：累计等待按前车归并，追回只记比上次多出来的部分。 */
+    void commit(String trip, String leader, int wait, int recovered, String duty) {
+      waitsByTrip
+          .computeIfAbsent(trip, ignored -> new HashMap<>())
+          .merge(leader, Math.max(0, wait), Math::max);
+      int added = recovered - recoveredOf(trip);
+      if (added > 0) {
+        recoveredByTrip.put(trip, recovered);
+        recoveredByDuty.merge(duty, added, Integer::sum);
+      }
+    }
+  }
+
+  /**
+   * 一处等待沿交路链往后推的结果。
+   *
+   * @param depth 赶不上表定发车、也追不回来的后续班次数
+   * @param recovered 在下一班里靠压缩停站追回的晚点秒数；没有顶到下一班、或追不回时为 0
+   */
+  private record Chain(int depth, int recovered) {
+    static final Chain NONE = new Chain(0, 0);
   }
 
   /** 内部冲突的后车恒为 {@code second}：{@link ResourceRepair#moveFor} 只在对方是邻表时才改挪自己。 */
@@ -358,30 +686,45 @@ public final class ConflictAbsorption {
   /**
    * 分类需要的只读索引：全部从成品表、投影、图索引与折返表算出来，不含构建过程的中间状态。
    *
-   * @param chainAfter 班次 code → 从它起到交路末班，每班的 {@code [发车（相对计划窗口起点）, 发车到可再发车的秒数]}
+   * @param departureByCode 班次的实际始发时刻，相对计划窗口起点；禁止用远处冲突时刻替代
+   * @param waitingCapacity 整段等待的物理股道、同车与邻表占用检查
+   * @param chainAfter 班次 code → 从它起到交路末班，每班的 {@code [发车（相对计划窗口起点）, 发车到可再发车的秒数, 可追回秒数]}
+   * @param dutyByCode 班次 code → 交路号：追回的累计上限按交路记
+   * @param budgetByDuty 交路号 → 全表最多靠追回吸收多少秒（{@link #RECOVERABLE_BUDGET_PERCENT}）
    */
   private record Context(
       Map<String, String> waitingPointByCode,
-      Map<String, List<int[]>> staysByGroup,
-      Map<String, Integer> capacityByGroup,
+      Map<String, Integer> departureByCode,
+      TimetableWaitingCapacity waitingCapacity,
       Set<String> stubGroups,
-      Map<String, List<int[]>> chainAfter) {
+      Map<String, List<int[]>> chainAfter,
+      Map<String, String> dutyByCode,
+      Map<String, Integer> budgetByDuty) {
 
     static Context of(
         Timetable timetable,
         TimetableOccupancyProjector.Occupancy occupancy,
         TimetableConflictChecker.GraphIndex index,
-        TurnaroundTable turnaround) {
+        TurnaroundTable turnaround,
+        Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+        Recovery recovery) {
       TurnaroundTable turnarounds = turnaround == null ? TurnaroundTable.none() : turnaround;
-      Map<String, Integer> capacity = index == null ? Map.of() : index.platformCapacity();
+      Recovery recovering = recovery == null ? Recovery.NONE : recovery;
       Set<String> stubs = ConflictAbsorption.stubGroups(index);
 
       Map<String, String> waitingPoint = new HashMap<>();
+      Map<String, Integer> departures = new HashMap<>();
       Map<String, List<int[]>> chain = new HashMap<>();
+      Map<String, String> dutyByCode = new HashMap<>();
+      Map<String, Integer> budgetByDuty = new HashMap<>();
       if (timetable != null) {
         Map<UUID, TimetableTrip> tripById = new HashMap<>();
         for (TimetableTrip trip : timetable.trips()) {
           tripById.put(trip.id(), trip);
+          departures.put(
+              trip.tripCode(),
+              TimetableOccupancyProjector.relativeDeparture(
+                  timetable, trip, timetable.serviceStartSecondOfDay()));
           timetable
               .routePlan(trip.routeId())
               .ifPresent(
@@ -400,21 +743,28 @@ public final class ConflictAbsorption {
               legs.add(null);
               continue;
             }
-            int run =
-                timetable
-                    .routePlan(trip.routeId())
-                    .map(TimetableRoutePlan::totalRunSeconds)
-                    .orElse(0);
+            Optional<TimetableRoutePlan> plan = timetable.routePlan(trip.routeId());
             legs.add(
                 new int[] {
                   Math.floorMod(
                       trip.departureSecondOfDay() - serviceStart, TimetableTrip.SECONDS_PER_DAY),
-                  run + turnarounds.secondsFor(trip.routeId())
+                  plan.map(TimetableRoutePlan::totalRunSeconds).orElse(0)
+                      + turnarounds.secondsFor(trip.routeId()),
+                  plan.map(recovering::recoverableSeconds).orElse(0)
                 });
           }
+          // 晚点只能在后面的班次里追回：首班的可追回量不算进上限。
+          long recoverable = 0L;
+          for (int i = 1; i < legs.size(); i++) {
+            recoverable += legs.get(i) == null ? 0 : legs.get(i)[2];
+          }
+          budgetByDuty.put(
+              duty.dutyCode(),
+              (int) Math.min(Integer.MAX_VALUE, recoverable * RECOVERABLE_BUDGET_PERCENT / 100L));
           for (int i = 0; i < duty.tripIds().size(); i++) {
             TimetableTrip trip = tripById.get(duty.tripIds().get(i));
             if (trip != null) {
+              dutyByCode.put(trip.tripCode(), duty.dutyCode());
               chain.put(
                   trip.tripCode(),
                   java.util.Collections.unmodifiableList(
@@ -430,33 +780,35 @@ public final class ConflictAbsorption {
         }
       }
 
-      Map<String, List<int[]>> stays = new HashMap<>();
-      if (occupancy != null) {
-        for (TimetableConflictChecker.Stay stay : occupancy.stays()) {
-          if (stay.platform() != null && !stay.platform().group().isBlank()) {
-            stays
-                .computeIfAbsent(stay.platform().group(), key -> new ArrayList<>())
-                .add(new int[] {stay.from(), stay.to()});
-          }
-        }
-      }
-      return new Context(waitingPoint, stays, capacity, stubs, chain);
+      return new Context(
+          waitingPoint,
+          departures,
+          TimetableWaitingCapacity.of(timetable, occupancy, index, profiles),
+          stubs,
+          chain,
+          dutyByCode,
+          budgetByDuty);
     }
 
     /**
-     * 只有让车点的上下文：容量与岔线端点仍从图索引来，待命与连锁没有依据，按"没有"算。
+     * 只有让车点与铺开运行的上下文：容量与岔线端点仍从图索引来，途中让车点从运行与档案来，待命与连锁没有依据，按"没有"算。
      *
      * <p>少了待命就判不出"让车点满没满"，少了交路链就判不出连锁深度——这两条都只会让判决更宽松， 而第三层本来就只用来在几个 δ 之间做相对比较，不是最终的成功判据。
+     * 让车点本身（起点还是途中停车站、是不是容量 1 的端点）必须与成功判据一致，所以运行照样建。
      */
     static Context ofWaitingPoints(
-        Map<String, String> waitingPointByCode, TimetableConflictChecker.GraphIndex index) {
-      Map<String, Integer> capacity = index == null ? Map.of() : index.platformCapacity();
+        Map<String, String> waitingPointByCode,
+        List<TimetableConflictChecker.Movement> movements,
+        Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+        TimetableConflictChecker.GraphIndex index) {
       Set<String> stubs = ConflictAbsorption.stubGroups(index);
       return new Context(
           waitingPointByCode == null ? Map.of() : Map.copyOf(waitingPointByCode),
           Map.of(),
-          capacity,
+          TimetableWaitingCapacity.ofRuns(movements, profiles, index),
           stubs,
+          Map.of(),
+          Map.of(),
           Map.of());
     }
 
@@ -482,34 +834,48 @@ public final class ConflictAbsorption {
 
     /** 同一份上下文，不带交路链：顺推判据恒不成立。 */
     Context withoutChain() {
-      return new Context(waitingPointByCode, staysByGroup, capacityByGroup, stubGroups, Map.of());
+      return new Context(
+          waitingPointByCode,
+          departureByCode,
+          waitingCapacity,
+          stubGroups,
+          Map.of(),
+          Map.of(),
+          Map.of());
     }
 
-    /** 让车点在这一刻还有没有空位：容量减去那一刻已经在待命的车。 */
-    boolean hasRoom(String group, int atSecond) {
-      if (group == null || group.isBlank()) {
-        // 车库：容量不限，车在库里多待一会儿不占别人的地方。
-        return true;
-      }
-      int capacity = capacityByGroup.getOrDefault(group, 1);
-      int occupied = 0;
-      for (int[] window : staysByGroup.getOrDefault(group, List.of())) {
-        if (window[0] <= atSecond && atSecond < window[1]) {
-          occupied++;
-        }
-      }
-      return capacity - occupied >= 1;
+    /** 后车在冲突之前最后一个途中停车点；冲突在第一个停车点之前时为空。 */
+    Optional<TimetableWaitingCapacity.EnRoute> enRoute(String code, int enterSecond) {
+      return waitingCapacity.enRoute(code, enterSecond);
+    }
+
+    /** 始发等待使用完整资源模型；远处冲突时刻不用于始发站容量判定。 */
+    boolean hasRoom(String group, String mover, int atSecond, int waitSeconds, int separation) {
+      return waitingCapacity.hasRoom(mover, group, atSecond, waitSeconds, separation);
+    }
+
+    /** 这个交路全表最多靠追回吸收多少秒；不在任何交路里时为 0。 */
+    int recoveryBudgetOf(String duty) {
+      return budgetByDuty.getOrDefault(duty, 0);
+    }
+
+    /** 班次所在交路的交路号；不在任何交路里时用 code 自己（各记各的）。 */
+    String dutyOf(String code) {
+      return dutyByCode.getOrDefault(code, code);
     }
 
     /**
-     * 这一班途中等 {@code wait} 秒之后，同一交路里赶不上表定发车的后续班次数。
+     * 这一班途中等 {@code wait} 秒之后，同一交路里赶不上表定发车、也追不回来的后续班次数。
      *
-     * <p>本班晚 {@code wait} 到终点，下一班最早在"本班发车 + 走行 + 折返 + 晚点"发车；表定发车比它早就赶不上， 晚点按差值带给再下一班，直到某一班的余量把它吸收掉。
+     * <p>本班晚 {@code wait} 到终点，下一班最早在"本班发车 + 走行 + 折返 + 晚点"发车，表定发车比它早就晚发。晚发不超过那一班的可追回量时，
+     * 车在那一班的途中站压缩停站追回来，链到此为止；追不回就算顶掉一班，那一班到终点仍晚"晚发 − 可追回量"，带给再下一班， 直到某一班的余量或追回把它吸收掉。
+     *
+     * @param recover 是否按可追回量追回；累计上限用完时不追回
      */
-    int chainDepthAfter(String code, int wait) {
+    Chain chainAfter(String code, int wait, boolean recover) {
       List<int[]> legs = chainAfter.get(code);
       if (legs == null || legs.size() <= 1 || wait <= 0 || legs.get(0) == null) {
-        return 0;
+        return Chain.NONE;
       }
       int depth = 0;
       int late = wait;
@@ -523,10 +889,15 @@ public final class ConflictAbsorption {
         if (next[0] >= ready) {
           break;
         }
+        int behind = ready - next[0];
+        int recoverable = recover ? next[2] : 0;
+        if (behind <= recoverable) {
+          return new Chain(depth, depth == 0 ? behind : 0);
+        }
         depth++;
-        late = ready - next[0];
+        late = behind - recoverable;
       }
-      return depth;
+      return new Chain(depth, 0);
     }
   }
 }

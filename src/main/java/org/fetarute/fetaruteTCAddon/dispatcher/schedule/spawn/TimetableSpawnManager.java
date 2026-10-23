@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -62,12 +63,24 @@ public final class TimetableSpawnManager
   private volatile Instant lastPoll;
 
   /**
-   * 最近一次预测出的票据各属于哪个交路的哪一班：预测票不入队，站牌要靠它找到来车。每次预测整张替换。
+   * 预测出的票据各属于哪个交路的哪一班：预测票不入队，站牌要靠它找到来车。
    *
-   * <p>按车次标识（{@link SpawnTicket#serviceTripId()}）记，不按票据 ID：预测票每次重新生成、ID 随之变，
-   * 两次预测交错（例如外部插件在别的线程查站牌）时按 ID 记的会互相顶掉，同一车次的标识则不变。
+   * <p>按车次标识（{@link SpawnTicket#serviceTripId()}）记，不按票据 ID：预测票每次重新生成、ID 随之变，同一车次的标识则不变。
+   * 每次预测并进来而不是整张替换：站台屏（主线程）与只读 HTTP 接口（后台线程）用不同的时间窗交错预测时，替换会冲掉对方刚记下、正要用的意图；
+   * 同一套已发布时刻表里同一车次算出的意图总是同一个，合并不冲突。服务日早于前一天的随预测清掉；已发布时刻表一变（重新发布、撤下）整本作废， 读的时候也先核对，旧表的意图不会被当成新表的。
    */
-  private volatile Map<String, TicketIntent> forecastIntents = Map.of();
+  private volatile IntentBook forecastIntents = IntentBook.fresh();
+
+  /**
+   * 发车计划里没有的交路的发车服务（按交路现拼）：解编 GOTO 指向的支线交路不进发车计划（不能按间隔单独出车），但按表时解下的车接的那几班要出票，
+   * 站牌也要提前列出它的班次。只用在预测与解编生出的交路上，其余交路照旧只认发车计划。
+   */
+  private volatile java.util.function.Function<UUID, Optional<SpawnService>> unplannedServices =
+      routeId -> Optional.empty();
+
+  /** 写了联挂的主干交路联挂之后的整列编组（交路 → 出车编组写法）：回程支线没车时主干出整列用。未接入时没有。 */
+  private volatile java.util.function.Function<UUID, Optional<String>> fullConsists =
+      routeId -> Optional.empty();
 
   public TimetableSpawnManager(
       SpawnManager delegate, TimetableService timetableService, Consumer<String> debugLogger) {
@@ -91,6 +104,7 @@ public final class TimetableSpawnManager
       lastPoll = now;
       return delegated;
     }
+    timetableService.restoreDutyBindings(now);
 
     List<SpawnTicket> out = new ArrayList<>(delegated.size());
     for (SpawnTicket ticket : delegated) {
@@ -113,6 +127,12 @@ public final class TimetableSpawnManager
     if (from != null) {
       out.addAll(withoutRunningDuties(buildTimetableTickets(from, now)));
     }
+    Set<UUID> demandCreates =
+        delegate.snapshotPlan().services().stream()
+            .filter(service -> service.baseHeadway().isEmpty())
+            .map(SpawnService::routeId)
+            .collect(java.util.stream.Collectors.toSet());
+    timetableService.recoverUnboundDuties(demandCreates, now);
     out.addAll(withoutRunningDuties(buildReplacementTickets(now)));
     return List.copyOf(out);
   }
@@ -226,7 +246,7 @@ public final class TimetableSpawnManager
     }
     OwnedTicket owned = ownedTickets.remove(ticket.id());
     if (owned != null) {
-      // 派发成功会先经过 onDispatched 把意图摘掉；走到这里还有意图，说明票是被放弃的：运营票这一趟就此取消。
+      // 派发成功会先经过 onDispatched 把意图摘掉；仍有意图的弃票同步取消自身车次，包含带客出入库展示行。
       owned
           .intent()
           .ifPresent(
@@ -234,6 +254,7 @@ public final class TimetableSpawnManager
                 logAbandoned(ticket, intent);
                 owned
                     .trip()
+                    .or(() -> timetableService.legTripOfIntent(intent))
                     .ifPresent(due -> timetableService.cancelUndispatched(due, "ticket-abandoned"));
                 // 替补出库票作废：空缺退回待派（普通出库票没有空缺，这一步是空操作）。
                 timetableService.replacementAbandoned(intent);
@@ -345,6 +366,22 @@ public final class TimetableSpawnManager
     }
     // 意图摘掉、到期作废：票已经派出去了，之后 complete 不再记 abandoned，也不会再被到期清理。
     ownedTickets.put(ticket.id(), OwnedTicket.dispatched());
+    Optional<String> running = timetableService.runningVehicleFor(intent);
+    if (running.isPresent()
+        && timetableService.dutyBindingOf(trainName).filter(intent.key()::equals).isEmpty()) {
+      // 出票到派出之间，交路已被别的车接下（重启后留在线上的车在门控上按时间绑回）：同一交路只能有一辆车，
+      // 这辆不绑，按没有交路的车由回收处理。
+      debugLogger.accept(
+          "TIMETABLE_SPAWN_DUPLICATE kind="
+              + intent.kind().name()
+              + " duty="
+              + intent.key().describe()
+              + " train="
+              + trainName
+              + " running="
+              + running.get());
+      return;
+    }
     timetableService.bindDuty(
         trainName,
         intent.key(),
@@ -894,6 +931,7 @@ public final class TimetableSpawnManager
     retryQueue.clear();
     ownedTickets.clear();
     missingServiceWarned.clear();
+    forecastIntents = IntentBook.fresh();
     lastPoll = now;
     if (delegate instanceof SpawnResetSupport resetSupport) {
       SpawnResetResult inner = resetSupport.reset(now);
@@ -901,6 +939,52 @@ public final class TimetableSpawnManager
           inner.clearedQueue() + cleared, inner.clearedStates(), inner.planReset());
     }
     return new SpawnResetResult(cleared, 0, false);
+  }
+
+  /**
+   * 接入发车计划里没有的交路的发车服务（解编 GOTO 指向的支线按交路现拼）：解下的车接的班次照样出票，站牌照样列出表定班次。
+   *
+   * @param services 交路 → 发车服务；传 null 表示断开
+   */
+  public void setUnplannedServices(
+      java.util.function.Function<UUID, Optional<SpawnService>> services) {
+    this.unplannedServices = services == null ? routeId -> Optional.empty() : services;
+  }
+
+  /**
+   * 接入写了联挂的主干交路联挂之后的整列编组：主干首班要挂的回程支线没有车（{@link TimetableService#feederMissing}）时，出车就出整列，拆挂链下一圈自己接上。
+   *
+   * @param consists 交路 → 整列的出车编组写法；传 null 表示断开
+   */
+  public void setFullConsists(java.util.function.Function<UUID, Optional<String>> consists) {
+    this.fullConsists = consists == null ? routeId -> Optional.empty() : consists;
+  }
+
+  /** 主干交路首班要挂的回程支线没车：出车出联挂之后的整列（首班交路的出车编组）。不是这种情况时为空。 */
+  private Optional<String> joinlessConsist(
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable timetable,
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty duty,
+      java.time.LocalDate serviceDate) {
+    if (duty.tripIds().isEmpty()
+        || !timetableService.feederMissing(
+            new TimetableService.DutyKey(timetable.id(), duty.id(), serviceDate))) {
+      return Optional.empty();
+    }
+    return timetable
+        .trip(duty.tripIds().get(0))
+        .flatMap(first -> fullConsists.apply(first.routeId()));
+  }
+
+  /** 出票时发车计划里没有这条交路怎么办：解编生出的交路（解下的车接的班次）用现拼的服务，其余不出。 */
+  private java.util.function.Function<UUID, Optional<SpawnService>> issuingFallback(
+      TimetableService.DueTrip due) {
+    boolean bySplit =
+        due.trip()
+            .dutyId()
+            .flatMap(due.timetable()::duty)
+            .map(duty -> duty.coupling().startsBySplit())
+            .orElse(false);
+    return bySplit ? unplannedServices : routeId -> Optional.empty();
   }
 
   @Override
@@ -916,6 +1000,7 @@ public final class TimetableSpawnManager
     if (managed.isEmpty()) {
       return delegated;
     }
+    List<String> source = publishedFingerprint();
     // 受管辖 route 的 headway 预测是错的——那条线已经不按 headway 发车了。换成表定时刻。
     List<SpawnTicket> out = new ArrayList<>();
     for (SpawnTicket ticket : delegated) {
@@ -928,7 +1013,7 @@ public final class TimetableSpawnManager
     Map<String, TicketIntent> intents = new HashMap<>();
     for (TimetableService.DueTrip due : timetableService.tripsBetween(now, now.plus(horizon))) {
       if (!cancelledFromOrigin(due)) {
-        buildTicket(due)
+        buildTicket(due, unplannedServices)
             .ifPresent(
                 built -> {
                   out.add(built);
@@ -947,7 +1032,13 @@ public final class TimetableSpawnManager
                 built.serviceTripId().ifPresent(trip -> intents.put(trip, legIntent(due)));
               });
     }
-    forecastIntents = Map.copyOf(intents);
+    IntentBook book = currentIntents();
+    if (book.source().equals(source)) {
+      LocalDate stale = LocalDate.ofInstant(now, ZoneId.systemDefault()).minusDays(1);
+      book.intents().values().removeIf(intent -> intent.serviceDate().isBefore(stale));
+      book.intents().putAll(intents);
+    }
+    // 预测期间时刻表换了：这一轮算的是旧表，不记
     return List.copyOf(out);
   }
 
@@ -972,8 +1063,46 @@ public final class TimetableSpawnManager
         .flatMap(intent -> timetableService.plannedPlatform(intent, stopIndex));
   }
 
-  /** 已出的票按登记的意图，预测票按最近一次预测记下的意图；派出后意图已摘掉，查不到。 */
-  private Optional<TicketIntent> ticketIntentOf(SpawnTicket ticket) {
+  /**
+   * 站牌行的车次标识（{@link SpawnTicket#serviceTripId()}）对应的交路意图：预测时记下的优先（保留到服务日过去），其次是已出、还没派出的票。
+   *
+   * @param serviceTripId 车次标识
+   */
+  public Optional<TicketIntent> intentOfServiceTrip(String serviceTripId) {
+    if (serviceTripId == null || serviceTripId.isBlank() || timetableService == null) {
+      return Optional.empty();
+    }
+    TicketIntent forecast = currentIntents().intents().get(serviceTripId);
+    if (forecast != null) {
+      return Optional.of(forecast);
+    }
+    for (OwnedTicket owned : ownedTickets.values()) {
+      if (owned.intent().isPresent()
+          && owned
+              .trip()
+              .map(TimetableSpawnManager::serviceTripIdOf)
+              .filter(serviceTripId::equals)
+              .isPresent()) {
+        return owned.intent();
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 交路首班的车次标识（与站牌票据、预测行同一口径）：解编时解下那一段接着跑子交路，站牌据此认出那一班就是分行出去的那几节车。
+   *
+   * @param duty 交路
+   * @return 查不到表、交路，交路没有班次或首班已取消时为空
+   */
+  public Optional<String> firstServiceTripOf(TimetableService.DutyKey duty) {
+    return timetableService == null
+        ? Optional.empty()
+        : timetableService.firstTripOf(duty).map(TimetableSpawnManager::serviceTripIdOf);
+  }
+
+  /** 这张票的交路意图：已出的票按登记的意图，其余按预测时记下的意图（按车次标识）；别层的票为空。 */
+  public Optional<TicketIntent> ticketIntentOf(SpawnTicket ticket) {
     if (ticket == null || ticket.id() == null || timetableService == null) {
       return Optional.empty();
     }
@@ -981,18 +1110,50 @@ public final class TimetableSpawnManager
     if (owned != null) {
       return owned.intent();
     }
-    Map<String, TicketIntent> forecast = forecastIntents;
+    Map<String, TicketIntent> forecast = currentIntents().intents();
     return ticket.serviceTripId().map(forecast::get);
   }
 
-  /** 一趟车对应票据的车次标识：带客回库班由交路的回库走行票开出，标识跟走行票走（交路号 + 服务日）； 其余按车次号 + 起点发车日历日。 */
+  /**
+   * 预测意图本：记下时的已发布时刻表指纹与意图。
+   *
+   * @param source 已发布时刻表的指纹（{@link #publishedFingerprint()}）
+   * @param intents 车次标识 → 交路意图
+   */
+  private record IntentBook(
+      List<String> source, java.util.concurrent.ConcurrentMap<String, TicketIntent> intents) {
+
+    /** 空的一本；指纹对不上任何真实指纹，第一次用时换成当前的。 */
+    static IntentBook fresh() {
+      return new IntentBook(List.of("-"), new java.util.concurrent.ConcurrentHashMap<>());
+    }
+  }
+
+  /** 此刻有效的意图本：已发布时刻表与记下时不同就换一本空的。 */
+  private IntentBook currentIntents() {
+    List<String> source = publishedFingerprint();
+    IntentBook book = forecastIntents;
+    if (!book.source().equals(source)) {
+      book = new IntentBook(source, new java.util.concurrent.ConcurrentHashMap<>());
+      forecastIntents = book;
+    }
+    return book;
+  }
+
+  /** 已发布时刻表的指纹：各表的 ID 与更新时刻（重新发布沿用 ID、更新时刻会变）。 */
+  private List<String> publishedFingerprint() {
+    if (timetableService == null) {
+      return List.of();
+    }
+    return timetableService.publishedTimetables().stream()
+        .map(timetable -> timetable.id() + "@" + timetable.updatedAt())
+        .toList();
+  }
+
+  /** 一趟车对应票据的车次标识：带客出入库由交路的走行票开出，标识跟走行票走（交路号 + 服务日）； 其余按车次号 + 起点发车日历日。 */
   private static String serviceTripIdOf(TimetableService.DueTrip due) {
-    boolean returnTrip =
-        due.timetable()
-            .routePlan(due.trip().routeId())
-            .map(plan -> plan.kind() == RouteOperationType.RETURN)
-            .orElse(false);
-    if (returnTrip) {
+    boolean legTrip = due.timetable().isLegTrip(due.trip());
+    if (legTrip) {
       Optional<String> legId =
           due.trip()
               .dutyId()
@@ -1001,7 +1162,13 @@ public final class TimetableSpawnManager
                   duty ->
                       legTicketId(
                           due.timetable().code(),
-                          duty.dutyCode() + "-" + RouteOperationType.RETURN.name(),
+                          duty.dutyCode()
+                              + "-"
+                              + due.timetable()
+                                  .routePlan(due.trip().routeId())
+                                  .orElseThrow()
+                                  .kind()
+                                  .name(),
                           due.timetable().serviceDayOf(due.trip(), due.serviceDate())));
       if (legId.isPresent()) {
         return legId.get();
@@ -1091,14 +1258,16 @@ public final class TimetableSpawnManager
                         + " plannedDeparture="
                         + leg.departure()
                         + " serviceDate="
-                        + leg.serviceDate());
+                        + leg.serviceDate()
+                        + " consist="
+                        + built.consist().orElse("-"));
               });
     }
     for (TimetableService.DueTrip trip : due) {
       if (intentOf(trip).filter(this::hasPendingTicket).isPresent()) {
         continue;
       }
-      buildTicket(trip)
+      buildTicket(trip, issuingFallback(trip))
           .ifPresent(
               built -> {
                 track(built, intentOf(trip), Optional.of(trip));
@@ -1117,7 +1286,9 @@ public final class TimetableSpawnManager
                         + " plannedDeparture="
                         + trip.departure()
                         + " serviceDate="
-                        + trip.serviceDate());
+                        + trip.serviceDate()
+                        + " consist="
+                        + built.consist().orElse("-"));
               });
     }
     return List.copyOf(out);
@@ -1145,9 +1316,12 @@ public final class TimetableSpawnManager
       return Optional.empty();
     }
     String tripId = legTicketId(due.timetable().code(), due.code(), due.serviceDate());
-    // 出库票出的是交路的车型（替补车同样）；回库票不出车。
+    // 出库票出的是交路的车型（替补车同样）；回库票不出车。主干要挂的回程支线没车时出整列。
     Optional<String> consist =
-        due.kind() == RouteOperationType.CREATE ? due.duty().consist() : Optional.empty();
+        due.kind() == RouteOperationType.CREATE
+            ? joinlessConsist(due.timetable(), due.duty(), due.serviceDate())
+                .or(() -> due.duty().consist())
+            : Optional.empty();
     return Optional.of(
         new SpawnTicket(
                 UUID.randomUUID(),
@@ -1170,8 +1344,17 @@ public final class TimetableSpawnManager
    * <p>找不到对应的 {@link SpawnService} 时返回空并只警告一次：这条 route 没被配置成可发车服务， 重复刷屏没有意义，而静默跳过又会让人以为时刻表在工作。
    */
   private Optional<SpawnTicket> buildTicket(TimetableService.DueTrip due) {
+    return buildTicket(due, routeId -> Optional.empty());
+  }
+
+  /**
+   * @param fallback 发车计划里没有这条交路时的发车服务（只给预测）
+   */
+  private Optional<SpawnTicket> buildTicket(
+      TimetableService.DueTrip due,
+      java.util.function.Function<UUID, Optional<SpawnService>> fallback) {
     UUID routeId = due.trip().routeId();
-    Optional<SpawnService> service = findService(routeId);
+    Optional<SpawnService> service = findService(routeId).or(() -> fallback.apply(routeId));
     if (service.isEmpty()) {
       if (missingServiceWarned.add(routeId)) {
         debugLogger.accept(
@@ -1185,7 +1368,19 @@ public final class TimetableSpawnManager
     Optional<String> depotOverride =
         due.timetable().tripPlan(due.trip()).flatMap(plan -> plan.depotNodeId());
     String tripId = tripTicketId(due.timetable().code(), due.trip().tripCode(), due.serviceDate());
-    // 车次的车型即交路的车型：从车库始发的车次（首站 CRET）按它出车。
+    // 车次的车型即交路的车型：从车库始发的车次（首站 CRET）按它出车。主干首班要挂的回程支线没车时出整列。
+    Optional<String> consist =
+        due.trip()
+            .dutyId()
+            .flatMap(due.timetable()::duty)
+            .filter(duty -> duty.tripIds().indexOf(due.trip().id()) == 0)
+            .flatMap(
+                duty ->
+                    joinlessConsist(
+                        due.timetable(),
+                        duty,
+                        due.timetable().serviceDayOf(due.trip(), due.serviceDate())))
+            .or(() -> due.timetable().consistOf(due.trip()));
     return Optional.of(
         new SpawnTicket(
                 UUID.randomUUID(),
@@ -1199,7 +1394,7 @@ public final class TimetableSpawnManager
                 Optional.of(tripId),
                 TripSource.SCHEDULED,
                 0)
-            .withConsist(due.timetable().consistOf(due.trip())));
+            .withConsist(consist));
   }
 
   /** 车次指定了出库点时覆盖服务默认 depot；其余字段保持不变。 */

@@ -167,6 +167,42 @@ class SpawnTrainConfigResolverTest {
   }
 
   @Test
+  // 后台线程（只读 HTTP 接口）不读牌子：不把默认车种占进缓存，也不替过期的旧值续期，主线程随后照常重读。
+  void offThreadReadsNeitherFillNorRenewTheCache() {
+    Sources sources = new Sources();
+    sources.sign = DepotSpawnPattern.SignRead.notOnMainThread();
+    assertEquals(
+        TrainType.EMU, sources.resolver.resolve(sources.routeUuid, EMU_DEFAULT, T0).type());
+    sources.sign = DepotSpawnPattern.SignRead.loaded(Optional.of("metro6"));
+    assertEquals(
+        TrainType.METRO,
+        sources.resolver.resolve(sources.routeUuid, EMU_DEFAULT, T0.plusSeconds(1)).type(),
+        "没占缓存：主线程有效期内照样读");
+
+    Instant expired = T0.plusSeconds(1).plus(SpawnTrainConfigResolver.TTL);
+    sources.sign = DepotSpawnPattern.SignRead.notOnMainThread();
+    assertEquals(
+        TrainType.METRO,
+        sources.resolver.resolve(sources.routeUuid, EMU_DEFAULT, expired).type(),
+        "后台线程沿用旧值");
+    sources.sign = DepotSpawnPattern.SignRead.loaded(Optional.of("dmu3"));
+    assertEquals(
+        TrainType.DMU,
+        sources.resolver.resolve(sources.routeUuid, EMU_DEFAULT, expired.plusSeconds(1)).type(),
+        "没续期：主线程紧接着重读到改写后的牌子");
+  }
+
+  @Test
+  // 主线程区块没加载、从没读到过：按默认车种缓存一个有效期，不每次重新推断。
+  void unloadedDepotWithoutHistoryCachesTheDefaultForOneTtl() {
+    Sources sources = new Sources();
+    sources.sign = DepotSpawnPattern.SignRead.unloaded();
+    sources.resolver.resolve(sources.routeUuid, EMU_DEFAULT, T0);
+    sources.resolver.resolve(sources.routeUuid, EMU_DEFAULT, T0.plusSeconds(1));
+    assertEquals(1, sources.signReads, "有效期内不再读牌子");
+  }
+
+  @Test
   void invalidateAllForcesAFreshInference() {
     Sources sources = new Sources();
     sources.resolver.resolve(sources.routeUuid, EMU_DEFAULT, T0);

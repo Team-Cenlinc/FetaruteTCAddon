@@ -21,8 +21,8 @@ import java.util.UUID;
  * 步长扫描一个整体偏移，目标是<b>共用起点站台组上相邻发车的最大间隔最小</b>，并列时<b>最小间隔最大</b>（否则两组同时发车与均匀错开会打平）， 再并列取最小偏移。
  * 大小交路的价值全在这一层：Full 与 Short 在共用区间上错开，乘客感受到的是叠加后的间隔。
  *
- * <p>第二层有一个例外：<b>跨组按车接续</b>。某组的一个方向终到容量 1 的端点，而先放好的别组方向正从这个端点始发、 且那一端不是它自己往返对的锚定端（没有车喂它）——例如 WS
- * 的小交路 1L 到克罗顿高地后接大交路 2C——这时本组的相位由车决定，不由乘客间隔决定：到站 + 折返正好是那一班的发车。
+ * <p>第二层有一个例外：<b>跨组按车接续</b>。某组的一个方向终到容量 1 的端点，而先放好的别组方向正从这个端点始发、
+ * 且那一端不是它自己往返对的锚定端（没有车喂它）——例如小交路到单股道端点后接大交路——这时本组的相位由车决定，不由乘客间隔决定：到站 + 折返正好是那一班的发车。
  * 按乘客间隔扫出来的偏移会把周期余数留在单股道端点上，车在那里要么空等占着股道，要么被串行器整批推后。
  * 锚定之后，被接那一班所在往返对的反向车在<b>远端</b>多等一段（受远端单股道一个周期容得下的时间限制），
  * 让它回到端点的时刻与喂车方向到站错开半个周期——这就是现实排班里"周转余量放在能力富余的那一端"。 接续关系随结果交给派车器（优先用喂车方向的车接）与第三层（整条锚定链一起平移，不拆开）。
@@ -39,7 +39,7 @@ public final class PhasePlanner {
   /**
    * 相位结果。
    *
-   * @param phaseByDirection 方向键 → 相位
+   * @param phaseByDirection 方向键 → 相位（方向键在全部交路组里唯一，见 {@link ServiceGroupClassifier.Direction}）
    * @param offsetByGroup 组 → 整体偏移（第二层的选择，供报告）
    * @param deltaByDirection 第三层给的 δ
    * @param notes 说明（哪些方向锚定了、哪些组按共用起点交错了）
@@ -326,6 +326,7 @@ public final class PhasePlanner {
       Map<String, List<StopCall>> callsByDirection,
       Topology topology) {
     Objects.requireNonNull(groups, "groups");
+    requireUniqueKeys(groups);
     Topology shape = topology == null ? Topology.none() : topology;
     Map<String, Integer> phases = new TreeMap<>();
     Map<String, Integer> offsets = new TreeMap<>();
@@ -484,6 +485,23 @@ public final class PhasePlanner {
       notes.add("这些方向算不出沿途合流点，只按起点交错，不会与算得出的方向互相错开：" + String.join("、", withoutCalls));
     }
     return new Phases(phases, offsets, Map.of(), notes, List.of(), placedConnections);
+  }
+
+  /**
+   * 方向键必须在全部交路组里唯一：相位表、往返对、按车接续都按键跨组查找，两组同名时后放的覆盖前一组，反向还会找到别组的方向。 分类器给同名的方向带上组名（{@link
+   * ServiceGroupClassifier.Direction#qualifier}）；手工拼出的组没这样做就直接拒绝，不悄悄算错。
+   */
+  static void requireUniqueKeys(List<ServiceGroupClassifier.Group> groups) {
+    Map<String, String> owner = new LinkedHashMap<>();
+    for (ServiceGroupClassifier.Group group : groups) {
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        String previous = owner.putIfAbsent(direction.key(), group.name());
+        if (previous != null && !previous.equals(group.name())) {
+          throw new IllegalArgumentException(
+              "方向键 " + direction.key() + " 同时出现在交路组 " + previous + " 与 " + group.name() + " 里");
+        }
+      }
+    }
   }
 
   /**

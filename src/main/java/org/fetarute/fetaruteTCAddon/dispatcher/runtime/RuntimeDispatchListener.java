@@ -25,7 +25,10 @@ import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.block.Sign;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -36,6 +39,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNorma
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
+import org.fetarute.fetaruteTCAddon.utils.DiagnosticSink;
 
 /**
  * 运行时推进点监听：waypoint/depot/switcher 触发占用判定与下一跳下发。
@@ -60,9 +64,51 @@ public final class RuntimeDispatchListener implements Listener {
   /** 出库后多久内被卸载算异常：正常运行的车出库后至少会在原地停留发车授权流程，不会几秒内就掉出加载范围。 */
   private static final long EARLY_UNLOAD_THRESHOLD_MILLIS = 60_000L;
 
+  /** 车厢、编组消失证据里最多列出几帧调用链。 */
+  private static final int GONE_CALLER_FRAMES = 6;
+
+  /** 取调用链时最多走多少帧：事件分发与 TrainCarts 内部只占前十几帧，再往下才是发起方。 */
+  private static final int GONE_STACK_DEPTH = 96;
+
+  /** 找"是谁发起的"时跳过的包：JDK、服务端、BKCommonLib，以及 TrainCarts 的编组与事件实现本身。 */
+  private static final List<String> GONE_INFRASTRUCTURE_PACKAGES =
+      List.of(
+          "java.",
+          "jdk.",
+          "sun.",
+          "net.minecraft.",
+          "org.bukkit.",
+          "io.papermc.",
+          "com.destroystokyo.",
+          "ca.spottedleaf.",
+          "org.spigotmc.",
+          "com.mojang.",
+          "it.unimi.",
+          "com.bergerkiller.bukkit.common.",
+          "com.bergerkiller.bukkit.tc.controller.",
+          "com.bergerkiller.bukkit.tc.events.");
+
+  private static final String TRAINCARTS_EVENTS_PACKAGE = "com.bergerkiller.bukkit.tc.events.";
+
+  /** 未接调试日志时的输出端：始终关闭。 */
+  private static final DiagnosticSink NO_DEBUG =
+      new DiagnosticSink() {
+        @Override
+        public void accept(String message) {}
+
+        @Override
+        public boolean enabled() {
+          return false;
+        }
+      };
+
   private final RuntimeDispatchService dispatchService;
   private final Consumer<Runnable> nextTickScheduler;
   private final Consumer<String> diagnostics;
+
+  /** 受管列车车厢或编组消失时的调试证据输出端，随 debug 开关生效；关着时整段跳过。 */
+  private final DiagnosticSink debug;
+
   private final LongSupplier clockMillis;
   private final BiPredicate<UUID, NodeId> ignoredNode;
   private final LinkVetoTraceLimiter linkVetoTraceLimiter =
@@ -98,6 +144,25 @@ public final class RuntimeDispatchListener implements Listener {
       BiPredicate<UUID, NodeId> ignoredNode) {
     return new RuntimeDispatchListener(
         dispatchService, bukkitNextTick(), diagnostics, System::currentTimeMillis, ignoredNode);
+  }
+
+  /**
+   * 同上，并在受管列车的车厢或编组消失（移除、卸载）时写调试证据。
+   *
+   * @param debug 调试日志输出端，随 debug 开关生效
+   */
+  public static RuntimeDispatchListener withDiagnostics(
+      RuntimeDispatchService dispatchService,
+      Consumer<String> diagnostics,
+      BiPredicate<UUID, NodeId> ignoredNode,
+      DiagnosticSink debug) {
+    return new RuntimeDispatchListener(
+        dispatchService,
+        bukkitNextTick(),
+        diagnostics,
+        System::currentTimeMillis,
+        ignoredNode,
+        debug);
   }
 
   private static Consumer<Runnable> bukkitNextTick() {
@@ -140,9 +205,21 @@ public final class RuntimeDispatchListener implements Listener {
       Consumer<String> diagnostics,
       LongSupplier clockMillis,
       BiPredicate<UUID, NodeId> ignoredNode) {
+    this(dispatchService, nextTickScheduler, diagnostics, clockMillis, ignoredNode, NO_DEBUG);
+  }
+
+  /** 同包测试入口：再注入调试日志输出端。 */
+  RuntimeDispatchListener(
+      RuntimeDispatchService dispatchService,
+      Consumer<Runnable> nextTickScheduler,
+      Consumer<String> diagnostics,
+      LongSupplier clockMillis,
+      BiPredicate<UUID, NodeId> ignoredNode,
+      DiagnosticSink debug) {
     this.dispatchService = dispatchService;
     this.nextTickScheduler = nextTickScheduler;
     this.diagnostics = diagnostics != null ? diagnostics : message -> {};
+    this.debug = debug != null ? debug : NO_DEBUG;
     this.clockMillis = clockMillis;
     this.ignoredNode = ignoredNode != null ? ignoredNode : (world, node) -> false;
     this.pendingUnexpectedSplits =
@@ -199,11 +276,27 @@ public final class RuntimeDispatchListener implements Listener {
     }
     MinecartGroup first = event.getGroup1();
     MinecartGroup second = event.getGroup2();
-    dispatchService.beginExpectedPhysicalTopologyRecovery(
-        identityDistinctMatching(List.of(first, second), group -> group != null).stream()
-            .map(TrainCartsRuntimeHandle::new)
-            .toList(),
-        "group-link");
+    handleGroupLink(
+        first,
+        second,
+        () ->
+            dispatchService.beginExpectedPhysicalTopologyRecovery(
+                identityDistinctMatching(List.of(first, second), group -> group != null).stream()
+                    .map(TrainCartsRuntimeHandle::new)
+                    .toList(),
+                "group-link"));
+  }
+
+  /**
+   * 联挂完成：全网先停车按现场重建；插件自己发起的联挂除外（收尾由发起方按车名改写身份、清掉被并掉的那列）。
+   *
+   * <p>编组以对象传入，TrainCarts 事件对象的适配留在入口处，单测不必初始化 TrainCarts 的静态类型。
+   */
+  void handleGroupLink(Object first, Object second, Runnable stopFirstRecovery) {
+    if (expectedTopologyChange(first, second)) {
+      return;
+    }
+    stopFirstRecovery.run();
   }
 
   /**
@@ -216,10 +309,22 @@ public final class RuntimeDispatchListener implements Listener {
     if (event == null || event.getGroup1() == null || event.getGroup2() == null) {
       return;
     }
-    vetoLinkIfCrossOwner(
-        new TrainCartsRuntimeHandle(event.getGroup1()),
-        new TrainCartsRuntimeHandle(event.getGroup2()),
-        event::setCancelled);
+    handleGroupLinkVeto(
+        event.getGroup1(),
+        event.getGroup2(),
+        () ->
+            vetoLinkIfCrossOwner(
+                new TrainCartsRuntimeHandle(event.getGroup1()),
+                new TrainCartsRuntimeHandle(event.getGroup2()),
+                event::setCancelled));
+  }
+
+  /** 联挂之前：跨属主的否决；插件自己发起的联挂不否决。 */
+  void handleGroupLinkVeto(Object first, Object second, Runnable veto) {
+    if (expectedTopologyChange(first, second)) {
+      return;
+    }
+    veto.run();
   }
 
   /**
@@ -400,6 +505,19 @@ public final class RuntimeDispatchListener implements Listener {
     }
     MinecartMember<?> member = event.getMember();
     MinecartGroup sourceGroup = event.getGroup();
+    traceMemberGone(member, sourceGroup);
+    handleMemberRemove(sourceGroup, () -> containMemberRemove(member, sourceGroup));
+  }
+
+  /** 成员移除：隔离并排“意外拆分”检查；插件自己发起的拆分/联挂除外（收尾由发起方负责）。 */
+  void handleMemberRemove(Object sourceGroup, Runnable containment) {
+    if (expectedTopologyChange(sourceGroup)) {
+      return;
+    }
+    containment.run();
+  }
+
+  private void containMemberRemove(MinecartMember<?> member, MinecartGroup sourceGroup) {
     MinecartGroup detachedGroup = member != null ? member.getGroup() : null;
     boolean sourceFta = hasFtaRuntimeTag(sourceGroup);
     boolean detachedFta = hasFtaRuntimeTag(detachedGroup);
@@ -425,6 +543,13 @@ public final class RuntimeDispatchListener implements Listener {
         sourceFta || detachedFta);
   }
 
+  /** 这些编组是否正处在插件自己发起的拆分/联挂里（见 {@code CouplingOperations}）。 */
+  private boolean expectedTopologyChange(Object... groups) {
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime coupling =
+        dispatchService.coupling();
+    return coupling != null && coupling.operations().involvesAny(groups);
+  }
+
   private boolean hasFtaRuntimeTag(MinecartGroup group) {
     return group != null
         && group.getProperties() != null
@@ -432,11 +557,18 @@ public final class RuntimeDispatchListener implements Listener {
   }
 
   private void handleGroupRemoved(MinecartGroup group) {
+    traceGroupGone("group-remove", group);
     pendingUnexpectedSplits.cancel(group);
-    if (group == null) {
+    handleGroupRemoval(
+        group, () -> dispatchService.handleTrainRemoved(new TrainCartsRuntimeHandle(group)));
+  }
+
+  /** 编组移除：按物理身份清理；插件自己发起的联挂里被并掉的那组除外（发起方按车名清理）。 */
+  void handleGroupRemoval(Object group, Runnable removal) {
+    if (group == null || expectedTopologyChange(group)) {
       return;
     }
-    dispatchService.handleTrainRemoved(new TrainCartsRuntimeHandle(group));
+    removal.run();
   }
 
   private void queueUnexpectedSplitCheck(
@@ -512,6 +644,7 @@ public final class RuntimeDispatchListener implements Listener {
   }
 
   private void handleGroupUnloaded(MinecartGroup group) {
+    traceGroupGone("group-unload", group);
     pendingUnexpectedSplits.cancel(group);
     if (group == null) {
       return;
@@ -550,6 +683,220 @@ public final class RuntimeDispatchListener implements Listener {
     } catch (RuntimeException | LinkageError ignored) {
       // 证据是尽力而为，读取失败不能影响卸载事件本身的处理。
     }
+  }
+
+  /**
+   * 受管列车的一节车厢被移除时留下调试证据。
+   *
+   * <p>TrainCarts 的整组销毁、实体被删、拆分与联挂都会逐节触发成员移除。车厢消失又没有插件销毁记录时，事后靠这一行分辨原因：实体是被删除（{@code
+   * entityDestroyed}）还是只是离开了世界，车厢与编组是否已卸载，所在区块是否加载，最近的玩家多远，是否本插件自己的拆并，以及调用链与发起方（第一帧不属于服务端、BKCommonLib
+   * 与 TrainCarts 编组实现的代码）。只读，不改变事件处理。
+   */
+  private void traceMemberGone(MinecartMember<?> member, MinecartGroup group) {
+    if (!debug.enabled() || member == null) {
+      return;
+    }
+    try {
+      if (!hasFtaRuntimeTag(group)) {
+        return;
+      }
+      TrainProperties properties = group.getProperties();
+      int sizeBefore = group.size();
+      int sizeAfter = group.contains(member) ? sizeBefore - 1 : sizeBefore;
+      var entity = member.getEntity();
+      Location location = entity == null ? null : entity.getLocation();
+      List<String> frames = stackFrames();
+      debug.accept(
+          "FTA_TRAIN_MEMBER_GONE train="
+              + properties.getTrainName()
+              + " kind=member-remove car="
+              + group.indexOf(member)
+              + " size="
+              + sizeBefore
+              + "->"
+              + sizeAfter
+              + " entityRemoved="
+              + (entity == null ? "-" : String.valueOf(entity.isRemoved()))
+              + " entityDestroyed="
+              + (entity == null ? "-" : String.valueOf(entity.isDestroyed()))
+              + " entityInWorld="
+              + (entity == null ? "-" : String.valueOf(entity.isInLoadedChunk()))
+              + " memberUnloaded="
+              + member.isUnloaded()
+              + " groupUnloaded="
+              + group.isUnloaded()
+              + goneContext(properties, location, group)
+              + " caller="
+              + callerChain(frames)
+              + " origin="
+              + callerOrigin(frames));
+    } catch (RuntimeException | LinkageError ignored) {
+      // 证据是尽力而为，读取失败不能影响成员移除事件本身的处理。
+    }
+  }
+
+  /**
+   * 受管列车整列被移除或卸载时留下调试证据。
+   *
+   * <p>与 {@link #traceMemberGone} 配对：整组销毁时车厢先逐节移除，这里的 {@code size} 通常已是 0；卸载时车厢仍在编组里。
+   */
+  private void traceGroupGone(String kind, MinecartGroup group) {
+    if (!debug.enabled()) {
+      return;
+    }
+    try {
+      if (!hasFtaRuntimeTag(group)) {
+        return;
+      }
+      TrainProperties properties = group.getProperties();
+      Location location = null;
+      if (!group.isEmpty()) {
+        // 按泛型擦除后的返回类型接收，不做向下转型
+        com.bergerkiller.bukkit.common.entity.CommonEntity<?> entity = group.head().getEntity();
+        location = entity == null ? null : entity.getLocation();
+      }
+      List<String> frames = stackFrames();
+      debug.accept(
+          "FTA_TRAIN_GROUP_GONE train="
+              + properties.getTrainName()
+              + " kind="
+              + kind
+              + " size="
+              + group.size()
+              + " groupUnloaded="
+              + group.isUnloaded()
+              + goneContext(properties, location, group)
+              + " caller="
+              + callerChain(frames)
+              + " origin="
+              + callerOrigin(frames));
+    } catch (RuntimeException | LinkageError ignored) {
+      // 证据是尽力而为，读取失败不能影响编组移除/卸载事件本身的处理。
+    }
+  }
+
+  /** 车厢与编组消失证据共用的现场：区块是否加载、是否保持区块加载、出车多久、最近的玩家多远、是否本插件自己的拆并。 */
+  private String goneContext(TrainProperties properties, Location location, MinecartGroup group) {
+    return " chunkLoaded="
+        + chunkLoadedText(location)
+        + " keepChunksLoaded="
+        + properties.isKeepingChunksLoaded()
+        + " ageMs="
+        + runAgeText(properties)
+        + " nearestPlayer="
+        + nearestPlayerText(location)
+        + " expected="
+        + expectedTopologyChange(group);
+  }
+
+  /** 距 {@code FTA_RUN_AT} 的毫秒数；没有该标签时为 {@code -}。 */
+  String runAgeText(TrainProperties properties) {
+    Optional<Long> runAt = TrainTagHelper.readLongTag(properties, "FTA_RUN_AT");
+    return runAt.map(at -> String.valueOf(clockMillis.getAsLong() - at)).orElse("-");
+  }
+
+  /** 位置所在区块此刻是否加载；位置未知时为 {@code -}。 */
+  static String chunkLoadedText(Location location) {
+    World world = location == null ? null : location.getWorld();
+    if (world == null) {
+      return "-";
+    }
+    return String.valueOf(
+        world.isChunkLoaded(location.getBlockX() >> 4, location.getBlockZ() >> 4));
+  }
+
+  /** 同一世界里离该位置最近的在线玩家有多少格（取整）；没有玩家为 {@code none}，位置未知为 {@code -}。 */
+  static String nearestPlayerText(Location location) {
+    World world = location == null ? null : location.getWorld();
+    if (world == null) {
+      return "-";
+    }
+    double best = Double.MAX_VALUE;
+    for (Player player : world.getPlayers()) {
+      Location at = player == null ? null : player.getLocation();
+      if (at == null || !world.equals(at.getWorld())) {
+        continue;
+      }
+      best = Math.min(best, at.distanceSquared(location));
+    }
+    return best == Double.MAX_VALUE ? "none" : String.valueOf(Math.round(Math.sqrt(best)));
+  }
+
+  private static List<String> stackFrames() {
+    return StackWalker.getInstance()
+        .walk(
+            frames ->
+                frames
+                    .limit(GONE_STACK_DEPTH)
+                    .map(frame -> frame.getClassName() + "#" + frame.getMethodName())
+                    .toList());
+  }
+
+  /**
+   * 触发事件的调用链：从最近一帧 TrainCarts 事件派发（{@code *Event.call}）之后起，按"简单类名.方法"列出最多 {@link
+   * #GONE_CALLER_FRAMES} 帧，连续重复的帧只列一次，以 {@code <} 连接；找不到事件派发帧时为 {@code -}。
+   *
+   * @param frames 由近及远的调用帧，每帧为 {@code 全限定类名#方法名}
+   */
+  static String callerChain(List<String> frames) {
+    int start = afterEventDispatch(frames);
+    if (start < 0) {
+      return "-";
+    }
+    List<String> chain = new ArrayList<>();
+    for (int i = start; i < frames.size() && chain.size() < GONE_CALLER_FRAMES; i++) {
+      String frame = shortFrame(frames.get(i));
+      if (chain.isEmpty() || !chain.get(chain.size() - 1).equals(frame)) {
+        chain.add(frame);
+      }
+    }
+    return chain.isEmpty() ? "-" : String.join("<", chain);
+  }
+
+  /**
+   * 事件的发起方：事件派发之后第一帧不属于 JDK、服务端、BKCommonLib 与 TrainCarts 编组/事件实现的代码（插件、TrainCarts 命令或牌子、TrainCarts
+   * 监听器）；全在这些包里（如区块卸载、实体随区块移除）为 {@code none}，找不到事件派发帧时为 {@code -}。
+   *
+   * @param frames 由近及远的调用帧，每帧为 {@code 全限定类名#方法名}
+   */
+  static String callerOrigin(List<String> frames) {
+    int start = afterEventDispatch(frames);
+    if (start < 0) {
+      return "-";
+    }
+    for (int i = start; i < frames.size(); i++) {
+      String frame = frames.get(i);
+      if (frame != null && GONE_INFRASTRUCTURE_PACKAGES.stream().noneMatch(frame::startsWith)) {
+        return shortFrame(frame);
+      }
+    }
+    return "none";
+  }
+
+  /** 最近一帧 TrainCarts 事件派发之后的下标；没有时为 -1。 */
+  private static int afterEventDispatch(List<String> frames) {
+    if (frames == null) {
+      return -1;
+    }
+    for (int i = 0; i < frames.size(); i++) {
+      String frame = frames.get(i);
+      if (frame != null && frame.startsWith(TRAINCARTS_EVENTS_PACKAGE)) {
+        return i + 1;
+      }
+    }
+    return -1;
+  }
+
+  /** {@code a.b.Class#method} → {@code Class.method}。 */
+  private static String shortFrame(String frame) {
+    if (frame == null) {
+      return "?";
+    }
+    int hash = frame.indexOf('#');
+    String className = hash < 0 ? frame : frame.substring(0, hash);
+    String method = hash < 0 ? "" : frame.substring(hash + 1);
+    String simple = className.substring(className.lastIndexOf('.') + 1);
+    return method.isEmpty() ? simple : simple + "." + method;
   }
 
   /**

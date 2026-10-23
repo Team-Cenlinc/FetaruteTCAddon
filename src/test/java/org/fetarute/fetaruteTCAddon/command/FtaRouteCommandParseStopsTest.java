@@ -28,6 +28,35 @@ import org.junit.jupiter.api.Test;
 
 class FtaRouteCommandParseStopsTest {
 
+  /** 书本保留离散表达原文，命令与运行时共享同一资格语义。 */
+  @Test
+  void bookPreservesSparseDynamicSource() {
+    String source = "DYNAMIC:SURN:S:STATION:[5,1,3-3]";
+    var result =
+        new FtaRouteCommand(mockPlugin())
+            .parseStopsFromBook(
+                mockLocale(),
+                mockProvider(),
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                mock(Player.class),
+                List.of(
+                    new FtaRouteCommand.BookLine(1, "CRET SURN:D:DEPOT:1"),
+                    new FtaRouteCommand.BookLine(2, "STOP " + source)));
+    RouteStop stop = result.orElseThrow().get(1);
+    assertTrue(stop.notes().orElseThrow().contains(source));
+    var spec =
+        org.fetarute
+            .fetaruteTCAddon
+            .dispatcher
+            .route
+            .DynamicStopMatcher
+            .parseDynamicSpec(stop)
+            .orElseThrow();
+    assertTrue(spec.tracks().contains(3));
+    assertTrue(!spec.tracks().contains(2));
+  }
+
   @Test
   void parseStopsFromBookCreatesCretAndDstyStops() {
     FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
@@ -53,6 +82,29 @@ class FtaRouteCommandParseStopsTest {
     assertEquals("SURN:D:DEPOT:2", stops.get(2).waypointNodeId().orElse(""));
     assertEquals(RouteStopPassType.PASS, stops.get(2).passType());
     assertTrue(stops.get(2).notes().orElse("").startsWith("DSTY "));
+  }
+
+  /** 多模车换模备注 POWER 与 CHANGE 一样是动作行：挂在前一个停靠点上，存为 POWER:ptg6。 */
+  @Test
+  void parseStopsFromBookAttachesPowerToThePreviousStop() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(
+            new FtaRouteCommand.BookLine(1, "SURN:S:STATION:1"),
+            new FtaRouteCommand.BookLine(2, "POWER ptg6"),
+            new FtaRouteCommand.BookLine(3, "SURN:S:STATION:2"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(
+            locale, provider, UUID.randomUUID(), UUID.randomUUID(), player, lines);
+
+    assertTrue(result.isPresent());
+    assertEquals(2, result.get().size());
+    assertEquals("POWER:ptg6", result.get().get(0).notes().orElse(""));
+    assertTrue(result.get().get(1).notes().isEmpty());
   }
 
   @Test

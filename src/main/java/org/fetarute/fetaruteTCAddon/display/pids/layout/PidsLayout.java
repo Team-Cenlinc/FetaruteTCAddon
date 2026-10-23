@@ -42,6 +42,48 @@ public record PidsLayout(
     return tileRows * TILE;
   }
 
+  /**
+   * 左右对调的版式：站台号与时钟改贴对侧边缘（对齐方式随之对调），到发表与色带整块移到对侧；到发表内各列的先后与宽度不变（仍按色牌、终点、到站从左往右读）。 只支持站台屏用到的这几种组件。
+   *
+   * @throws IllegalArgumentException 布局里有不支持对调的组件
+   */
+  public PidsLayout mirrored(String mirroredId, String mirroredName) {
+    int canvas = width();
+    List<Widget> out = new java.util.ArrayList<>(widgets.size());
+    for (Widget widget : widgets) {
+      if (widget instanceof Platform p) {
+        out.add(
+            new Platform(
+                canvas - p.x(),
+                p.y(),
+                p.box(),
+                p.numberSize(),
+                p.labelGap(),
+                p.label(),
+                p.max(),
+                p.perRow(),
+                p.gap(),
+                opposite(p.align())));
+      } else if (widget instanceof Clock c) {
+        out.add(new Clock(canvas - c.x(), c.y(), c.size(), opposite(c.align())));
+      } else if (widget instanceof LineBand b) {
+        out.add(new LineBand(canvas - b.x() - b.width(), b.y(), b.width(), b.height()));
+      } else if (widget instanceof Departures d) {
+        out.add(
+            new Departures(
+                canvas - d.x() - d.width(), d.y(), d.width(), d.columns(), d.header(), d.rows()));
+      } else {
+        throw new IllegalArgumentException(
+            id + " 有不支持左右对调的组件: " + widget.getClass().getSimpleName());
+      }
+    }
+    return new PidsLayout(mirroredId, mirroredName, tileRows, tileCols, boldFrom, out);
+  }
+
+  private static Align opposite(Align align) {
+    return align == Align.RIGHT ? Align.LEFT : Align.RIGHT;
+  }
+
   /** 到发表组件；布局没有到发表时为空。 */
   public Optional<Departures> departures() {
     return widgets.stream()
@@ -102,7 +144,9 @@ public record PidsLayout(
    *
    * <p>{@code max} 为 1 的是单站台屏，只能绑定一个站台；大于 1 的是多站台屏，可以绑定至多这么多个站台（不能选全部）。
    *
-   * @param x 左
+   * <p>右对齐时方块与标签都贴着右缘（每行最后一个方块贴右缘，标签按墨迹右对齐）：屏幕挂在站台另一侧时，站台号放在靠站台的一边，兼作指示。
+   *
+   * @param x 左对齐时为左缘，右对齐时为右缘
    * @param y 上
    * @param box 方块边长
    * @param numberSize 站台号字号
@@ -111,6 +155,7 @@ public record PidsLayout(
    * @param max 最多显示几个站台
    * @param perRow 每行几个方块
    * @param gap 方块之间的间距
+   * @param align 对齐方式
    */
   public record Platform(
       int x,
@@ -121,8 +166,13 @@ public record PidsLayout(
       TextStyle label,
       int max,
       int perRow,
-      int gap)
+      int gap,
+      Align align)
       implements Widget {
+
+    public Platform {
+      align = align == null ? Align.LEFT : align;
+    }
 
     /** 方块排成几行（按最多站台数）。 */
     public int rows() {

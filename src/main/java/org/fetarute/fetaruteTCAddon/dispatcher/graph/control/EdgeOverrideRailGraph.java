@@ -15,6 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphPlatformSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
@@ -29,7 +30,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  * 查询能力，避免运维覆盖导致调度请求丢失互斥资源或方向证据。
  */
 public final class EdgeOverrideRailGraph
-    implements RailGraph, RailGraphSectionSupport, RailGraphInterlockingSupport {
+    implements RailGraph,
+        RailGraphSectionSupport,
+        RailGraphInterlockingSupport,
+        RailGraphPlatformSupport {
 
   /**
    * 最近一份覆盖表里可能封锁的记录（手动封锁或带 TTL 的）。
@@ -51,6 +55,22 @@ public final class EdgeOverrideRailGraph
     this.delegate = Objects.requireNonNull(delegate, "delegate");
     this.overrides = Map.copyOf(Objects.requireNonNull(overrides, "overrides"));
     this.now = Objects.requireNonNull(now, "now");
+  }
+
+  /**
+   * 保留底层站点索引：限速与封锁覆盖不改变节点身份，动态选台无需重新扫描全图。
+   *
+   * <p>仅测试或旧图实现缺少索引时，保留按真实节点扫描的兼容行为。
+   */
+  @Override
+  public List<NodeId> platformNodes(String terminalKey) {
+    if (delegate instanceof RailGraphPlatformSupport indexed) {
+      return indexed.platformNodes(terminalKey);
+    }
+    return RailGraphPlatformSupport.indexPlatformNodes(
+            delegate.nodes().stream().map(RailNode::id).toList())
+        .getOrDefault(
+            terminalKey == null ? "" : terminalKey.toLowerCase(java.util.Locale.ROOT), List.of());
   }
 
   /**

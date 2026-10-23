@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 final class DutyLedger {
 
   private final Consumer<String> debugLogger;
+  private Consumer<String> changeListener = key -> {};
   private final ConcurrentMap<String, TimetableService.DutyProgress> progress =
       new ConcurrentHashMap<>();
 
@@ -76,6 +77,20 @@ final class DutyLedger {
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
   }
 
+  /** 写回车辆标签的通知；恢复期间由服务层抑制，避免把未完整恢复的账本写回。 */
+  void setChangeListener(Consumer<String> listener) {
+    changeListener = listener;
+  }
+
+  /** 按验证后的持久化位置恢复进度，不依赖开服时是否正好在首站。 */
+  void restoreProgress(String key, VehicleDuty duty, int reached, UUID lastTrip) {
+    progress.put(
+        key,
+        new TimetableService.DutyProgress(
+            duty.id(), duty.dutyCode(), duty.tripCount(), reached, lastTrip));
+    changeListener.accept(key);
+  }
+
   Optional<TimetableService.DutyProgress> progressOf(String key) {
     return key == null ? Optional.empty() : Optional.ofNullable(progress.get(key));
   }
@@ -110,24 +125,29 @@ final class DutyLedger {
     }
     VehicleDuty duty = dutyOpt.get();
     int position = duty.tripIds().indexOf(trip.id());
-    int reached = position < 0 ? duty.tripCount() : position + 1;
+    int reached =
+        position < 0
+            ? duty.createRouteId().filter(trip.routeId()::equals).isPresent() ? 0 : duty.tripCount()
+            : position + 1;
     TimetableService.DutyProgress previous = progress.get(key);
     if (previous == null || !previous.dutyId().equals(dutyId)) {
       progress.put(
           key,
           new TimetableService.DutyProgress(
               dutyId, duty.dutyCode(), duty.tripCount(), reached, trip.id()));
+      changeListener.accept(key);
       return;
     }
-    if (!previous.lastTripId().equals(trip.id())) {
+    if (!previous.lastTripId().equals(trip.id()) || previous.assignedTrips() < reached) {
       progress.put(key, previous.reached(trip.id(), reached));
+      changeListener.accept(key);
     }
   }
 
   /**
    * 把一辆车绑到某个交路上。已经绑在别的交路上时不覆盖——那是一辆被错派的车，覆盖只会把错误藏起来。
    *
-   * <p>从这个交路上被解下的车不许绑回去；绑上的是替补车时，空缺就此填上。
+   * <p>从这个交路上被解下的车不许绑回去；绑上的是替补车时，空缺就此填上。只有真的绑上才通知写回，拒绝、冲突与重复确认都不算变化。
    */
   void bind(String trainName, String key, TimetableService.DutyKey duty, String reason) {
     if (duty.equals(retired.get(key))) {
@@ -168,6 +188,7 @@ final class DutyLedger {
                 + " vacatedAt="
                 + filled.vacatedAt());
       }
+      changeListener.accept(key);
     } else if (!previous.equals(duty)) {
       debugLogger.accept(
           "TIMETABLE_DUTY_BIND_CONFLICT train="
@@ -216,6 +237,7 @@ final class DutyLedger {
       return Optional.empty();
     }
     retired.put(key, duty);
+    changeListener.accept(key);
     if (current == null || current.exhausted() || !current.dutyId().equals(duty.dutyId())) {
       debugLogger.accept(
           "TIMETABLE_DUTY_VACATED train="
@@ -261,9 +283,22 @@ final class DutyLedger {
     return java.util.Map.copyOf(bindings);
   }
 
+  /** 这个交路此刻空缺。 */
+  boolean isVacant(TimetableService.DutyKey duty) {
+    return vacancies.containsKey(duty);
+  }
+
   /** 当前全部空缺的快照。 */
   java.util.List<Vacancy> vacancies() {
     return java.util.List.copyOf(vacancies.values());
+  }
+
+  /** 中途接管时登记尚无车辆的交路；已有空缺的在途替补状态必须保留。 */
+  void registerUnbound(TimetableService.DutyKey key, VehicleDuty duty, java.time.Instant now) {
+    if (holderOf(key).isEmpty()) {
+      vacancies.putIfAbsent(
+          key, new Vacancy(key, duty.dutyCode(), 0, now, "startup-unbound", "", -1));
+    }
   }
 
   /** 记下已为某一班派出替补（出库票在路上）；空缺已被填上或已撤销时不动。 */
@@ -386,7 +421,6 @@ final class DutyLedger {
   /** 列车离开运行时管辖：释放进度与归属。 */
   void release(String key, String trainName, String reason) {
     retired.remove(key);
-    displayNames.remove(key);
     returnDenied.remove(key);
     bindings.remove(key);
     TimetableService.DutyProgress removed = progress.remove(key);
@@ -403,6 +437,8 @@ final class DutyLedger {
               + " reason="
               + reason);
     }
+    changeListener.accept(key);
+    displayNames.remove(key);
   }
 
   void retain(Set<String> keep) {
@@ -429,10 +465,12 @@ final class DutyLedger {
   }
 
   void clear() {
+    Set<String> changed = Set.copyOf(bindings.keySet());
     progress.clear();
     bindings.clear();
     vacancies.clear();
     retired.clear();
+    changed.forEach(changeListener);
     displayNames.clear();
     returnDenied.clear();
   }

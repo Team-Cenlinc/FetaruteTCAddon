@@ -56,12 +56,11 @@ public final class TimetableOccupancyProjector {
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
     List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
     Map<UUID, TimetableTrip> tripsById = new HashMap<>();
-    Set<UUID> returnRouteIds = returnRouteIdsOf(timetable);
+    Set<UUID> legRouteIds = legRouteIdsOf(timetable);
     int serviceStart = timetable.serviceStartSecondOfDay();
     for (TimetableTrip trip : timetable.trips()) {
       tripsById.put(trip.id(), trip);
-      addTripMovement(
-          trip, profiles, returnRouteIds, serviceStart, zeroSecondOfDay, tag, movements);
+      addTripMovement(trip, profiles, legRouteIds, serviceStart, zeroSecondOfDay, tag, movements);
     }
     for (VehicleDuty duty : timetable.duties()) {
       appendDutyLegs(
@@ -78,7 +77,7 @@ public final class TimetableOccupancyProjector {
    * @param duty 交路（时刻已改写）
    * @param trips 它的班次，时刻已改写；顺序无关，按 {@link VehicleDuty#tripIds()} 取用
    * @param profiles 各 route 的投影（含 CREATE/RETURN）
-   * @param returnRouteIds 以 RETURN 收尾的 route：这些班次的运行由回库走行投影，不再单独投一遍
+   * @param legRouteIds 交路出入库 route：展示班次由走行投影，不再单独投一遍
    * @param serviceStartSecondOfDay 计划窗口起点，判跨零点用
    * @param zeroSecondOfDay 零点
    */
@@ -86,7 +85,7 @@ public final class TimetableOccupancyProjector {
       VehicleDuty duty,
       List<TimetableTrip> trips,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
-      Set<UUID> returnRouteIds,
+      Set<UUID> legRouteIds,
       int serviceStartSecondOfDay,
       int zeroSecondOfDay) {
     Objects.requireNonNull(duty, "duty");
@@ -95,7 +94,7 @@ public final class TimetableOccupancyProjector {
     for (TimetableTrip trip : trips == null ? List.<TimetableTrip>of() : trips) {
       tripsById.put(trip.id(), trip);
     }
-    Set<UUID> returns = returnRouteIds == null ? Set.of() : returnRouteIds;
+    Set<UUID> returns = legRouteIds == null ? Set.of() : legRouteIds;
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
     List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
     for (UUID tripId : duty.tripIds()) {
@@ -123,27 +122,30 @@ public final class TimetableOccupancyProjector {
     return new Occupancy(movements, stays);
   }
 
-  /** 表里以 RETURN 收尾的 route：它们的班次行不单独投影运行。 */
-  public static Set<UUID> returnRouteIdsOf(Timetable timetable) {
+  /** 交路的出入库走行 route：展示车次行由交路走行投影，避免同一辆车重复占用资源。 */
+  public static Set<UUID> legRouteIdsOf(Timetable timetable) {
     Set<UUID> out = new HashSet<>();
     for (TimetableRoutePlan plan : timetable.routePlans()) {
       if (plan.kind() == RouteOperationType.RETURN) {
         out.add(plan.routeId());
       }
     }
+    for (VehicleDuty duty : timetable.duties()) {
+      duty.createRouteId().ifPresent(out::add);
+    }
     return out;
   }
 
-  /** 一班车的运行。带客的回库班有 trip 行，但它的运行由 duty 的回库走行投影（同一辆车、同一时刻），这里不再投一遍。 */
+  /** 一班车的运行。带客出入库有 trip 行，但它的运行由 duty 的走行投影（同一辆车、同一时刻），这里不再投一遍。 */
   private static void addTripMovement(
       TimetableTrip trip,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
-      Set<UUID> returnRouteIds,
+      Set<UUID> legRouteIds,
       int serviceStartSecondOfDay,
       int zeroSecondOfDay,
       Optional<String> owner,
       List<TimetableConflictChecker.Movement> movements) {
-    if (profiles.containsKey(trip.routeId()) && !returnRouteIds.contains(trip.routeId())) {
+    if (profiles.containsKey(trip.routeId()) && !legRouteIds.contains(trip.routeId())) {
       movements.add(
           new TimetableConflictChecker.Movement(
               trip.tripCode(),
@@ -189,12 +191,51 @@ public final class TimetableOccupancyProjector {
       chain.add(trip);
       chainProfiles.add(profile);
     }
+    int dutyStart = duty.plannedStartSecondOfDay() - zero;
+    int returnAt = duty.returnSecondOfDay() - zero;
     if (chain.isEmpty()) {
+      // 解编切下、没有班次的车（就地待命没人接、直接回库）：在解编站等到回库，再走回库走行
+      if (duty.coupling().startsBySplit()) {
+        duty.returnRouteId()
+            .ifPresent(
+                routeId -> {
+                  movements.add(
+                      new TimetableConflictChecker.Movement(
+                          duty.dutyCode() + "-RETURN", routeId, returnAt, owner));
+                  TimetableConflictChecker.RouteProfile returning = profiles.get(routeId);
+                  if (returning != null && returnAt > dutyStart) {
+                    returning
+                        .origin()
+                        .ifPresent(
+                            platform ->
+                                stays.add(
+                                    new TimetableConflictChecker.Stay(
+                                        duty.dutyCode() + TimetableConflictChecker.SPLIT_STAY,
+                                        platform,
+                                        dutyStart,
+                                        returnAt,
+                                        owner)));
+                  }
+                });
+      }
       return;
     }
     int firstDeparture = relativeDeparture(chain.get(0), serviceStart, zero);
-    int dutyStart = duty.plannedStartSecondOfDay() - zero;
-    int returnAt = duty.returnSecondOfDay() - zero;
+    if (duty.coupling().startsBySplit() && dutyStart < firstDeparture) {
+      // 解下的车在解编站等它的第一班
+      chainProfiles
+          .get(0)
+          .origin()
+          .ifPresent(
+              platform ->
+                  stays.add(
+                      new TimetableConflictChecker.Stay(
+                          duty.dutyCode() + TimetableConflictChecker.SPLIT_STAY,
+                          platform,
+                          dutyStart,
+                          firstDeparture,
+                          owner)));
+    }
     duty.createRouteId()
         .ifPresent(
             routeId -> {
@@ -211,7 +252,9 @@ public final class TimetableOccupancyProjector {
                           stays.add(
                               new TimetableConflictChecker.Stay(
                                   duty.dutyCode(),
-                                  platform,
+                                  create == null
+                                      ? platform
+                                      : create.terminal().map(platform::intersect).orElse(platform),
                                   Math.min(arrival, firstDeparture),
                                   firstDeparture,
                                   owner)));
@@ -221,6 +264,7 @@ public final class TimetableOccupancyProjector {
           relativeDeparture(chain.get(i), serviceStart, zero)
               + lastArrival(chainProfiles.get(i).stops());
       int nextDeparture = relativeDeparture(chain.get(i + 1), serviceStart, zero);
+      Optional<TimetableConflictChecker.Platform> nextOrigin = chainProfiles.get(i + 1).origin();
       chainProfiles
           .get(i)
           .terminal()
@@ -229,12 +273,32 @@ public final class TimetableOccupancyProjector {
                   stays.add(
                       new TimetableConflictChecker.Stay(
                           duty.dutyCode(),
-                          platform,
+                          nextOrigin.map(platform::intersect).orElse(platform),
                           arrival,
                           Math.max(arrival, nextDeparture),
                           owner)));
     }
     int lastIndex = chain.size() - 1;
+    if (duty.coupling().endsByJoin()) {
+      // 回程支线车到联挂站后在股道上等主干进站挂上，直到主干离开
+      int arrival =
+          relativeDeparture(chain.get(lastIndex), serviceStart, zero)
+              + lastArrival(chainProfiles.get(lastIndex).stops());
+      if (returnAt > arrival) {
+        chainProfiles
+            .get(lastIndex)
+            .terminal()
+            .ifPresent(
+                platform ->
+                    stays.add(
+                        new TimetableConflictChecker.Stay(
+                            duty.dutyCode() + TimetableConflictChecker.JOIN_STAY,
+                            platform,
+                            arrival,
+                            returnAt,
+                            owner)));
+      }
+    }
     duty.returnRouteId()
         .ifPresent(
             routeId -> {
@@ -244,6 +308,7 @@ public final class TimetableOccupancyProjector {
               int arrival =
                   relativeDeparture(chain.get(lastIndex), serviceStart, zero)
                       + lastArrival(chainProfiles.get(lastIndex).stops());
+              TimetableConflictChecker.RouteProfile returning = profiles.get(routeId);
               chainProfiles
                   .get(lastIndex)
                   .terminal()
@@ -252,7 +317,12 @@ public final class TimetableOccupancyProjector {
                           stays.add(
                               new TimetableConflictChecker.Stay(
                                   duty.dutyCode(),
-                                  platform,
+                                  returning == null
+                                      ? platform
+                                      : returning
+                                          .origin()
+                                          .map(platform::intersect)
+                                          .orElse(platform),
                                   arrival,
                                   Math.max(arrival, returnAt),
                                   owner)));

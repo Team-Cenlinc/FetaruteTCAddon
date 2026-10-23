@@ -32,6 +32,96 @@ enum:
     pass: "Pass"
     terminate: "Terminates"
 
+coupler:
+  item:
+    name: "<dark_aqua>Coupler Wrench</dark_aqua>"
+    lore-1: "<gray>Right-click the outer end of an end car: open or lock its coupler</gray>"
+    lore-2: "<gray>Right-click the joint between two cars: uncouple there</gray>"
+    lore-3: "<gray>Shift+right-click an end car with an open coupler: push it to the train ahead and couple</gray>"
+    lore-4: "<gray>Right-click the middle of a car: show car information</gray>"
+  usage:
+    header: "<prefix> <dark_aqua>Coupler wrench</dark_aqua> <gray>(dispatched trains only while out of service: terminal standby trains, and returning trains past their last passenger stop)</gray>"
+    wrench: "  <white>/fta coupler wrench</white> <gray>Get a coupler wrench</gray>"
+    toggle: "  <white>Right-click the outer end of an end car</white> <gray>Open or lock that coupler; while holding the wrench, nearby outer couplers show green (open) or red (locked) particles</gray>"
+    split: "  <white>Right-click the joint between two cars</white> <gray>Uncouple there and lock both ends at the cut; on a dispatched train the detached part gets a new train name</gray>"
+    push: "  <white>Shift+right-click an end car with an open coupler</white> <gray>Push the whole train slowly to the train ahead and couple; the facing coupler of that train must be open</gray>"
+    couple: "  <white>Click [Couple] in chat after opening a coupler</white> <gray>This train moves slowly to the train ahead and couples; the facing coupler of that train is opened as well</gray>"
+    info: "  <white>Right-click the middle of a car</white> <gray>Show the car number, formation, both couplers and whether it can be worked on</gray>"
+  player-only: "<prefix> <red>Only a player can get a coupler wrench</red>"
+  unavailable: "<prefix> <red>The coupling service is not ready</red>"
+  given: "<prefix> <dark_aqua>Coupler wrench given</dark_aqua>"
+  given-dropped: "<prefix> <dark_aqua>Coupler wrench given</dark_aqua> <gray>(inventory full, dropped at your feet)</gray>"
+  disabled: "<prefix> <yellow>The coupler wrench is disabled in the configuration (coupler.enabled in config.yml)</yellow>"
+  no-permission: "<prefix> <red>You do not have permission to use the coupler wrench</red>"
+  busy: "<prefix> <yellow>This train is being pushed for coupling, please wait</yellow>"
+  denied: "<prefix> <yellow><train>: <reason></yellow>"
+  deny:
+    allowed: "can be worked on"
+    moving: "the train is moving"
+    driver: "a driver is on duty"
+    guard: "a guard is on duty"
+    dwelling: "the train is dwelling at a stop"
+    departure-gate: "the train is waiting to depart"
+    dispatching: "the standby train is being dispatched to its next run"
+    called: "the train was called by a player"
+    early-hold: "the train is waiting in the depot to leave early"
+    timetable-duty: "the train is assigned to a timetable trip"
+    in-service: "the train is in service; take it out of service first"
+  end:
+    outer: " outer"
+    front: " front"
+    rear: " rear"
+  toggle:
+    opened: "<prefix> <green>Opened</green> <gray>the<end> coupler of car <car> on</gray> <white><train></white>"
+    closed: "<prefix> <gray>Locked the<end> coupler of car <car> on</gray> <white><train></white>"
+  split:
+    done: "<prefix> <green>Uncoupled</green> <white><train></white> <gray>(<kept> + <detached> cars, detached train:</gray> <white><name></white><gray>)</gray>"
+    rename-failed: "<prefix> <yellow>Uncoupled</yellow> <white><train></white><yellow>, but the detached <detached> car(s) could not get a new train name and will be treated as a duplicate train</yellow>"
+    failed: "<prefix> <red>Could not uncouple</red> <white><train></white>"
+  couple:
+    offer: "<prefix> <gray>Train</gray> <white><train></white> <gray>is about <gap> blocks ahead</gray> <click:run_command:'/fta coupler couple <token>'><hover:show_text:'<gray>This train moves slowly to it and couples; its facing coupler is opened as well</gray>'><green>[Couple]</green></hover></click>"
+    none: "<prefix> <yellow>This [Couple] button is no longer valid: open the coupler at the end you want to couple with the wrench again, then click the new [Couple]</yellow>"
+    far: "<prefix> <yellow>You are too far from the train; move closer, then click [Couple]</yellow>"
+  push:
+    joint: "<prefix> <yellow>This is the joint between two cars; push only from the outer end of an end car</yellow>"
+    closed: "<prefix> <yellow>This coupler is locked; right-click to open it first</yellow>"
+    actions: "<prefix> <yellow><train> is running another action, try again later</yellow>"
+    mixed: "<prefix> <yellow>A dispatched train and a regular train cannot be coupled</yellow>"
+    target-closed: "<prefix> <yellow>The facing coupler of <train> ahead is locked</yellow>"
+    too-long: "<prefix> <yellow>Coupled, the train would have <cars> cars, over the limit of <max></yellow>"
+    path-unguarded: "<prefix> <yellow>The push path crosses a switch or interlocking zone: it must be held by one of the two trains and by no other train before pushing</yellow>"
+    target:
+      no-track: "<prefix> <yellow>The end car is not on a track, or the nearby chunks are not loaded</yellow>"
+      not-found: "<prefix> <yellow>No train to couple within <blocks> blocks along the track (switches must be set towards it)</yellow>"
+      middle-car: "<prefix> <yellow>The first car ahead is in the middle of another train and cannot be coupled</yellow>"
+    started: "<prefix> <dark_aqua>Pushing towards</dark_aqua> <white><train></white> <gray>(gap about <gap> blocks)</gray>"
+    linked: "<prefix> <green>Coupled</green> <white><train></white> <gray>(<cars> cars)</gray>"
+    failed: "<prefix> <red>Could not couple: <reason></red>"
+    reason:
+      overrun: "pushed past the expected distance without coupling"
+      stalled: "the train cannot be moved"
+      wrong-way: "the train moved the wrong way and was stopped"
+      lost: "a train is gone, or the push was interrupted"
+      mixed: "a dispatched train and a regular train cannot be coupled"
+      too-long: "over the car limit"
+      refused: "TrainCarts refused to couple"
+  info:
+    header: "<prefix> <white><train></white> <gray>car <white><car></white>/<white><cars></white> · formation <white><consist></white></gray>"
+    couplers: "  <gray>Couplers: front <white><front></white>, rear <white><rear></white></gray>"
+    state: "  <gray><state></gray>"
+    coupled: "coupled to car <car>"
+    open: "open"
+    closed: "locked"
+    unmanaged: "Regular TrainCarts train, can be worked on"
+    allowed: "Dispatched train, currently out of service, can be worked on"
+    denied: "Dispatched train, cannot be worked on now: "
+  # In-service division: how each half is described when the crew chooses which one to continue with (<end>, <cars>, <destination>)
+  decouple:
+    segment: "<end> <cars> cars: <destination>"
+    front: "Front"
+    rear: "Rear"
+    idle: "stays at this station"
+    return: "to depot"
 drive:
   notch:
     p3: "<green>P3 Traction 3</green>"
@@ -44,6 +134,8 @@ drive:
     b4: "<gold>B4 Service Brake 4</gold>"
     eb: "<red>EB Emergency Brake</red>"
   hud:
+    power:
+      pending: "<yellow>This section uses <mode>: stop and switch in the cab menu</yellow>"
     line: "<speed> <gray>/</gray> <limit> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
     line-no-limit: "<speed> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
     direction-tag: "<aqua><direction></aqua>"
@@ -169,6 +261,22 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
+  power:
+    short:
+      ptg5: "Panto 5m"
+      ptg6: "Panto 6m"
+      shoe: "3rd rail"
+      diesel: "Diesel"
+      supercap: "Supercap"
+    name:
+      ptg5: "pantograph (5 m catenary)"
+      ptg6: "pantograph (6 m catenary)"
+      shoe: "third rail"
+      diesel: "diesel"
+      supercap: "supercapacitor"
+    pending: "<yellow>This section uses <white><mode></white> power. Stop and switch it in the third row of the cab menu.</yellow>"
+    switching: "<green>Switching to <white><mode></white> power; no traction until it is up.</green>"
+    switched: "<gray>Switched to <white><mode></white> power.</gray>"
   supercap:
     low: "<yellow>Supercapacitor low (<white><percent>%</white>): open the doors at the next station to charge</yellow>"
     depleted: "<red>Supercapacitor empty: traction cut, brakes still work</red>"
@@ -201,6 +309,7 @@ drive:
     title: "<gold><bold>Cab Panel</bold></gold> <gray><train></gray>"
     row: "<gray><label></gray> <value>"
     label:
+      power: "Power"
       train: "Train"
       signal: "Signal"
       next-station: "Next"
@@ -219,6 +328,9 @@ drive:
       door-bypass: "Door bypass"
       supercap: "Supercap"
     value:
+      power:
+        current: "<white><mode></white>"
+        pending: "<white><mode></white> <gray>→</gray> <yellow><target></yellow>"
       text: "<white><text></white>"
       supercap:
         normal: "<green><percent>%</green>"
@@ -277,6 +389,8 @@ drive:
         left: "<red>Left open</red>"
         right: "<red>Right open</red>"
         both: "<red>Both open</red>"
+        guard-open: "<red>Opened by guard</red>"
+        guard-closed: "<green>Closed</green> <gray>(guard)</gray>"
       air:
         ok: "<white><mr></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
         warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
@@ -319,6 +433,9 @@ drive:
   menu:
     title: "Cab Panel"
     item:
+      power-mode-on: "<green>Power: <mode> (in use)</green>"
+      power-mode-off: "<gray>Power: <mode></gray>"
+      power-mode-busy: "<yellow>Power: <mode> (connecting)</yellow>"
       reverser-forward: "<green>Reverser: Forward</green>"
       reverser-neutral: "<gray>Reverser: Neutral</gray>"
       reverser-reverse: "<aqua>Reverser: Reverse</aqua>"
@@ -372,6 +489,8 @@ drive:
       door-bypass-on: "<gold>Door bypass: on</gold>"
       door-bypass-off: "<gray>Door bypass: off</gray>"
     hint:
+      power-mode-current: "<gray>The power supply the train is using</gray>"
+      power-mode-select: "<gray>Click to switch to this power supply; at simulation level there is no traction until it is connected</gray>"
       reverser: "<gray>Click to select the direction</gray>"
       door: "<gray>Click to open or close the door</gray>"
       stopped: "<gray>Only while the train is stopped</gray>"
@@ -392,6 +511,9 @@ drive:
       gauge: "<gray>Gauges only show readings</gray>"
       faults: "<gray>The fault display only shows information</gray>"
     detail:
+      power-required: "<yellow>This section requires this power supply</yellow>"
+      guard-doors: "<gray>The guard operates the doors</gray>"
+      guard-doors-open: "<red>Opened by the guard</red> <gray>(the guard operates the doors)</gray>"
       reservoir: "<gray>Main reservoir <white><mr></white> kPa</gray>"
       parking-needs: "<gray>Release needs main reservoir ≥ <white><need></white> kPa (now <white><mr></white>)</gray>"
       brake-test-not-done: "<gray>Brake cylinder <white><bc></white> kPa</gray>"
@@ -661,6 +783,23 @@ drive:
       cab-change: "<prefix> <red>Could not get into the rear cab when changing ends; duty ended (incomplete)</red> <gray><stops> stops worked</gray>"
       exam: "<prefix> <yellow>Guard exam failed; duty ended</yellow>"
       handover: "<prefix> <green>Hand-over station reached; duty ended and the doors are back with the station</green> <gray><stops> stops worked</gray>"
+      split-end: "<prefix> <green>The train has divided; duty ended</green> <gray><stops> stops worked</gray>"
+      split-switch: "<prefix> <green>Duty on this part has been scored; moving you to the detached part</green> <gray><stops> stops worked</gray>"
+      split-timeout: "<prefix> <yellow>No part of the divided train was chosen in time; duty ended</yellow> <gray><stops> stops worked</gray>"
+      coupling: "<prefix> <green>The train is about to join the main train; duty ended</green> <gray><stops> stops worked</gray>"
+    couple:
+      moved: "<prefix> <gray>After coupling you were moved to the rear cab</gray>"
+      seat-failed: "<prefix> <yellow>No free cab seat at the rear after coupling; please walk to the rear cab</yellow>"
+    # After the train divides at this station: choose which part to stay on (<kept>, <detached>, <segment> read like "Front 4 cars: Nam Toa")
+    split:
+      offer: "<prefix> <white>The train has divided here. Choose within <yellow><seconds></yellow> s:</white> <click:run_command:'/fta guard split keep'><hover:show_text:'<gray>Click to run:</gray> <white>/fta guard split keep</white>'><green>[Stay on <kept>]</green></hover></click> <click:run_command:'/fta guard split switch'><hover:show_text:'<gray>Click to run:</gray> <white>/fta guard split switch</white>'><aqua>[Switch to <detached>]</aqua></hover></click> <click:run_command:'/fta guard split end'><hover:show_text:'<gray>Click to run:</gray> <white>/fta guard split end</white>'><red>[End duty]</red></hover></click> <gray>Duty ends if you do not choose; if the train moves off first you stay on the part that stays</gray>"
+      kept: "<prefix> <green>Staying on <white><segment></white></green>"
+      switched: "<prefix> <green>Now on duty on <white><segment></white></green>"
+      seat-failed: "<prefix> <red>No free cab seat at the rear of the part that stays; duty ended</red>"
+      switch-gone: "<prefix> <red>The detached part no longer exists; stay on or end duty</red>"
+      switch-failed: "<prefix> <red>Could not seat you in the detached part's cab; take a seat and use /fta guard on</red>"
+      not-choosing: "<prefix> <red>There is no division waiting for your choice</red>"
+      usage: "<prefix> <red>Usage: /fta guard split keep|switch|end</red>"
     timeout:
       open: "<red>Too slow to open: the station opened the doors</red>"
       close: "<red>Too slow to close: the station closed the doors</red>"
@@ -795,6 +934,7 @@ drive:
         stop: "<yellow>/fta guard stop <player></yellow> <gray>Take a guard off duty</gray>"
         tasks: "<yellow>/fta guard tasks [station]</yellow> <gray>Open the guard board and take a guard duty</gray>"
         task: "<yellow>/fta guard task [status|abandon|goto]</yellow> <gray>Check or abandon your guard duty, or go to the train</gray>"
+        split: "<yellow>/fta guard split <keep|switch|end></yellow> <gray>After the train divides: stay on the part that stays, switch to the detached part, or end duty</gray>"
       start:
         started: "<prefix> <green>You are on guard duty</green> <gray>Select a hotbar slot and right-click: 1 left doors, 2 right doors, 3 close, 4 report, 6 signal check, 7 buzzer (hold right-click ~1 s), 9 emergency stop; F opens the guard panel; the sidebar shows each step. To end duty midway, click End duty twice in the F panel or run /fta guard off</gray>"
         disabled: "<prefix> <red>Guard duty is disabled</red>"
@@ -959,6 +1099,7 @@ drive:
       away: "<prefix> <yellow>No departure confirmed for <count> stops in a row; you are treated as away and the distance and stops from here on earn no reward. Confirm a departure to resume</yellow>"
       back: "<prefix> <green>Departure confirmed; rewards resume</green>"
       forfeited: "<prefix> <gray>This trip is marked incomplete; no reward is paid</gray>"
+      crew-bonus: "<prefix> <gray>Includes the driver–guard crew bonus: <white>+<percent>%</white> for stops and distance worked together</gray>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:
@@ -1433,6 +1574,26 @@ drive:
     task-complete: "<prefix> <green>Arrived at the terminus: task complete, the train is back under automatic operation</green>"
     service-end: "<prefix> <green>The train has reached the end of its run; driving has ended</green>"
     settled: "<prefix> <green>This trip has been scored; driving has ended and the train returns to automatic operation</green>"
+    split-timeout: "<prefix> <yellow>No part of the divided train was chosen in time; driving has ended and both parts return to automatic operation</yellow>"
+    coupling: "<prefix> <yellow>Dispatch is bringing the train in to couple; this trip has been scored. If nobody drives the coupled train, it will be handed back to you</yellow>"
+  # Coupling (COPL): dispatch brings the train in and couples it, then hands driving back
+  couple:
+    rejoined: "<prefix> <green>Coupled; driving has been handed back to you, scored separately from this station</green>"
+    taken: "<prefix> <yellow>Coupled; the combined train is driven by <white><driver></white>, so your driving has ended</yellow>"
+    rejoin-failed: "<prefix> <yellow>Coupled, but you could not be seated in the cab; take a seat within <seconds> s and use /fta drive on</yellow>"
+    not-rejoined: "<prefix> <yellow>Coupled, but driving cannot be handed back now; the train runs under dispatch control</yellow>"
+    not-coupled: "<prefix> <yellow>Coupling did not complete; the train runs under dispatch control</yellow>"
+    moved-cab: "<prefix> <gray>After coupling you were moved to the front cab</gray>"
+  # After the train divides at this station: choose which part to keep driving (<kept>, <detached>, <segment> read like "Front 4 cars: Nam Toa")
+  split:
+    offer: "<prefix> <white>The train has divided here and this trip has been scored. Choose within <yellow><seconds></yellow> s:</white> <click:run_command:'/fta drive split keep'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive split keep</white>'><green>[Keep driving <kept>]</green></hover></click> <click:run_command:'/fta drive split switch'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive split switch</white>'><aqua>[Switch to <detached>]</aqua></hover></click> <click:run_command:'/fta drive split end'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive split end</white>'><red>[End driving]</red></hover></click> <gray>Driving ends if you do not choose; moving off counts as keeping the part that stays</gray>"
+    kept: "<prefix> <green>Keep driving <white><segment></white></green>"
+    switched: "<prefix> <green>Now driving <white><segment></white>; the other part returns to automatic operation. Its next trip is scored separately</green>"
+    seat-failed: "<prefix> <yellow>Could not seat you in the cab of the part that stays; please walk to its front cab</yellow>"
+    switch-gone: "<prefix> <red>The detached part no longer exists; keep driving or end driving</red>"
+    not-split: "<prefix> <yellow>The train could not divide here; please continue this trip</yellow>"
+    not-choosing: "<prefix> <red>There is no division waiting for your choice</red>"
+    usage: "<prefix> <red>Usage: /fta drive split keep|switch|end</red>"
   command:
     player-only: "<prefix> <red>Only players can run this command</red>"
     unavailable: "<prefix> <red>Manual driving is not ready yet</red>"
@@ -1442,6 +1603,7 @@ drive:
       entry-off: "  <gray>•</gray> <white>/fta drive off</white> <gray>- Stop driving</gray>"
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- Show the current driving state</gray>"
       entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- Set the reverser while stopped</gray>"
+      entry-split: "  <gray>•</gray> <white>/fta drive split <keep|switch|end></white> <gray>- After the train divides: keep driving the part that stays, switch to the detached part, or end driving</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- List all driving sessions</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [player]</white> <gray>- Force a player to stop driving</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"
@@ -1550,8 +1712,11 @@ drive:
   seat-exit:
     moving: "<prefix> <yellow>You cannot leave the seat while the train is moving; stop first, then press Shift. To end driving at once, run /fta drive off</yellow>"
     confirm: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; this trip will then count as abandoned</yellow>"
+    confirm-handback: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; driving then ends and the train returns to automatic operation</yellow>"
     confirm-terminal: "<prefix> <yellow>You are at the terminus: open the doors first to score this trip, then leave the seat to change ends; leaving now abandons the trip. Press Shift again within 2 seconds to leave</yellow>"
 sign:
+  # AutoStation sign line 4 is blank or unrecognised: the doors will not open at this stop
+  autostation-door-missing: "<prefix> <yellow>Line 4 has no valid door direction; trains stopping here will not open their doors.</yellow>\n<gray>Write the world direction of the doors (N/E/S/W/NE/NW/SE/SW) or BOTH; write NONE if this platform has no doors to open.</gray>"
   stopmark:
     created: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the front end of a <white><carriages></white>-car train stops here"
     created-doors: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the front end of a <white><carriages></white>-car train stops here; only car(s) <white><doors></white>, counted from the head, open their doors"

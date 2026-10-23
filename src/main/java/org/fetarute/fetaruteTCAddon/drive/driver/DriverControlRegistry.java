@@ -95,6 +95,16 @@ public final class DriverControlRegistry implements ControlAuthority {
     guard.rebind(properties);
     guardsByProperties.put(properties, guard);
     guardsByName.put(guard.trainName(), guard);
+    // 停站中途上岗：站台已把这一站交给了人工驾驶的驾驶员，车门此刻起归车掌，还没开门的这一站一并交给车掌；
+    // 否则驾驶员开不了门、车掌也没有这一站可做，只能等站台兜底接手。已经开过门的（停站、关门、等发车）不交：
+    // 车掌没做这一站的作业，不算他做过的站（与自动运行的车停站中途上岗只在关门前交车门同一口径）。
+    DriverLink driver = resolve(properties);
+    if (driver != null && guard.stationStop().isEmpty()) {
+      driver
+          .stationStop()
+          .filter(stop -> !stop.phase().doorsOpened())
+          .ifPresent(guard::beginStationStop);
+    }
   }
 
   /** 车掌离岗。 */
@@ -152,6 +162,20 @@ public final class DriverControlRegistry implements ControlAuthority {
   @Override
   public boolean guardOperatesDoors(TrainProperties properties) {
     return resolveGuard(properties) != null;
+  }
+
+  /**
+   * 驾驶员这一站的车门归不归车掌：车上有车掌，且这一站交给了车掌；驾驶员没有在停的站时只看车上有没有车掌。
+   *
+   * <p>车掌在驾驶员已开过门之后才上岗时这一站不交给车掌（{@link #bindGuard}），车门仍归驾驶员：驾驶员照常开关门、回报车门，下一站起归车掌。
+   *
+   * @param driverStop 驾驶员此刻在停的站；没有时为 {@code null}
+   */
+  public boolean guardOperatesDoorsAt(TrainProperties properties, DriverStationStop driverStop) {
+    GuardLink guard = resolveGuard(properties);
+    return guard != null
+        && (driverStop == null
+            || guard.stationStop().filter(stop -> stop == driverStop).isPresent());
   }
 
   @Override

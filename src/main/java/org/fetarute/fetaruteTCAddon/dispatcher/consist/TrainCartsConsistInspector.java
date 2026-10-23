@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 
@@ -26,10 +27,12 @@ public final class TrainCartsConsistInspector implements ConsistInspector {
     if (trainCarts == null || pattern == null || pattern.isBlank()) {
       return ConsistInspection.unresolved();
     }
-    SpawnableGroup group = SpawnableGroup.parse(trainCarts, pattern);
-    if (group == null || group.getMembers().isEmpty()) {
+    Optional<CompositeSpawnPattern.Parsed> parsed =
+        CompositeSpawnPattern.parse(trainCarts, pattern);
+    if (parsed.isEmpty()) {
       return ConsistInspection.unresolved();
     }
+    SpawnableGroup group = parsed.get().group();
     Map<String, Set<String>> tags = new HashMap<>();
     for (SpawnableMember member : group.getMembers()) {
       StandardProperties.TAGS
@@ -41,13 +44,21 @@ public final class TrainCartsConsistInspector implements ConsistInspector {
                 }
               });
     }
-    SavedTrainProperties saved = trainCarts.getSavedTrains().getProperties(pattern);
+    // 组合写法：每段都是存车才算存车；保有量上限只对单段写法有意义（组合写法的上限由各段自己的存车管）。
+    boolean saved = true;
+    for (String part : parsed.get().parts()) {
+      saved &= trainCarts.getSavedTrains().getProperties(part) != null;
+    }
+    SavedTrainProperties single =
+        parsed.get().parts().size() == 1
+            ? trainCarts.getSavedTrains().getProperties(parsed.get().parts().get(0))
+            : null;
     OptionalInt limit =
-        saved != null && saved.getSpawnLimit() >= 0
-            ? OptionalInt.of(saved.getSpawnLimit())
+        single != null && single.getSpawnLimit() >= 0
+            ? OptionalInt.of(single.getSpawnLimit())
             : OptionalInt.empty();
     return new ConsistInspection(
-        saved != null, group.getMembers().size(), group.getTotalLength(), tags, limit);
+        saved, group.getMembers().size(), group.getTotalLength(), tags, limit);
   }
 
   @Override
@@ -56,8 +67,9 @@ public final class TrainCartsConsistInspector implements ConsistInspector {
     if (trainCarts == null || pattern == null || pattern.isBlank()) {
       return false;
     }
-    SpawnableGroup group = SpawnableGroup.parse(trainCarts, pattern);
-    return group != null && group.isExceedingSpawnLimit();
+    return CompositeSpawnPattern.parse(trainCarts, pattern)
+        .map(parsed -> parsed.exceedsSpawnLimit(trainCarts))
+        .orElse(false);
   }
 
   private static void collectTag(Map<String, Set<String>> tags, String tag) {

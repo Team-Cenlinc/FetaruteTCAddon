@@ -30,6 +30,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DoorCars;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.StopMarkSign;
+import org.fetarute.fetaruteTCAddon.integration.traincarts.TrainViewers;
 
 /**
  * AutoStation 的开关门动画控制器。
@@ -312,12 +313,15 @@ public final class AutoStationDoorController {
    * @param sign 本站选中的停车位置标；没有标志时为 {@code null}（全车开门）
    */
   public static DoorCars doorCars(MinecartGroup group, StopMarkSign sign) {
-    if (group == null || sign == null || sign.allDoors()) {
+    if (sign == null || (group == null && !sign.allDoors())) {
       return DoorCars.ALL;
     }
-    List<UUID> carts = new ArrayList<>(group.size());
-    for (MinecartMember<?> member : group) {
-      carts.add(cartId(member));
+    // 没写 door: 的标志也交给 select：全车开门，但记下对准的是哪块标志（停站中挂上来的车厢按它判）
+    List<UUID> carts = new ArrayList<>(group == null ? 0 : group.size());
+    if (group != null) {
+      for (MinecartMember<?> member : group) {
+        carts.add(cartId(member));
+      }
     }
     return DoorCars.select(sign, carts);
   }
@@ -393,9 +397,19 @@ public final class AutoStationDoorController {
       return session.close();
     }
 
-    /** 这一侧的门已由站台打开（停站中途交给驾驶员）：记成开着，不再播开门动画，之后照常关门。 */
+    /**
+     * 这一侧的门已由站台打开（停站中途交给驾驶员或车掌）：记成开着，不再播开门动画，之后照常关门。
+     *
+     * <p>门会话也要记成开过门：关门只对开过门的会话播动画，否则关门时动画不播、车门仍开着，状态却记成已关，列车带着开着的门开走。
+     */
     public void markOpenedByStation() {
       open = true;
+      session.markOpenedByStation();
+    }
+
+    /** 这扇门的开关门会话（单测用）。 */
+    DoorSession session() {
+      return session;
     }
 
     /** 这一侧的门当前是否由本句柄打开着。 */
@@ -1742,9 +1756,14 @@ public final class AutoStationDoorController {
       return false;
     }
 
-    /** 是否曾成功触发开门动画。 */
+    /** 是否曾成功触发开门动画（或车门已由站台打开、交给了驾驶员或车掌）。 */
     boolean openSucceeded() {
       return openSucceeded;
+    }
+
+    /** 车门已由站台打开：当作开过门，之后照常播关门动画与提示音。 */
+    void markOpenedByStation() {
+      openSucceeded = true;
     }
 
     /** 估算关门动画时长（tick），取各节车里最长的；量不出时为 -1。 */
@@ -3033,16 +3052,13 @@ public final class AutoStationDoorController {
     if (viewers == null || location == null) {
       return false;
     }
-    double radiusSquared = DOOR_SOUND_RADIUS_BLOCKS * DOOR_SOUND_RADIUS_BLOCKS;
-    for (Player player : viewers) {
-      if (player == null || player.getWorld() != location.getWorld()) {
-        continue;
-      }
-      if (player.getLocation().distanceSquared(location) <= radiusSquared) {
-        return true;
-      }
-    }
-    return false;
+    return TrainViewers.anyWithin(
+        viewers,
+        location.getWorld(),
+        location.getX(),
+        location.getY(),
+        location.getZ(),
+        DOOR_SOUND_RADIUS_BLOCKS);
   }
 
   static String sampleDoorTransformSummary(MinecartGroup group) {

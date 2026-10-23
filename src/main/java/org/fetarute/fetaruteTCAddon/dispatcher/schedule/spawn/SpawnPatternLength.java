@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.PhysicalRailFootprintPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalInterlockingBerthPolicy;
 
@@ -32,7 +33,10 @@ public final class SpawnPatternLength {
     if (trainCarts == null || pattern == null || pattern.isBlank()) {
       return OptionalLong.empty();
     }
-    SpawnableGroup group = SpawnableGroup.parse(trainCarts, pattern);
+    SpawnableGroup group =
+        CompositeSpawnPattern.parse(trainCarts, pattern)
+            .map(CompositeSpawnPattern.Parsed::group)
+            .orElse(null);
     if (group == null || group.getMembers().isEmpty()) {
       return OptionalLong.empty();
     }

@@ -35,12 +35,15 @@ class DynamicPlatformAllocatorTest {
   private OccupancyManager occupancyManager;
   private RailGraph graph;
   private DynamicPlatformAllocator allocator;
+  private List<RailNode> graphNodes;
 
   @BeforeEach
   void setUp() {
     routeDefinitions = mock(RouteDefinitionCache.class);
     occupancyManager = mock(OccupancyManager.class);
     graph = mock(RailGraph.class);
+    graphNodes = new ArrayList<>();
+    when(graph.nodes()).thenAnswer(invocation -> List.copyOf(graphNodes));
     allocator =
         new DynamicPlatformAllocator(routeDefinitions, occupancyManager, System.out::println);
   }
@@ -263,6 +266,59 @@ class DynamicPlatformAllocatorTest {
         firstId,
         allocator.tryAllocate("train-busy", route, 0, graph, fromId).orElseThrow().allocatedNode(),
         "计划站台被占：照常选空闲的，不因计划把车挡在站外");
+  }
+
+  /** 联挂：搭档停着的股道对后到的车不算被占，选台优先它；别的车照样当被占。 */
+  @Test
+  void aCouplingPartnerPlatformIsSelectableOnlyForItsPartner() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    RouteId routeId = RouteId.of("COUPLING");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    OccupancyResource busy = OccupancyResource.forNode(secondId);
+    when(occupancyManager.isNodeOccupied(secondId)).thenReturn(true);
+    when(occupancyManager.getClaim(busy))
+        .thenReturn(
+            Optional.of(
+                new OccupancyClaim(
+                    busy,
+                    "feeder",
+                    Optional.empty(),
+                    java.time.Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+    allocator.setPreference((train, r, stopIndex) -> Optional.of(secondId));
+    allocator.setCouplingPartners(
+        new DynamicPlatformAllocator.CouplingPartners() {
+          @Override
+          public Optional<NodeId> platformOf(
+              String trainName, java.util.UUID routeUuid, int stopIndex) {
+            return Optional.empty();
+          }
+
+          @Override
+          public boolean partner(String trainName, String claimant) {
+            return "trunk".equals(trainName) && "feeder".equals(claimant);
+          }
+        });
+
+    assertEquals(
+        secondId,
+        allocator.tryAllocate("trunk", route, 0, graph, fromId).orElseThrow().allocatedNode(),
+        "搭档停着的股道：后到的车照样能选");
+    assertEquals(
+        firstId,
+        allocator.tryAllocate("other", route, 0, graph, fromId).orElseThrow().allocatedNode(),
+        "别的车照样当被占");
   }
 
   /** 暂定站台沿用不变；别的车暂定的股道不再给；选台在空闲候选里优先兑现暂定站台，它也是站台落定事件里的"原计划"。 */
@@ -519,7 +575,7 @@ class DynamicPlatformAllocatorTest {
   }
 
   @Test
-  void cachedDynamicAllocationReselectsWhenExternalClaimAppears() {
+  void cachedDynamicAllocationKeepsTargetWhenExternalClaimAppears() {
     NodeId fromId = NodeId.of("OP:W:FROM:1:0");
     NodeId firstId = NodeId.of("OP:S:DEST:1");
     NodeId secondId = NodeId.of("OP:S:DEST:2");
@@ -545,9 +601,8 @@ class DynamicPlatformAllocatorTest {
     DynamicResolution<DynamicPlatformAllocator.AllocationResult> revalidated =
         allocator.resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty());
 
-    assertTrue(revalidated.isSelected());
-    assertEquals(secondId, revalidated.selected().orElseThrow().allocatedNode());
-    assertEquals(Optional.of(secondId), allocator.getAllocation("train-cache", routeId, 0));
+    assertTrue(revalidated.isBlocked());
+    assertEquals(Optional.of(firstId), allocator.getAllocation("train-cache", routeId, 0));
   }
 
   @Test
@@ -573,8 +628,8 @@ class DynamicPlatformAllocatorTest {
         allocator.resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty());
 
     assertTrue(revalidated.isBlocked());
-    assertEquals("no-available-platform", revalidated.reason());
-    assertEquals(Optional.empty(), allocator.getAllocation("train-cache", routeId, 0));
+    assertEquals("materialized-platform-unavailable", revalidated.reason());
+    assertEquals(Optional.of(platformId), allocator.getAllocation("train-cache", routeId, 0));
   }
 
   @Test
@@ -740,13 +795,11 @@ class DynamicPlatformAllocatorTest {
             java.util.List.of(
                 claim(firstResource, "train-cache"), claim(firstResource, "external-train")));
 
-    assertEquals(
-        secondId,
+    assertTrue(
         allocator
             .resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty())
-            .selected()
-            .orElseThrow()
-            .allocatedNode());
+            .isBlocked());
+    assertEquals(Optional.of(firstId), allocator.getAllocation("train-cache", routeId, 0));
   }
 
   @Test
@@ -860,12 +913,139 @@ class DynamicPlatformAllocatorTest {
     assertEquals(platform, result.selected().orElseThrow().allocatedNode());
   }
 
+  /** 已选站台从图上消失（改图、拆牌）：立即放弃，下一拍重新选台，不能就地永远停着。 */
+  @Test
+  void aSelectedPlatformThatLeftTheGraphIsAbandonedAtOnce() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    NodeId gone = NodeId.of("OP:S:DEST:2");
+
+    assertFalse(allocator.isAvailableForMaterialization(gone, "train1", graph, fromId));
+    assertTrue(allocator.isAbandoned("train1", gone));
+  }
+
+  /** 已选站台走不到了（区间封锁）：立即放弃。 */
+  @Test
+  void anUnreachableSelectedPlatformIsAbandonedAtOnce() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    mockEdges(fromId);
+    mockEdges(targetId);
+
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertTrue(allocator.isAbandoned("train1", targetId));
+  }
+
+  /** 已选站台被别的车占着：保持原选择（站牌不来回跳），持续超过上限才放弃改选。 */
+  @Test
+  void aTemporarilyOccupiedPlatformIsKeptUntilTheStickyLimit() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode target = mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    mockEdges(fromId, edge(from, target));
+    mockEdges(targetId, edge(target, from));
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(List.of(claim(OccupancyResource.forNode(targetId), "other")));
+    java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+    allocator.setClock(nanos::get);
+
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    nanos.addAndGet(DynamicPlatformAllocator.STICKY_LIMIT.minusSeconds(1).toNanos());
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertFalse(allocator.isAbandoned("train1", targetId), "上限之内保持原选择");
+
+    nanos.addAndGet(Duration.ofSeconds(2).toNanos());
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertTrue(allocator.isAbandoned("train1", targetId), "超过上限放弃改选");
+
+    allocator.clearAllocations("train1");
+    assertFalse(allocator.isAbandoned("train1", targetId), "列车移除后放弃记录一并清掉");
+  }
+
+  /** 可达性走注入的距离缓存：信号 tick 逐候选查可用时不能每拍重新跑最短路。 */
+  @Test
+  void availabilityReadsReachabilityFromTheInjectedDistanceCache() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    java.util.concurrent.atomic.AtomicInteger lookups =
+        new java.util.concurrent.atomic.AtomicInteger();
+    DynamicPlatformAllocator cached =
+        new DynamicPlatformAllocator(
+            routeDefinitions,
+            occupancyManager,
+            message -> {},
+            null,
+            null,
+            (g, from, to) -> {
+              lookups.incrementAndGet();
+              return java.util.OptionalLong.of(20L);
+            });
+
+    assertTrue(cached.isCandidateAvailable(targetId, "train1", graph, fromId));
+    assertTrue(cached.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertEquals(2, lookups.get(), "图上没有边，结果只能来自距离缓存");
+  }
+
+  /** 缓存里的“不可达”可能是旧图留下的：放弃前按当前图重算确认，确实可达就不放弃。 */
+  @Test
+  void aStaleCachedUnreachableIsConfirmedBeforeAbandoning() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode target = mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    mockEdges(fromId, edge(from, target));
+    mockEdges(targetId, edge(target, from));
+    DynamicPlatformAllocator cached =
+        new DynamicPlatformAllocator(
+            routeDefinitions,
+            occupancyManager,
+            message -> {},
+            null,
+            null,
+            (g, a, b) -> java.util.OptionalLong.empty());
+
+    assertTrue(cached.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertFalse(cached.isAbandoned("train1", targetId));
+  }
+
+  /** 逐候选查可用只是判断：不记暂时不可用的起始时刻，也不放弃没选过的站台。 */
+  @Test
+  void checkingACandidateHasNoSideEffects() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    NodeId gone = NodeId.of("OP:S:DEST:3");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode target = mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    mockEdges(fromId, edge(from, target));
+    mockEdges(targetId, edge(target, from));
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(List.of(claim(OccupancyResource.forNode(targetId), "other")));
+    java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+    allocator.setClock(nanos::get);
+
+    assertFalse(allocator.isCandidateAvailable(targetId, "train1", graph, fromId));
+    assertFalse(allocator.isCandidateAvailable(gone, "train1", graph, fromId));
+    nanos.addAndGet(DynamicPlatformAllocator.STICKY_LIMIT.plusSeconds(1).toNanos());
+    assertFalse(allocator.isCandidateAvailable(targetId, "train1", graph, fromId));
+    assertFalse(allocator.isAbandoned("train1", targetId));
+    assertFalse(allocator.isAbandoned("train1", gone));
+
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertFalse(allocator.isAbandoned("train1", targetId), "持有时长从第一次按已选站台核对时才开始计");
+  }
+
   private RailNode mockNode(NodeId id, Vector pos, NodeType type) {
     RailNode node = mock(RailNode.class);
     when(node.id()).thenReturn(id);
     when(node.worldPosition()).thenReturn(pos);
     when(node.type()).thenReturn(type);
     when(graph.findNode(id)).thenReturn(Optional.of(node));
+    graphNodes.add(node);
     return node;
   }
 

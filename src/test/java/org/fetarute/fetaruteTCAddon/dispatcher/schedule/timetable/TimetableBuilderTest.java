@@ -45,6 +45,64 @@ class TimetableBuilderTest {
 
   private static final String FOREIGN_DEP = "CHT:D:DEP2:1";
 
+  /** 带客出库按运营需求调度：每个 duty 一次出库，保留中途停站时间，不独立分摊班次。 */
+  @Test
+  void passengerCreateCanBeDispatchedOnlyForOperationDuties() {
+    UUID crt = TimetableTestFixtures.routeId("CRT-DEMAND");
+    UUID op = TimetableTestFixtures.routeId("OP-DEMAND");
+    UUID ret = TimetableTestFixtures.routeId("RET-DEMAND");
+    TimetableBuilder.RouteInput create =
+        new TimetableBuilder.RouteInput(
+                crt,
+                "CRT-DEMAND",
+                RouteOperationType.CREATE,
+                1,
+                TimetableTestFixtures.route("CRT-DEMAND", List.of(DEP, A, B)),
+                TimetableTestFixtures.createStops(crt, 3, DEP),
+                Optional.empty())
+            .withDispatchByOperation(true);
+    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
+        new ArrayList<>(create.stops());
+    var middle = stops.get(1);
+    stops.set(
+        1,
+        new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+            crt,
+            1,
+            middle.stationId(),
+            middle.waypointNodeId(),
+            Optional.of(35),
+            middle.passType(),
+            middle.notes()));
+    Fixture fixture =
+        new Fixture(
+            chain(),
+            List.of(
+                create.withStops(stops),
+                operation(op, "OP-DEMAND", 1, List.of(B, C)),
+                new TimetableBuilder.RouteInput(
+                        ret,
+                        "RET-DEMAND",
+                        RouteOperationType.RETURN,
+                        0,
+                        TimetableTestFixtures.route("RET-DEMAND", List.of(C, DEP)),
+                        TimetableTestFixtures.returnStops(ret, 2, DEP),
+                        Optional.empty())
+                    .withDispatchByOperation(true)));
+
+    TimetableBuildResult result = build(fixture, options(600));
+    Timetable table = result.timetable().orElseThrow();
+    assertFalse(table.duties().isEmpty());
+    assertTrue(
+        table.duties().stream().allMatch(d -> d.createRouteId().filter(crt::equals).isPresent()));
+    assertTrue(result.shares().stream().noneMatch(share -> share.key().contains("CRT-DEMAND")));
+    assertTrue(table.routePlan(crt).orElseThrow().totalRunSeconds() >= 50, "出库 15 秒加中途停站 35 秒不能忽略");
+    assertEquals(
+        (long) table.duties().size(),
+        table.trips().stream().filter(t -> t.routeId().equals(crt)).count(),
+        "每个出库段需要一条可展示的带客车次，不能按频率多排");
+  }
+
   /** 同样输入构建两次，逐字段一致——包括 trip 与 duty 的主键。 */
   @Test
   void buildIsDeterministic() {
@@ -357,13 +415,13 @@ class TimetableBuilderTest {
   }
 
   /**
-   * 终点没有回库线路的班次不会被硬排：取消并逐条报告，份额按保留的班次重算。
+   * 完整相位可以避免无库终点的窗口末尾孤立班次，保持班次数且所有 duty 都能回库。
    *
    * <p>RA: A→C、RB: C→A，回库线路只有 A→DEP。RA 的班次只有接上 RB 回到 A 才能收口。 每方向 600 s 一班，RB 锚在 RA 到达 + 折返上：窗口装下
-   * RA×5、RB×4， 最后那班 RA（05:40）停在 C 且后面没有 RB，必须被取消。
+   * RA×5、RB×4，最后那班 RA 停在 C 且后面没有 RB；整体平移后铺 RA×4、RB×4，保留同样八班且不需要取消。
    */
   @Test
-  void tripsWithoutReturnAccessAreDroppedAndReported() {
+  void completedPhaseAvoidsAnUnclosableLastTripWithoutLosingService() {
     RailGraph graph = chain();
     UUID ra = TimetableTestFixtures.routeId("RA");
     UUID rb = TimetableTestFixtures.routeId("RB");
@@ -402,28 +460,15 @@ class TimetableBuilderTest {
     TimetableBuildResult result = build(new Fixture(graph, routes), options);
     Timetable timetable = result.timetable().orElseThrow();
 
-    assertEquals(1, result.droppedTrips().size(), "停在 C 的最后一班 RA 必须被取消");
-    assertEquals("05:40:00", result.droppedTrips().get(0).departureText());
-    assertEquals(
-        VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS,
-        result.droppedTrips().get(0).reason());
+    assertTrue(result.success(), () -> result.warnings().toString());
+    assertTrue(result.droppedTrips().isEmpty(), () -> result.droppedTrips().toString());
+    assertFalse(result.headwayRelaxed());
     assertEquals(8, timetable.trips().size());
-    assertTrue(
-        result.droppedTrips().stream()
-            .allMatch(
-                dropped ->
-                    dropped.routeCode().equals("RA")
-                        || dropped.reason()
-                            == VehicleDutyPlanner.UnassignedReason.NO_CREATE_ACCESS),
-        () -> result.droppedTrips().toString());
-    assertTrue(
-        result.warnings().stream().anyMatch(text -> text.contains("取消")),
-        () -> result.warnings().toString());
     for (VehicleDuty duty : timetable.duties()) {
       assertEquals(DEP, duty.endDepotNodeId());
       assertEquals(Optional.of(ret), duty.returnRouteId());
     }
-    // 取消之后车次号仍然连续：RA-001、RA-002…，没有空洞。
+    // 相位重选之后车次号仍然连续：RA-001、RA-002…，没有空洞。
     List<String> raCodes =
         timetable.trips().stream()
             .filter(trip -> trip.routeId().equals(ra))
@@ -499,7 +544,7 @@ class TimetableBuilderTest {
         result.effectiveHeadwaySeconds() >= 210,
         () -> "至少要等前车折返完: " + result.effectiveHeadwaySeconds());
     assertFalse(result.conflictsAtTarget().isEmpty());
-    assertTrue(result.warnings().stream().anyMatch(text -> text.contains("已回退到最小可行间隔")));
+    assertTrue(result.warnings().stream().anyMatch(text -> text.contains("已回退到搜索找到的可行间隔")));
     Timetable timetable = result.timetable().orElseThrow();
     // 比名义时隙：DEP–A 是出库与回库共用的车库咽喉，第二趟的出库要等第一趟的回库车过完，实际发车会晚几秒。
     Map<String, Integer> nominal = new HashMap<>();
@@ -544,6 +589,116 @@ class TimetableBuilderTest {
     assertTrue(
         result.warnings().stream().anyMatch(text -> text.contains("冲突") && text.contains("严格")),
         () -> result.warnings().toString());
+  }
+
+  /** 严格失败也带上目标间隔的冲突与残余：失败文案只列让不掉的那些（按判决与让车点汇总再给明细），不再列前几条可吸收的冲突。 */
+  @Test
+  void strictFailureCarriesTheUnabsorbableResiduals() {
+    TimetableBuildOptions options =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE,
+            Duration.ofSeconds(30),
+            true);
+
+    TimetableBuildResult result = build(twoRouteFixture(1, 1), options);
+
+    assertFalse(result.success());
+    assertFalse(result.unabsorbable().isEmpty(), () -> result.warnings().toString());
+    assertFalse(result.conflictsAtTarget().isEmpty());
+    String reason = String.join("\n", result.warnings());
+    ConflictAbsorption.Residual first = result.unabsorbable().get(0);
+    assertTrue(reason.contains(first.mover()), reason);
+    assertTrue(reason.contains("让不掉的冲突按判决与让车点"), reason);
+    for (ConflictAbsorption.Residual absorbable : result.absorbable()) {
+      assertFalse(
+          reason.contains(
+              absorbable
+                  .conflict()
+                  .describe(seconds -> TimetableCsvExporter.clock(5 * 3600 + seconds))),
+          reason);
+    }
+  }
+
+  /** 相位候选在截短的窗口里试排：窗口末端一个最长交路寿命之内的取消是窗口人为截断造成的，不参与"不拿取消换冲突"的比较； 窗口没截短时末端就是真的计划窗口末端，全都算。 */
+  @Test
+  void truncatedTrialWindowIgnoresDropsNearItsEnd() {
+    TimetableBuildOptions full =
+        new TimetableBuildOptions(
+            0,
+            86_400,
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(20),
+            new VehicleDutyPlanner.Limits(8, 7200, TurnaroundTable.none(), 300),
+            "",
+            ZONE);
+    TimetableBuildOptions trial =
+        new TimetableBuildOptions(
+            0,
+            14_400,
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(20),
+            full.dutyLimits(),
+            "",
+            ZONE);
+
+    int maxWait = trial.repair().maxWaitSeconds();
+    assertEquals(
+        14_400 - 900 - maxWait - 240, TimetableBuilder.completionTailFrom(full, trial, 900, 240));
+    assertEquals(14_400 - 900 - maxWait, TimetableBuilder.completionTailFrom(full, trial, 900, 0));
+    assertEquals(Integer.MAX_VALUE, TimetableBuilder.completionTailFrom(full, full, 900, 240));
+    assertEquals(2, TimetableBuilder.droppedBefore(List.of(100, 7199, 7200, 14_000), 7200));
+    assertEquals(
+        4, TimetableBuilder.droppedBefore(List.of(100, 7199, 7200, 14_000), Integer.MAX_VALUE));
+  }
+
+  /** 残余按方向计数只认本表那一边：邻表车次号与本表某一班相同时，不把邻表的冲突记到本表那个方向上。 */
+  @Test
+  void residualsByDirectionIgnoreTheNeighbourSide() {
+    TimetableConflictChecker.Conflict external =
+        new TimetableConflictChecker.Conflict(
+            TimetableConflictChecker.Kind.TRACK,
+            "edge:A~B",
+            "R1-001",
+            "R2-001",
+            0,
+            10,
+            5,
+            15,
+            Optional.of("CO/OP/L2/TT"),
+            Optional.empty());
+    TimetableConflictChecker.Conflict internal =
+        new TimetableConflictChecker.Conflict(
+            TimetableConflictChecker.Kind.TRACK,
+            "edge:B~C",
+            "R1-001",
+            "R2-001",
+            0,
+            10,
+            5,
+            15,
+            Optional.empty(),
+            Optional.empty());
+    List<ConflictAbsorption.Residual> residuals =
+        List.of(
+            new ConflictAbsorption.Residual(
+                external, "R2-001", 15, Optional.empty(), 0, ConflictAbsorption.Verdict.EXTERNAL),
+            new ConflictAbsorption.Residual(
+                internal,
+                "R2-001",
+                35,
+                Optional.empty(),
+                0,
+                ConflictAbsorption.Verdict.OVER_MAX_WAIT));
+
+    assertEquals(
+        Map.of("D1", 1, "D2", 2),
+        TimetableBuilder.countByDirection(residuals, Map.of("R1-001", "D1", "R2-001", "D2")));
   }
 
   /** 宽松的间隔下没有冲突，表按目标间隔成表。 */

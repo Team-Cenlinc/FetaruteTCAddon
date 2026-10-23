@@ -150,6 +150,13 @@ public final class DriveHud {
             CabGauges.brakeTestValues(cab));
       };
     }
+    if (session.setupMode() == org.fetarute.fetaruteTCAddon.drive.SimulationLevel.SetupMode.MANUAL
+        && session.pendingPower().isPresent()) {
+      // 多模车：这一段要求换成涉及内燃的受电方式，simulation 级由驾驶员停车后在驾驶台换（排在真正挡着牵引的原因之后）
+      return locale.component(
+          "drive.hud.power.pending",
+          Map.of("mode", locale.text("drive.power.name." + session.pendingPower().get().key())));
+    }
     if (link != null) {
       Optional<DriverStationHint.Hint> station = DriverStationHint.of(link, session.isStopped());
       switch (stationSlot(station, sidebarShown)) {

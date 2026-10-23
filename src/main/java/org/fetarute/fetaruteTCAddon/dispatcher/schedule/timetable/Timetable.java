@@ -12,6 +12,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.RandomAccess;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 
 /**
  * 一条线路的一份时刻表：由 FTCA 主动生成的运营计划。
@@ -131,6 +132,36 @@ public record Timetable(
         .toList();
   }
 
+  /** 出入库展示车次由交路两端的票执行，不得再次按普通班次出票或投影占用。 */
+  public boolean isLegTrip(TimetableTrip trip) {
+    return trip != null
+        && trip.dutyId()
+            .flatMap(this::duty)
+            .filter(duty -> !duty.tripIds().contains(trip.id()))
+            .filter(
+                duty ->
+                    duty.createRouteId().filter(trip.routeId()::equals).isPresent()
+                        || duty.returnRouteId().filter(trip.routeId()::equals).isPresent())
+            .isPresent();
+  }
+
+  /** 查询一个交路的带客出入库展示车次；纯走行或运营类型返回 empty。 */
+  public Optional<TimetableTrip> legTrip(VehicleDuty duty, RouteOperationType kind) {
+    Optional<UUID> routeId =
+        kind == RouteOperationType.CREATE
+            ? duty.createRouteId()
+            : kind == RouteOperationType.RETURN ? duty.returnRouteId() : Optional.empty();
+    return routeId.flatMap(
+        id ->
+            trips.stream()
+                .filter(
+                    trip ->
+                        trip.routeId().equals(id)
+                            && trip.dutyId().filter(duty.id()::equals).isPresent()
+                            && isLegTrip(trip))
+                .findFirst());
+  }
+
   /** 按 route 查计划。区分车型的表里同一条 route 有几份（每个车型一份变体）时，返回不分车型的基础计划（允许车型里最慢的那份）。 */
   public Optional<TimetableRoutePlan> routePlan(UUID routeId) {
     if (routeId == null) {
@@ -225,7 +256,7 @@ public record Timetable(
    * 某趟车在某个日历日发车时，它属于哪个<b>服务日</b>。
    *
    * <p>发车时刻存的是取模后的当日秒数，跨零点的班次会落到下一个日历日；而车辆交路的出库/回库时刻不取模，始终相对服务日。 两边要对上同一个
-   * duty，必须用同一个日期口径：首班发车时刻早于计划窗口起点的班次，服务日就是前一天。
+   * duty，必须用同一个日期口径。出入库展示车次直接采用交路的相对秒数，窗口前提前出库也可以发生在服务日当天或前一天。
    *
    * @param trip 车次
    * @param calendarDate 该次发车实际落在的日历日
@@ -234,13 +265,13 @@ public record Timetable(
   public LocalDate serviceDayOf(TimetableTrip trip, LocalDate calendarDate) {
     Objects.requireNonNull(trip, "trip");
     Objects.requireNonNull(calendarDate, "calendarDate");
-    return departsNextCalendarDay(trip) ? calendarDate.minusDays(1) : calendarDate;
+    return calendarDate.minusDays(departureDayOffset(trip));
   }
 
   /**
    * {@link #serviceDayOf} 的逆：某趟车在某个服务日里的起点发车时刻。
    *
-   * <p>跨零点的班次（发车时刻早于计划窗口起点）落在服务日的下一个日历日。
+   * <p>运营班次按窗口与交路判断跨零点；出入库展示车次按交路相对秒数确定日历日，不套用窗口起点规则。
    *
    * @param trip 车次
    * @param serviceDay 服务日
@@ -249,27 +280,37 @@ public record Timetable(
   public Instant departureOnServiceDay(TimetableTrip trip, LocalDate serviceDay) {
     Objects.requireNonNull(trip, "trip");
     Objects.requireNonNull(serviceDay, "serviceDay");
-    LocalDate calendarDate = departsNextCalendarDay(trip) ? serviceDay.plusDays(1) : serviceDay;
+    LocalDate calendarDate = serviceDay.plusDays(departureDayOffset(trip));
     return trip.departureAt(calendarDate, zoneId);
   }
 
   /**
-   * 车次是不是跨过零点、在服务日的下一个日历日发车。
+   * 车次发车日相对服务日的偏移；出入库直接使用未取模的交路时刻，支持提前至前一日和跨日回库。
    *
    * <p>两种情形：发车时刻早于计划窗口起点（窗口跨零点的表）；或者窗口从零点起、但交路的最后几班拖过了 24 点—— 发车时刻取模后成了凌晨，只认窗口起点就会把它算成服务日当天凌晨， 整整早
    * 24 小时。后一种按所属交路判：交路的计划开始不取模，车次（取模后）比它早半天以上，只能是零点后开的。
    */
-  private boolean departsNextCalendarDay(TimetableTrip trip) {
+  private int departureDayOffset(TimetableTrip trip) {
+    if (isLegTrip(trip)) {
+      VehicleDuty duty = trip.dutyId().flatMap(this::duty).orElseThrow();
+      int second =
+          duty.createRouteId().filter(trip.routeId()::equals).isPresent()
+              ? duty.plannedStartSecondOfDay()
+              : duty.returnSecondOfDay();
+      return Math.floorDiv(second, TimetableTrip.SECONDS_PER_DAY);
+    }
     if (trip.departureSecondOfDay() < serviceStartSecondOfDay) {
-      return true;
+      return 1;
     }
     return trip.dutyId()
-        .flatMap(this::duty)
-        .filter(
-            duty ->
-                duty.plannedStartSecondOfDay() - trip.departureSecondOfDay()
-                    > TimetableTrip.SECONDS_PER_DAY / 2)
-        .isPresent();
+            .flatMap(this::duty)
+            .filter(
+                duty ->
+                    duty.plannedStartSecondOfDay() - trip.departureSecondOfDay()
+                        > TimetableTrip.SECONDS_PER_DAY / 2)
+            .isPresent()
+        ? 1
+        : 0;
   }
 
   /** 换一份 route 计划、发车表与交路，其余不变（车型变体折回基础 route 时用）。 */

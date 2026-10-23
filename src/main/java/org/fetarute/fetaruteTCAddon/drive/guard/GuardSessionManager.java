@@ -52,8 +52,10 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
+import org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.inventory.InputSignal;
+import org.fetarute.fetaruteTCAddon.drive.inventory.UseClicks;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
@@ -61,6 +63,8 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
+import org.fetarute.fetaruteTCAddon.drive.session.SeatExitGuard;
+import org.fetarute.fetaruteTCAddon.drive.session.SplitChoices;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCue;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveSounds;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
@@ -131,6 +135,9 @@ public final class GuardSessionManager {
 
     /** 列车此刻跑的车次（按时刻表的列车分配）；不按时刻表运行时为空。 */
     Optional<TaskKey> tripOf(String trainName);
+
+    /** 列车此刻有驾驶员在人工驾驶（ATO 不算）：车掌这时做的站与走的里程有同车加成。 */
+    boolean drivenManually(String trainName);
 
     /** 车次的交路代码；查不到时为空串。 */
     String routeCodeOf(TaskKey key);
@@ -222,8 +229,9 @@ public final class GuardSessionManager {
   /** 侧边栏与常驻提示的刷新间隔。 */
   private static final int DISPLAY_INTERVAL_TICKS = 10;
 
-  /** 右键按住时客户端连续发包：相隔超过这么久才算新按下（发车铃以外的按钮按一下只算一次）。 */
-  private static final long FRESH_PRESS_GAP_TICKS = 6L;
+  /** 右键按住时客户端连续发包：相隔超过这么久（毫秒，按客户端时钟量）才算新按下（发车铃以外的按钮按一下只算一次）。 */
+  private static final long FRESH_PRESS_GAP_MILLIS =
+      BuzzerPress.RELEASE_GAP_TICKS * ClientClock.MILLIS_PER_TICK;
 
   /** 结束值乘的第一次点击之后，多久内再点一次才结束。 */
   private static final long END_CONFIRM_TICKS = 60L;
@@ -237,11 +245,13 @@ public final class GuardSessionManager {
   private final DriverSide drivers;
   private final DriveSidebar sidebar;
   private final Map<UUID, GuardSession> sessions = new ConcurrentHashMap<>();
-  private final Map<UUID, Long> lastUseTick = new ConcurrentHashMap<>();
+  private final Map<UUID, Long> lastUseMillis = new ConcurrentHashMap<>();
   private final Map<UUID, BuzzerPress> driverPresses = new ConcurrentHashMap<>();
   private final PendingAcks pendingAcks = new PendingAcks();
   private final GuardTasks tasks = new GuardTasks();
   private final GuardTips tips;
+  private final GuardSeatReach reach;
+  private final ClientClock clock;
 
   /** 给公开 API 的快照：任务、值乘、按车名找车掌（车名小写）。主线程刷新，任意线程读。 */
   private volatile Map<UUID, GuardApi.TaskView> taskViews = Map.of();
@@ -259,7 +269,8 @@ public final class GuardSessionManager {
       LocaleManager locale,
       Supplier<DriveConfig> config,
       Supplier<ConfigManager.AutoStationSettings> chime,
-      DriverSide drivers) {
+      DriverSide drivers,
+      ClientClock clock) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.registry = Objects.requireNonNull(registry, "registry");
     this.sounds = Objects.requireNonNull(sounds, "sounds");
@@ -267,8 +278,10 @@ public final class GuardSessionManager {
     this.config = Objects.requireNonNull(config, "config");
     this.chime = Objects.requireNonNull(chime, "chime");
     this.drivers = Objects.requireNonNull(drivers, "drivers");
+    this.clock = Objects.requireNonNull(clock, "clock");
     this.sidebar = new DriveSidebar(locale);
     this.tips = new GuardTips(plugin, locale, sounds);
+    this.reach = new GuardSeatReach(plugin);
     tasks.setBeforeClaim(task -> callEvent(new GuardTaskClaimEvent(GuardViews.of(task))));
   }
 
@@ -313,6 +326,11 @@ public final class GuardSessionManager {
     return new ArrayList<>(sessions.values());
   }
 
+  /** 解编时车上的车掌：拆之前等这一站开过门，拆开后请车掌选继续值乘哪一段。 */
+  public org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew decoupleCrew() {
+    return decoupleCrew;
+  }
+
   /** 这列车上的车掌（按当前车名）。 */
   public Optional<GuardSession> guardOfTrain(String trainName) {
     return registry
@@ -340,11 +358,25 @@ public final class GuardSessionManager {
     UUID id = player.getUniqueId();
     switch (signal) {
       case SWAP_HANDS -> Bukkit.getScheduler().runTask(plugin, () -> openMenu(player));
-      case USE -> {
-        long now = Bukkit.getCurrentTick();
-        Long previous = lastUseTick.put(id, now);
-        boolean fresh = previous == null || now - previous > FRESH_PRESS_GAP_TICKS;
-        Bukkit.getScheduler().runTask(plugin, () -> onUse(player, fresh));
+      case USE, USE_ON_BLOCK, USE_ENTITY -> {
+        // 按下的时刻在收到数据包时按客户端时钟读：网络抖动、丢包重传、主线程卡住都不会把按住当成松开。
+        // 选中的是哪一格留到主线程上看：切换快捷栏的数据包那时已经处理过。
+        long now = clock.now(id);
+        Long previous = lastUseMillis.put(id, now);
+        if (UseClicks.sameClick(previous, now)) {
+          // 同一次右键客户端会连发几个包（对着实体或方块一个，再加一个使用）：只算一次
+          return;
+        }
+        boolean fresh = UseClicks.fresh(previous, now, FRESH_PRESS_GAP_MILLIS);
+        boolean entity = signal == InputSignal.USE_ENTITY;
+        boolean clientHeld = heldByClient(signal);
+        Bukkit.getScheduler().runTask(plugin, () -> onUse(player, fresh, entity, clientHeld, now));
+      }
+      case RELEASE_USE -> {
+        // 松开之后的下一个右键一定是新按下的：不与松开之前的包算作同一次右键
+        lastUseMillis.remove(id);
+        long now = clock.now(id);
+        Bukkit.getScheduler().runTask(plugin, () -> onUseReleased(player, now));
       }
       default -> Bukkit.getScheduler().runTask(plugin, player::updateInventory);
     }
@@ -506,7 +538,8 @@ public final class GuardSessionManager {
     if (session == null) {
       return;
     }
-    lastUseTick.remove(playerId);
+    splitChoices.forget(playerId);
+    lastUseMillis.remove(playerId);
     tips.forget(playerId);
     GuardTask dutyTask = session.task();
     // 先把列车交还：扣着的紧急停车与换端扣车解除、车掌登记撤下、开着的门关上，结算出错也不会把列车扣住。
@@ -532,8 +565,16 @@ public final class GuardSessionManager {
       plugin.getLogger().warning("车掌值乘结算出错 " + session.playerName() + ": " + ex);
     }
     // 任务这一趟没做过作业（没结算）时按结束原因了结。
-    finishTask(player, session, GuardTrip.stateFor(reason), reason.name());
+    // 分行、联挂中途结束时，设了交班站或考试、练习派的任务不算开完（与驾驶员中途结算同一口径）。
+    finishTask(
+        player,
+        session,
+        dutyTask == null
+            ? GuardTrip.stateFor(reason)
+            : GuardTrip.taskStateFor(reason, dutyTask.handoverStopSequence(), dutyTask.source()),
+        reason.name());
     if (player != null) {
+      reach.update(player, false);
       sidebar.hide(player);
       if (session.menuTopSize() > 0) {
         player.closeInventory();
@@ -575,6 +616,238 @@ public final class GuardSessionManager {
     }
   }
 
+  // ---- 分行 ----
+
+  /** 选了改驾后等坐进解下那一段驾驶室的最长 tick 数。 */
+  private static final int SPLIT_SEATING_WAIT_TICKS = 10;
+
+  /** 解编站上选继续值乘哪一段。 */
+  private final SplitChoices splitChoices = new SplitChoices();
+
+  private final org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew decoupleCrew =
+      new org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew() {
+        @Override
+        public boolean crewed(String trainName) {
+          return guardOfTrain(trainName).isPresent();
+        }
+
+        @Override
+        public boolean readyToSplit(String trainName) {
+          // 车掌不在中途结算（留下的一段还是这一趟）：等这一站开过门再拆
+          return guardOfTrain(trainName)
+              .map(
+                  session ->
+                      session
+                          .link()
+                          .stationStop()
+                          .map(stop -> stop.phase().doorsOpened())
+                          .orElse(true))
+              .orElse(true);
+        }
+
+        @Override
+        public void split(Split split) {
+          onDivided(split);
+        }
+
+        @Override
+        public Optional<Instant> holding(String trainName) {
+          return splitChoices.holding(trainName);
+        }
+      };
+
+  private final org.fetarute.fetaruteTCAddon.coupler.CoupleCrew coupleCrew =
+      new org.fetarute.fetaruteTCAddon.coupler.CoupleCrew() {
+        @Override
+        public void yieldBeforeApproach(Approach approach) {
+          // 回程支线车挂上后身份作废：车上的车掌在进站前结束值乘
+          guardOfTrain(approach.feederName())
+              .ifPresent(session -> stop(session.playerId(), GuardSession.EndReason.COUPLING));
+        }
+
+        @Override
+        public void coupled(Approach approach) {
+          guardOfTrain(approach.trunkName()).ifPresent(GuardSessionManager.this::keepGuardAtTail);
+        }
+
+        @Override
+        public void notCoupled(Approach approach) {}
+      };
+
+  /** 联挂时两车上的车掌（接到联挂服务上）。 */
+  public org.fetarute.fetaruteTCAddon.coupler.CoupleCrew coupleCrew() {
+    return coupleCrew;
+  }
+
+  /** 主干上的车掌：挂上后不在车尾那一端时换到车尾驾驶室。 */
+  private void keepGuardAtTail(GuardSession session) {
+    Player player = Bukkit.getPlayer(session.playerId());
+    Optional<MinecartGroup> merged = findGroup(session);
+    if (player == null
+        || merged.isEmpty()
+        || !updateBinding(session, merged.get())
+        || GuardCabChange.endOfCar(session.binding().memberIndex(), merged.get().size())
+            == CabSeats.End.TAIL) {
+      return;
+    }
+    player.sendMessage(
+        locale.component(
+            moveGuardTo(player, session, merged.get(), CabSeats.End.TAIL)
+                ? "drive.guard.couple.moved"
+                : "drive.guard.couple.seat-failed"));
+  }
+
+  /** 拆开了：请车掌在时限内选继续值乘哪一段。 */
+  private void onDivided(org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.Split split) {
+    Optional<GuardSession> found = guardOfTrain(split.keptName());
+    if (found.isEmpty()) {
+      return;
+    }
+    GuardSession session = found.get();
+    splitChoices.open(session.playerId(), split, Instant.now());
+    Player player = Bukkit.getPlayer(session.playerId());
+    if (player != null) {
+      player.sendMessage(
+          locale.component(
+              "drive.guard.split.offer",
+              Map.of(
+                  "kept",
+                  split.keptLabel(),
+                  "detached",
+                  split.detachedLabel(),
+                  "seconds",
+                  String.valueOf(SplitChoices.WINDOW.toSeconds()))));
+    }
+  }
+
+  /** 选择期限到了结束值乘（防挂机）；还没选列车就开走视为继续值乘留下的一段。 */
+  private void tickSplitChoice(Player player, GuardSession session) {
+    Optional<SplitChoices.Choice> choice = splitChoices.choiceOf(session.playerId());
+    if (choice.isEmpty()) {
+      return;
+    }
+    if (!Instant.now().isBefore(choice.get().deadline())) {
+      splitChoices.closeChoice(session.playerId());
+      stop(session.playerId(), GuardSession.EndReason.SPLIT_TIMEOUT);
+      return;
+    }
+    if (findGroup(session).filter(MinecartGroup::isMoving).isPresent()) {
+      keepAfterSplit(player, session);
+    }
+  }
+
+  /**
+   * 分行后选继续值乘哪一段（{@code /fta guard split keep|switch|end}）。
+   *
+   * @param raw keep、switch 或 end
+   */
+  public void chooseSplit(Player player, String raw) {
+    UUID playerId = player.getUniqueId();
+    Optional<SplitChoices.Option> option = SplitChoices.Option.parse(raw);
+    GuardSession session = sessions.get(playerId);
+    Optional<SplitChoices.Choice> choice = splitChoices.choiceOf(playerId);
+    if (option.isEmpty()) {
+      player.sendMessage(locale.component("drive.guard.split.usage"));
+      return;
+    }
+    if (session == null || choice.isEmpty()) {
+      player.sendMessage(locale.component("drive.guard.split.not-choosing"));
+      return;
+    }
+    switch (option.get()) {
+      case KEEP -> keepAfterSplit(player, session);
+      case SWITCH -> switchAfterSplit(player, choice.get());
+      case END -> {
+        splitChoices.closeChoice(playerId);
+        stop(playerId, GuardSession.EndReason.SPLIT_END);
+      }
+    }
+  }
+
+  /** 继续值乘留下的一段：座位随解下的一段分开时送进留下那一段车尾的驾驶室。 */
+  private void keepAfterSplit(Player player, GuardSession session) {
+    Optional<SplitChoices.Choice> choice = splitChoices.closeChoice(session.playerId());
+    Optional<MinecartGroup> kept = findGroup(session);
+    if (kept.isPresent()
+        && !updateBinding(session, kept.get())
+        && !moveGuardTo(player, session, kept.get(), CabSeats.End.TAIL)) {
+      // 留下的一段车尾没有空的驾驶座：这一段值乘不下去
+      player.sendMessage(locale.component("drive.guard.split.seat-failed"));
+      stop(session.playerId(), GuardSession.EndReason.SPLIT_END);
+      return;
+    }
+    choice.ifPresent(
+        found ->
+            player.sendMessage(
+                locale.component(
+                    "drive.guard.split.kept", Map.of("segment", found.split().keptLabel()))));
+  }
+
+  /** 改为值乘解下的一段：这一段的值乘按做过的站结算后结束，送进解下那一段车掌那一头的驾驶室重新上岗。 */
+  private void switchAfterSplit(Player player, SplitChoices.Choice choice) {
+    UUID playerId = player.getUniqueId();
+    org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.Split split = choice.split();
+    Optional<MinecartGroup> detached = SeatLocator.findGroup(split.detachedName());
+    if (detached.isEmpty()) {
+      player.sendMessage(locale.component("drive.guard.split.switch-gone"));
+      return;
+    }
+    splitChoices.closeChoice(playerId);
+    splitChoices.beginSwitch(
+        playerId,
+        new SplitChoices.Switch(
+            split.detachedName(),
+            split.detachedLabel(),
+            Optional.empty(),
+            false,
+            Instant.now().plus(SplitChoices.SWITCH_WINDOW),
+            false,
+            false));
+    stop(playerId, GuardSession.EndReason.SPLIT_SWITCH);
+    MinecartGroup group = detached.get();
+    CabSeats.Departure departure = drivers.layoverDeparture(group);
+    CabSeats.End end = guardEndFor(departure);
+    CabSeats cabs = SeatLocator.cabSeats(group, config.get().driver().cabSeatNames());
+    if (SeatLocator.enterCab(
+            player, group, cabs, end == CabSeats.End.NONE ? CabSeats.End.TAIL : end)
+        .isEmpty()) {
+      splitChoices.takeSwitch(playerId);
+      player.sendMessage(locale.component("drive.guard.split.switch-failed"));
+      return;
+    }
+    String trainName = group.getProperties().getTrainName();
+    int[] waited = {0};
+    Bukkit.getScheduler()
+        .runTaskTimer(
+            plugin,
+            timer -> {
+              boolean seated =
+                  SeatLocator.locate(player)
+                      .filter(seat -> seat.trainName().equals(trainName))
+                      .isPresent();
+              if (!player.isOnline()) {
+                timer.cancel();
+                splitChoices.takeSwitch(playerId);
+              } else if (seated || ++waited[0] >= SPLIT_SEATING_WAIT_TICKS) {
+                timer.cancel();
+                splitChoices.takeSwitch(playerId);
+                StartOutcome outcome = start(player, departure);
+                player.sendMessage(
+                    outcome == StartOutcome.STARTED
+                        ? locale.component(
+                            "drive.guard.split.switched", Map.of("segment", split.detachedLabel()))
+                        : locale.component(
+                            "drive.guard.command.start."
+                                + outcome
+                                    .name()
+                                    .toLowerCase(java.util.Locale.ROOT)
+                                    .replace('_', '-')));
+              }
+            },
+            1L,
+            1L);
+  }
+
   /** 全部车掌离岗（插件停用、车掌功能被关掉）。 */
   public void stopAll(GuardSession.EndReason reason) {
     for (UUID id : new ArrayList<>(sessions.keySet())) {
@@ -609,6 +882,7 @@ public final class GuardSessionManager {
   void tick() {
     long now = Bukkit.getCurrentTick();
     tickCounter++;
+    splitChoices.pruneSwitches(Instant.now());
     for (GuardSession session : new ArrayList<>(sessions.values())) {
       try {
         tick(session, now);
@@ -616,7 +890,7 @@ public final class GuardSessionManager {
         plugin.getLogger().warning("车掌值乘处理出错 " + session.playerName() + ": " + ex);
       }
     }
-    tickDriverPresses(now);
+    tickDriverPresses();
     tickAcks(now);
     if (tickCounter % CLAIM_POLL_TICKS == 0) {
       try {
@@ -641,12 +915,22 @@ public final class GuardSessionManager {
       stop(session.playerId(), GuardSession.EndReason.OFFLINE);
       return;
     }
+    if (splitChoices.choosing(session.playerId())) {
+      // 分行后等选择：座位可能随解下的一段分开了，选定之前不按离开列车处理，这一站的作业也先停着；
+      // 这段时间按的发车铃不作数，免得选完后被认成一长发出发车信号
+      session.buzzer().reset();
+      reach.update(player, false);
+      tickSplitChoice(player, session);
+      return;
+    }
     Optional<MinecartGroup> groupOpt = findGroup(session);
     if (groupOpt.isEmpty() || !updateBinding(session, groupOpt.get())) {
       stop(session.playerId(), GuardSession.EndReason.TRAIN_GONE);
       return;
     }
     MinecartGroup group = groupOpt.get();
+    // 换端途中也要跟着撤：走到另一头要点座位才能坐下
+    reach.update(player, seated(player, session, group));
     if (tickCabChange(player, session, group, now)) {
       return;
     }
@@ -681,7 +965,10 @@ public final class GuardSessionManager {
     if (!sessions.containsKey(session.playerId())) {
       return;
     }
-    session.buzzer().tick(now).ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
+    tickBuzzer(player, session, seated, now);
+    if (!sessions.containsKey(session.playerId())) {
+      return;
+    }
     refreshHotbar(player, session, false);
     // 车掌的提示都在侧边栏：动作栏留给车厢的乘客信息与报站，免得互相覆盖。
     boolean dirty = session.takeSidebarDirty();
@@ -825,15 +1112,19 @@ public final class GuardSessionManager {
     }
   }
 
-  /** 站台开着的车门交给车掌（停站中途上岗）：站台侧记成开着，之后按这一侧关门。 */
+  /**
+   * 站台开着的车门交给车掌（停站中途上岗）：站台侧记成开着，之后按这一侧关门。站台侧判不出时两侧都记成开着（与驾驶员接管同一做法）：
+   * 站台已不再关门，宁可多关一侧，也不能把开着的一侧当成关着放行。
+   */
   private void adoptStationDoors(
       GuardSession session, MinecartGroup group, DriverStationStop stop) {
     DriverDoorSide side = DriverDoorSide.required(stop, DriveDoors.doorFacing(group, session));
     ConfigManager.AutoStationSettings settings = chime.get();
-    if (side == DriverDoorSide.LEFT || side == DriverDoorSide.BOTH || side == DriverDoorSide.ANY) {
+    boolean unknown = side != DriverDoorSide.LEFT && side != DriverDoorSide.RIGHT;
+    if (side == DriverDoorSide.LEFT || unknown) {
       session.doors().adoptOpen(group, session, true, settings, stop.doorCars());
     }
-    if (side == DriverDoorSide.RIGHT || side == DriverDoorSide.BOTH) {
+    if (side == DriverDoorSide.RIGHT || unknown) {
       session.doors().adoptOpen(group, session, false, settings, stop.doorCars());
     }
   }
@@ -868,20 +1159,55 @@ public final class GuardSessionManager {
 
   // ---- 按钮 ----
 
-  private void onUse(Player player, boolean fresh) {
+  /**
+   * 右键按在哪个按钮上。
+   *
+   * @param held 选中的那一格
+   * @param entity 准星对着实体（站台屏、空车厢等）：客户端发的是与实体交互，不发使用物品
+   * @param seated 车掌坐在车上
+   * @return 不在座位上对着实体右键时为空：那是点自己的列车回座（由实体交互事件处理），不按按钮、不响铃
+   */
+  static Optional<GuardHotbar.Button> buttonForUse(
+      Optional<GuardHotbar.Button> held, boolean entity, boolean seated) {
+    return entity && !seated ? Optional.empty() : held;
+  }
+
+  /**
+   * 这一下右键之后客户端会不会一直报着按住发车铃、松开时另发包。
+   *
+   * <p>发车铃是“可使用”的物品：一次右键的第一个包就是“使用”（准星没对着方块或实体）时，客户端随即处于使用状态，直到松开。对着方块时服务器取消这一下，Paper
+   * 会让客户端停止使用，客户端改为每 4 tick 重发；对着实体时多数实体吃掉这一下，不发“使用”。这两种只能按重发间隔判松开。
+   *
+   * @param first 这一次右键的第一个包
+   */
+  static boolean heldByClient(InputSignal first) {
+    return first == InputSignal.USE;
+  }
+
+  /**
+   * @param entity 准星对着实体
+   * @param clientHeld 拿着发车铃时客户端会一直报着按住、松开时另发包（{@link #heldByClient}）
+   * @param at 收到这一次右键时客户端时钟的读数
+   */
+  private void onUse(Player player, boolean fresh, boolean entity, boolean clientHeld, long at) {
     GuardSession session = sessions.get(player.getUniqueId());
     if (session == null) {
       return;
     }
     Optional<GuardHotbar.Button> button =
-        GuardHotbar.Button.fromSlot(player.getInventory().getHeldItemSlot());
+        buttonForUse(
+            GuardHotbar.Button.fromSlot(player.getInventory().getHeldItemSlot()),
+            entity,
+            player.getVehicle() != null);
     if (button.isEmpty()) {
       return;
     }
-    long now = Bukkit.getCurrentTick();
     if (button.get() == GuardHotbar.Button.BUZZER) {
-      session.buzzer().press(now);
-      ringBuzzer(player, session.link().currentTrainName());
+      // 按下时当场响一声；按住期间由每 tick 的推进按固定间隔补响（见 tickBuzzer），不跟着收包响
+      if (session.buzzer().press(at, clientHeld)) {
+        ringBuzzer(player, session.link().currentTrainName());
+        session.setBuzzedAt(Bukkit.getCurrentTick());
+      }
       return;
     }
     if (!fresh) {
@@ -899,6 +1225,35 @@ public final class GuardSessionManager {
       case CONFIRM -> confirm(player, session);
       case EMERGENCY -> emergency(player, session, group.get());
       case BUZZER -> {}
+    }
+  }
+
+  /** 松开右键（客户端按住发车铃之后松开）。 */
+  private void onUseReleased(Player player, long at) {
+    GuardSession session = sessions.get(player.getUniqueId());
+    if (session != null) {
+      session.buzzer().release(at);
+    }
+  }
+
+  /**
+   * 发车铃每 tick 的推进：认出松开时的按法，按住期间按固定间隔补响。
+   *
+   * <p>铃声不跟着收包响：重发的包有快有慢，跟着响时断时续；客户端报着按住时整段按住期间根本不发包。手离开了发车铃这一格就算松开——换到别的格子客户端不再使用发车铃，也不会发松开。
+   */
+  private void tickBuzzer(Player player, GuardSession session, boolean seated, long now) {
+    BuzzerPress buzzer = session.buzzer();
+    long nowMillis = clock.now(session.playerId());
+    if (buzzer.ringing(nowMillis)
+        && GuardHotbar.Button.fromSlot(player.getInventory().getHeldItemSlot())
+            .filter(GuardHotbar.Button.BUZZER::equals)
+            .isEmpty()) {
+      buzzer.release(nowMillis);
+    }
+    buzzer.tick(nowMillis).ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
+    if (buzzer.ringing(nowMillis) && now - session.buzzedAt() >= BuzzerPress.USE_REPEAT_TICKS) {
+      ringBuzzer(player, session.link().currentTrainName());
+      session.setBuzzedAt(now);
     }
   }
 
@@ -1105,9 +1460,10 @@ public final class GuardSessionManager {
   /**
    * 驾驶员按了铃（丢弃键）：一短收到、两短呼叫车掌。
    *
+   * @param at 按下的时刻（客户端时钟的读数）
    * @return 这列车上有车掌（铃响了）
    */
-  public boolean driverBuzzer(Player driver, String trainName) {
+  public boolean driverBuzzer(Player driver, String trainName, long at) {
     Optional<GuardSession> guard = guardOfTrain(trainName);
     if (guard.isEmpty()) {
       return false;
@@ -1119,14 +1475,14 @@ public final class GuardSessionManager {
             id ->
                 new BuzzerPress(
                     current.guard().buzzerLongTicks(), current.guard().buzzerDoubleTicks()))
-        .press(Bukkit.getCurrentTick());
+        .press(at);
     ringBuzzer(driver, trainName);
     return true;
   }
 
-  private void tickDriverPresses(long now) {
+  private void tickDriverPresses() {
     for (Map.Entry<UUID, BuzzerPress> entry : new ArrayList<>(driverPresses.entrySet())) {
-      Optional<BuzzerPress.Kind> kind = entry.getValue().tick(now);
+      Optional<BuzzerPress.Kind> kind = entry.getValue().tick(clock.now(entry.getKey()));
       if (kind.isEmpty()) {
         continue;
       }
@@ -1516,7 +1872,8 @@ public final class GuardSessionManager {
               session.moveHead(
                   at.getWorld() == null ? null : at.getWorld().getUID(),
                   at.toVector(),
-                  MAX_HEAD_STEP_BLOCKS));
+                  MAX_HEAD_STEP_BLOCKS),
+              drivers.drivenManually(group.getProperties().getTrainName()));
     }
     if (now % TRIP_POLL_TICKS != 0 || session.link().stationStop().isPresent()) {
       return;
@@ -1540,7 +1897,10 @@ public final class GuardSessionManager {
               : session.trip().key().orElse(null);
       switchTrip(player, session, key);
       String station = settled.stop().stationName();
-      session.trip().addStop(station, settled.work());
+      session
+          .trip()
+          .addStop(
+              station, settled.work(), drivers.drivenManually(session.link().currentTrainName()));
       callEvent(
           new GuardStopWorkedEvent(
               session.playerId(),
@@ -1624,6 +1984,8 @@ public final class GuardSessionManager {
                 current.guard().rewardKmRatio(),
                 score.stopCount(),
                 trip.blocks(),
+                trip.crewStops(),
+                trip.crewBlocks(),
                 result.grade())
             : DriveRewards.Reward.NONE;
     drivers.payGuard(
@@ -2058,18 +2420,30 @@ public final class GuardSessionManager {
       return true;
     }
     if (group.get().isMoving()) {
-      player.sendMessage(locale.component("drive.guard.seat-exit.moving"));
+      if (noticeBlockedExit(session)) {
+        player.sendMessage(locale.component("drive.guard.seat-exit.moving"));
+      }
       return false;
     }
     // 换端途中：车门关着也可以下车走到另一端。
     if (!session.anyDoorOpen() && !session.cabChange().changing()) {
-      notice(session, "drive.guard.seat-exit.doors-closed", Map.of());
+      if (noticeBlockedExit(session)) {
+        notice(session, "drive.guard.seat-exit.doors-closed", Map.of());
+      }
       return false;
     }
     if (!session.cabChange().changing()) {
       placeOnPlatformLater(player, session, group.get());
     }
     return true;
+  }
+
+  /** 按 Shift 被拦时要不要提示（与驾驶员同一套节流）：按住不放时每拍都有离座请求（两个事件各问一次），同一次按键只提示一次，连按也隔一段时间才再提示。 */
+  private static boolean noticeBlockedExit(GuardSession session) {
+    return session
+            .exitGuard()
+            .decide(false, true, false, Long.MIN_VALUE, false, Bukkit.getCurrentTick())
+        == SeatExitGuard.Decision.MOVING;
   }
 
   /** 车掌下车监视看的那节车厢：本站自己那节开门（或全列开门、不在停站）时就是自己那节；停车位置标只开部分车厢、自己那节不开时， 是离自己最近的一节开门车厢。 */
@@ -2190,7 +2564,11 @@ public final class GuardSessionManager {
       return session != null;
     }
     MinecartMember<?> member = MinecartMemberStore.getFromEntity(clicked);
-    MinecartGroup group = member == null ? null : member.getGroup();
+    // 车厢刚被移走（存车、拆挂、销毁）的同一拍里也会点到：这时取编组 TrainCarts 会抛异常
+    MinecartGroup group =
+        member == null || member.isUnloaded() || clicked.isDead() || !clicked.isValid()
+            ? null
+            : member.getGroup();
     Optional<MinecartGroup> own = findGroup(session);
     if (group == null || own.isEmpty() || own.get() != group) {
       return true;
@@ -2357,7 +2735,7 @@ public final class GuardSessionManager {
             session.doorsClosing(now),
             work.map(w -> !w.canReport()).orElse(false),
             lamp,
-            session.buzzer().ringing(now),
+            session.buzzer().ringing(clock.now(session.playerId())),
             session.link().emergencyHold());
     if (!force && view.equals(session.view())) {
       return;

@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 41;
+  private static final int EXPECTED_CONFIG_VERSION = 47;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -120,7 +120,9 @@ public final class ConfigManager {
   private static final int DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES = 15;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
-  private ConfigView current;
+
+  /** 当前配置；重载时整份替换，后台线程（只读 HTTP 接口等）也会读。 */
+  private volatile ConfigView current;
 
   public ConfigManager(FetaruteTCAddon plugin) {
     this.plugin = plugin;
@@ -180,6 +182,9 @@ public final class ConfigManager {
     TimetableSettings timetableSettings = parseTimetable(timetableSection, logger);
     ConfigurationSection callSection = config.getConfigurationSection("call");
     CallSettings callSettings = parseCall(callSection, logger);
+    ConfigurationSection couplerSection = config.getConfigurationSection("coupler");
+    CouplerSettings couplerSettings = parseCoupler(couplerSection, logger);
+    WebApiSettings webApiSettings = parseWebApi(config.getConfigurationSection("web-api"), logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -194,7 +199,70 @@ public final class ConfigManager {
         smartDispatcherSettings,
         healthSettings,
         timetableSettings,
-        callSettings);
+        callSettings,
+        couplerSettings,
+        webApiSettings);
+  }
+
+  /** 解析只读 HTTP 接口配置段；缺段或取值无效时用默认值。 */
+  private static WebApiSettings parseWebApi(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    WebApiSettings defaults = WebApiSettings.defaults();
+    if (section == null) {
+      return defaults;
+    }
+    int port = section.getInt("port", defaults.port());
+    if (port < 1 || port > 65535) {
+      logger.warning("web-api.port 配置无效: " + port + "，已回退为默认值");
+      port = defaults.port();
+    }
+    return new WebApiSettings(
+        section.getBoolean("enabled", defaults.enabled()),
+        section.getString("host", defaults.host()),
+        port,
+        section.getString("token", defaults.token()));
+  }
+
+  /** 解析车钩扳手配置段；缺段或取值无效时用默认值。 */
+  private static CouplerSettings parseCoupler(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    CouplerSettings defaults = CouplerSettings.defaults();
+    if (section == null) {
+      return defaults;
+    }
+    double speed =
+        section.getDouble("push-speed-blocks-per-second", defaults.pushSpeedBlocksPerSecond());
+    if (!(speed > 0.0) || !Double.isFinite(speed)) {
+      logger.warning("coupler.push-speed-blocks-per-second 配置无效: " + speed + "，已回退为默认值");
+      speed = defaults.pushSpeedBlocksPerSecond();
+    }
+    return new CouplerSettings(
+        section.getBoolean("enabled", defaults.enabled()),
+        readNonNegativeInt(section, "max-cars", defaults.maxCars(), "coupler", logger),
+        readNonNegativeInt(section, "push-max-blocks", defaults.pushMaxBlocks(), "coupler", logger),
+        speed,
+        readNonNegativeInt(
+            section, "decouple-seconds", defaults.decoupleSeconds(), "coupler", logger),
+        readNonNegativeInt(section, "couple-seconds", defaults.coupleSeconds(), "coupler", logger),
+        readNonNegativeInt(
+            section, "couple-wait-seconds", defaults.coupleWaitSeconds(), "coupler", logger),
+        readPositiveDouble(
+            section,
+            "approach-speed-blocks-per-second",
+            defaults.approachSpeedBlocksPerSecond(),
+            logger),
+        readNonNegativeInt(
+            section, "approach-max-blocks", defaults.approachMaxBlocks(), "coupler", logger));
+  }
+
+  private static double readPositiveDouble(
+      ConfigurationSection section, String key, double fallback, java.util.logging.Logger logger) {
+    double value = section.getDouble(key, fallback);
+    if (!(value > 0.0) || !Double.isFinite(value)) {
+      logger.warning("coupler." + key + " 配置无效: " + value + "，已回退为默认值");
+      return fallback;
+    }
+    return value;
   }
 
   /** 解析叫车配置段；缺段或取值无效时用默认值。 */
@@ -213,7 +281,9 @@ public final class ConfigManager {
             section, "default-max-trains", defaults.defaultMaxTrains(), "call", logger),
         readNonNegativeInt(section, "min-lead-minutes", defaults.minLeadMinutes(), "call", logger),
         readNonNegativeInt(
-            section, "follow-gap-seconds", defaults.followGapSeconds(), "call", logger));
+            section, "follow-gap-seconds", defaults.followGapSeconds(), "call", logger),
+        readNonNegativeInt(
+            section, "turnback-hold-seconds", defaults.turnbackHoldSeconds(), "call", logger));
   }
 
   /**
@@ -306,7 +376,26 @@ public final class ConfigManager {
         recoveryMinDwellSeconds,
         recoveryOverspeedPercent,
         recoveryEngageDelaySeconds,
-        maxDelaySeconds);
+        maxDelaySeconds,
+        parseBuildThreads(section, logger));
+  }
+
+  /**
+   * 编表线程数：{@code auto}（或不写）按核数自动取，非负整数照用（0 表示全部核）；其余回退自动并告警。
+   *
+   * @return 配置值；自动时为 {@link TimetableSettings#AUTO_BUILD_THREADS}
+   */
+  private static int parseBuildThreads(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    Object raw = section.get("build-threads");
+    if (raw == null || "auto".equalsIgnoreCase(String.valueOf(raw).trim())) {
+      return TimetableSettings.AUTO_BUILD_THREADS;
+    }
+    if (raw instanceof Integer value && value >= 0) {
+      return value;
+    }
+    logger.warning("timetable.build-threads 配置无效: " + raw + "，已回退为 auto");
+    return TimetableSettings.AUTO_BUILD_THREADS;
   }
 
   private static int readNonNegativeInt(
@@ -1032,7 +1121,22 @@ public final class ConfigManager {
     String sound = DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND;
     float volume = DEFAULT_AUTOSTATION_DOOR_CLOSE_VOLUME;
     float pitch = DEFAULT_AUTOSTATION_DOOR_CLOSE_PITCH;
+    double scatter = AutoStationSettings.DEFAULT_STOP_SCATTER_BLOCKS;
     if (section != null) {
+      double configuredScatter = section.getDouble("stop-scatter-blocks", scatter);
+      if (Double.isFinite(configuredScatter)
+          && configuredScatter >= 0.0
+          && configuredScatter <= AutoStationSettings.MAX_STOP_SCATTER_BLOCKS) {
+        scatter = configuredScatter;
+      } else {
+        logger.warning(
+            "autostation.stop-scatter-blocks 必须在 [0, "
+                + AutoStationSettings.MAX_STOP_SCATTER_BLOCKS
+                + "] 内，已按 "
+                + scatter
+                + " 处理: "
+                + configuredScatter);
+      }
       String configured = section.getString("door-close-sound", sound);
       if (configured != null && !configured.trim().isEmpty()) {
         sound = configured.trim();
@@ -1051,7 +1155,7 @@ public final class ConfigManager {
         logger.warning("autostation.door-close-sound-pitch 配置无效: " + configuredPitch + "，已回退为默认值");
       }
     }
-    return new AutoStationSettings(sound, volume, pitch);
+    return new AutoStationSettings(sound, volume, pitch, scatter);
   }
 
   /** 解析 runtime 配置段。 */
@@ -1413,7 +1517,20 @@ public final class ConfigManager {
         section != null
             ? section.getString("default-type", DEFAULT_TRAIN_TYPE.key())
             : DEFAULT_TRAIN_TYPE.key();
-    return new TrainConfigSettings(defaultType, parsed);
+    double atoBrakeFraction =
+        section != null
+            ? section.getDouble(
+                "ato-brake-fraction", TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION)
+            : TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION;
+    if (!(atoBrakeFraction > 0.0) || atoBrakeFraction > 1.0) {
+      logger.warning(
+          "train.ato-brake-fraction 必须在 (0, 1] 内，已按 "
+              + TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION
+              + " 处理: "
+              + atoBrakeFraction);
+      atoBrakeFraction = TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION;
+    }
+    return new TrainConfigSettings(defaultType, parsed, atoBrakeFraction);
   }
 
   private static TrainTypeSettings parseTrainType(
@@ -1498,7 +1615,9 @@ public final class ConfigManager {
       SmartDispatcherSettings smartDispatcherSettings,
       HealthSettings healthSettings,
       TimetableSettings timetableSettings,
-      CallSettings callSettings) {
+      CallSettings callSettings,
+      CouplerSettings couplerSettings,
+      WebApiSettings webApiSettings) {
     public ConfigView {
       smartDispatcherSettings =
           smartDispatcherSettings == null
@@ -1507,6 +1626,78 @@ public final class ConfigManager {
       timetableSettings =
           timetableSettings == null ? TimetableSettings.defaults() : timetableSettings;
       callSettings = callSettings == null ? CallSettings.defaults() : callSettings;
+      couplerSettings = couplerSettings == null ? CouplerSettings.defaults() : couplerSettings;
+      webApiSettings = webApiSettings == null ? WebApiSettings.defaults() : webApiSettings;
+    }
+
+    /** 兼容尚未感知只读 HTTP 接口配置的调用方与测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        SmartDispatcherSettings smartDispatcherSettings,
+        HealthSettings healthSettings,
+        TimetableSettings timetableSettings,
+        CallSettings callSettings,
+        CouplerSettings couplerSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          smartDispatcherSettings,
+          healthSettings,
+          timetableSettings,
+          callSettings,
+          couplerSettings,
+          WebApiSettings.defaults());
+    }
+
+    /** 兼容尚未感知车钩扳手配置的调用方与测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        SmartDispatcherSettings smartDispatcherSettings,
+        HealthSettings healthSettings,
+        TimetableSettings timetableSettings,
+        CallSettings callSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          smartDispatcherSettings,
+          healthSettings,
+          timetableSettings,
+          callSettings,
+          CouplerSettings.defaults());
     }
 
     /** 兼容尚未感知叫车配置的调用方与测试夹具。 */
@@ -1610,11 +1801,12 @@ public final class ConfigManager {
    * @param maxCatchUpSeconds 发车侧单次轮询最多回补多长的时间窗口
    * @param reloadIntervalSeconds 重新加载已发布时刻表的间隔
    * @param recorderFlushIntervalSeconds 录制结果落库的间隔
-   * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（TrainCarts 居中刹停 + AutoStation 开门延迟）
+   * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（停稳确认 + AutoStation 开门延迟；刹停本身已在运行曲线里）
    * @param recoveryMinDwellSeconds 晚点追赶：晚点车中途站最少停多少秒；0 表示不压缩停站
    * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
    * @param recoveryEngageDelaySeconds 晚点追赶：晚点达到多少秒才放宽线路限速
    * @param maxDelaySeconds 交路上的下一班晚过计划发车这么多秒还没开出，车就从交路上解下、后面的班次交给替补；0 表示不限
+   * @param buildThreads 编表（含快车错峰搜索）用几个线程：{@link #AUTO_BUILD_THREADS} 按核数自动取，0 表示全部核，1 为串行；结果与线程数无关
    */
   public record TimetableSettings(
       boolean enabled,
@@ -1628,10 +1820,11 @@ public final class ConfigManager {
       int recoveryMinDwellSeconds,
       int recoveryOverspeedPercent,
       int recoveryEngageDelaySeconds,
-      int maxDelaySeconds) {
+      int maxDelaySeconds,
+      int buildThreads) {
 
-    /** 车站停车开销的缺省值：dwell 20 秒时，"压牌→发车"的中位耗时约 24 秒。 */
-    public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
+    /** 车站停车开销的缺省值：运行曲线算到停稳为止，停稳后约 1 秒开门、dwell 从开门起算。 */
+    public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 1;
 
     /**
      * 晚点车最短停站的缺省值。
@@ -1649,6 +1842,9 @@ public final class ConfigManager {
     /** 晚点上限的缺省值：晚过这么久的车次，乘客早已改乘，再让原车接着跑只会把后面的班次一路拖晚。 */
     public static final int DEFAULT_MAX_DELAY_SECONDS = 900;
 
+    /** 编表线程数按核数自动取（{@code build-threads: auto}）：核数一半，至少 1、至多 4。 */
+    public static final int AUTO_BUILD_THREADS = -1;
+
     public TimetableSettings {
       holdMaxSeconds = Math.max(0, holdMaxSeconds);
       assignToleranceSeconds = Math.max(0, assignToleranceSeconds);
@@ -1660,6 +1856,7 @@ public final class ConfigManager {
       recoveryOverspeedPercent = Math.max(0, recoveryOverspeedPercent);
       recoveryEngageDelaySeconds = Math.max(0, recoveryEngageDelaySeconds);
       maxDelaySeconds = Math.max(0, maxDelaySeconds);
+      buildThreads = buildThreads < 0 ? AUTO_BUILD_THREADS : buildThreads;
     }
 
     /** 全部关闭的默认值；晚点追赶的参数有缺省值，但按表运行关着时不起作用。 */
@@ -1676,7 +1873,8 @@ public final class ConfigManager {
           DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
           DEFAULT_RECOVERY_OVERSPEED_PERCENT,
           DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS,
-          DEFAULT_MAX_DELAY_SECONDS);
+          DEFAULT_MAX_DELAY_SECONDS,
+          AUTO_BUILD_THREADS);
     }
   }
 
@@ -1690,6 +1888,8 @@ public final class ConfigManager {
    * @param minLeadMinutes 叫来的车至少要比同方向下一班早到这么多分钟才能叫：早得不够多就只会把下一班压在后面晚点；0 表示不比
    * @param followGapSeconds 叫来的车离前车不到这么多秒时按需降速（最低到线路限速的七成），后车追到 {@code minLeadMinutes} 以内时不降；0
    *     表示不降速
+   * @param turnbackHoldSeconds 折返车（终点站与交路第一站叫车时先开进终点再折返的车）在终点就绪后最多等这么多秒，这一单的票还没接走它就作废这一单、 车回库；0
+   *     表示不设上限，等到叫车超时
    */
   public record CallSettings(
       int minWaitMinutes,
@@ -1697,7 +1897,8 @@ public final class ConfigManager {
       int terminalWaitSeconds,
       int defaultMaxTrains,
       int minLeadMinutes,
-      int followGapSeconds) {
+      int followGapSeconds,
+      int turnbackHoldSeconds) {
 
     public CallSettings {
       minWaitMinutes = Math.max(0, minWaitMinutes);
@@ -1706,10 +1907,97 @@ public final class ConfigManager {
       defaultMaxTrains = Math.max(1, defaultMaxTrains);
       minLeadMinutes = Math.max(0, minLeadMinutes);
       followGapSeconds = Math.max(0, followGapSeconds);
+      turnbackHoldSeconds = Math.max(0, turnbackHoldSeconds);
     }
 
     public static CallSettings defaults() {
-      return new CallSettings(5, 60, 60, 2, 2, 60);
+      return new CallSettings(5, 60, 60, 2, 2, 60, 90);
+    }
+  }
+
+  /**
+   * 只读 HTTP 接口（{@code web-api:}）。
+   *
+   * @param enabled 是否启动
+   * @param host 监听地址；默认只听本机
+   * @param port 端口
+   * @param token 共享令牌；非空时请求须带 {@code Authorization: Bearer <令牌>} 或 {@code X-Fetarute-Token}
+   */
+  public record WebApiSettings(boolean enabled, String host, int port, String token) {
+
+    public WebApiSettings {
+      host = host == null || host.isBlank() ? "127.0.0.1" : host.trim();
+      port = port < 1 || port > 65535 ? 8780 : port;
+      token = token == null ? "" : token.trim();
+    }
+
+    public static WebApiSettings defaults() {
+      return new WebApiSettings(false, "127.0.0.1", 8780, "");
+    }
+  }
+
+  /**
+   * 车钩扳手。
+   *
+   * @param enabled 扳手能不能用；关掉后右键车厢不起作用（拆挂留下的同股道列车对照常维护）
+   * @param maxCars 联挂后最多几节；0 表示只受 TrainCarts 自己的上限
+   * @param pushMaxBlocks Shift+右键推车时沿轨道最远找多少格内的对方端车
+   * @param pushSpeedBlocksPerSecond 推车速度（格/秒）
+   * @param decoupleSeconds 交路写了解编（DECP）的那一站多停的秒数（编表、到站预测与现场同一口径）
+   * @param coupleSeconds 交路写了联挂（COPL）的那一站多停的秒数；回程支线车也提前这么多秒到站等主干
+   * @param coupleWaitSeconds 联挂指令不写 {@code WAIT} 时等对方的秒数（不超过发车扣留上限 150 秒）
+   * @param approachSpeedBlocksPerSecond 联挂时后到的车开进站台的速度（格/秒）；最后几格按推车速度
+   * @param approachMaxBlocks 联挂时后到的车离对方最远多少格（沿调度图）才开进去；也是开进去最多走的距离
+   */
+  public record CouplerSettings(
+      boolean enabled,
+      int maxCars,
+      int pushMaxBlocks,
+      double pushSpeedBlocksPerSecond,
+      int decoupleSeconds,
+      int coupleSeconds,
+      int coupleWaitSeconds,
+      double approachSpeedBlocksPerSecond,
+      int approachMaxBlocks) {
+
+    public CouplerSettings {
+      maxCars = Math.max(0, maxCars);
+      pushMaxBlocks = Math.max(1, pushMaxBlocks);
+      pushSpeedBlocksPerSecond =
+          pushSpeedBlocksPerSecond > 0.0 && Double.isFinite(pushSpeedBlocksPerSecond)
+              ? pushSpeedBlocksPerSecond
+              : 1.0;
+      decoupleSeconds = Math.max(0, decoupleSeconds);
+      coupleSeconds = Math.max(0, coupleSeconds);
+      coupleWaitSeconds = Math.max(0, coupleWaitSeconds);
+      approachSpeedBlocksPerSecond =
+          approachSpeedBlocksPerSecond > 0.0 && Double.isFinite(approachSpeedBlocksPerSecond)
+              ? approachSpeedBlocksPerSecond
+              : 3.0;
+      approachMaxBlocks = Math.max(1, approachMaxBlocks);
+    }
+
+    public static CouplerSettings defaults() {
+      return new CouplerSettings(
+          true,
+          0,
+          8,
+          1.0,
+          org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .route
+              .RouteCouplingDirectives
+              .DEFAULT_COUPLING_SECONDS,
+          org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .route
+              .RouteCouplingDirectives
+              .DEFAULT_COUPLING_SECONDS,
+          120,
+          3.0,
+          120);
     }
   }
 
@@ -2129,9 +2417,36 @@ public final class ConfigManager {
     }
   }
 
-  /** AutoStation 相关配置（默认关门提示音与音量/音高）。 */
+  /**
+   * AutoStation 相关配置（默认关门提示音与音量/音高、自动运行停车的随机误差）。
+   *
+   * @param stopScatterBlocks 自动运行停车的随机误差上限（格），0 表示分毫不差
+   */
   public record AutoStationSettings(
-      String doorCloseSound, float doorCloseSoundVolume, float doorCloseSoundPitch) {}
+      String doorCloseSound,
+      float doorCloseSoundVolume,
+      float doorCloseSoundPitch,
+      double stopScatterBlocks) {
+
+    /** 停车误差的缺省上限：实车定位停车误差约 ±0.3 米，多数在 ±0.1 米内（三角分布）。 */
+    public static final double DEFAULT_STOP_SCATTER_BLOCKS = 0.2;
+
+    public AutoStationSettings {
+      stopScatterBlocks =
+          Double.isFinite(stopScatterBlocks) && stopScatterBlocks > 0.0
+              ? Math.min(MAX_STOP_SCATTER_BLOCKS, stopScatterBlocks)
+              : 0.0;
+    }
+
+    /** 按缺省的停车误差。 */
+    public AutoStationSettings(
+        String doorCloseSound, float doorCloseSoundVolume, float doorCloseSoundPitch) {
+      this(doorCloseSound, doorCloseSoundVolume, doorCloseSoundPitch, DEFAULT_STOP_SCATTER_BLOCKS);
+    }
+
+    /** 停车误差上限的上限：再大就超出“停准”（停短 2.5 格会前移再停）的意义了。 */
+    static final double MAX_STOP_SCATTER_BLOCKS = 1.0;
+  }
 
   /** 运行时调度配置。 */
   public record RuntimeSettings(
@@ -2371,12 +2686,21 @@ public final class ConfigManager {
    *
    * @param defaultType 默认车种（{@code train.default-type}）；为空时取 {@link #DEFAULT_TRAIN_TYPE}
    * @param types 各车种加减速；未列出的车种取 {@link TrainType} 自带的预设
+   * @param atoBrakeFraction 自动运行（含编表、到站预测与驾驶员的 ATO 模式）的舒适减速度占车种常用制动减速度的比例，在 (0, 1] 内；
+   *     信号与移动授权的刹车、驾驶员的建议速度不乘它
    */
-  public record TrainConfigSettings(String defaultType, Map<TrainType, TrainTypeSettings> types) {
+  public record TrainConfigSettings(
+      String defaultType, Map<TrainType, TrainTypeSettings> types, double atoBrakeFraction) {
+
+    /** 自动运行舒适减速度比例的缺省值：比驾驶员建议速度（常用制动的 0.85）柔，人照建议速度开比时刻表略快。 */
+    public static final double DEFAULT_ATO_BRAKE_FRACTION = 0.75;
 
     public TrainConfigSettings {
       if (defaultType == null || defaultType.isBlank()) {
         defaultType = DEFAULT_TRAIN_TYPE.key();
+      }
+      if (!(atoBrakeFraction > 0.0) || atoBrakeFraction > 1.0) {
+        atoBrakeFraction = DEFAULT_ATO_BRAKE_FRACTION;
       }
       Map<TrainType, TrainTypeSettings> complete = new EnumMap<>(TrainType.class);
       for (TrainType type : TrainType.values()) {
@@ -2384,6 +2708,11 @@ public final class ConfigManager {
         complete.put(type, configured != null ? configured : TrainTypeSettings.preset(type));
       }
       types = Map.copyOf(complete);
+    }
+
+    /** 按缺省的自动运行减速度比例。 */
+    public TrainConfigSettings(String defaultType, Map<TrainType, TrainTypeSettings> types) {
+      this(defaultType, types, DEFAULT_ATO_BRAKE_FRACTION);
     }
 
     public TrainType defaultTrainType() {

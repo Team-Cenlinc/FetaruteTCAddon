@@ -39,7 +39,7 @@ class ResourceRepairTest {
   private static final String C2 = "OP:S:C:2";
   private static final int TURNAROUND = 60;
   private static final int SEPARATION = 30;
-  private static final String NEIGHBOR = "CHT/SURN/NL/NL-TT";
+  private static final String NEIGHBOR = "CO/OP/L2/L2-TT";
 
   private final RailGraph graph =
       TimetableTestFixtures.graph(
@@ -67,6 +67,8 @@ class ResourceRepairTest {
   private final UUID rc = profile("RC", List.of(C2, B, A2));
   private final UUID ret = profile("RET", List.of(C1, B, A1, DEP));
   private final UUID ret2 = profile("RET2", List.of(C2, B, A2, DEP));
+  private final UUID cr = profile("CR", List.of(DEP, A1));
+  private final UUID rq = profile("RQ", List.of(C1, B, A1));
 
   /** 35 s 的追踪冲突写进表：RB 延后到 40，让车清单一条（区间），修完没有冲突。 */
   @Test
@@ -321,6 +323,88 @@ class ResourceRepairTest {
     assertEquals(new ResourceRepair.WaitPropagation(0, 1), result.propagation());
   }
 
+  /**
+   * 出库走行到站的时刻按改写后的交路算：首班让过车之后，出库跟着一起晚，到站等首班的空闲就少了。
+   *
+   * <p>D002 由 CR 从车库出到 A:1（-40 出库），RB@5 先为 RA 让到 40，出库随之到 -5；这时出库撞上邻表在 DEP–A:1 上 20 发的车， 要晚 60
+   * 秒。真实空闲只有 40（到站 0、首班 40），吃掉 40、首班再让 20 到 60。按原表的出库时刻算空闲会多出 35，60 秒全记成在库里多等， 车 60 才到站、首班却仍在 40
+   * 发车。
+   */
+  @Test
+  void createSlackFollowsTheRewrittenDuty() {
+    Timetable base =
+        timetable(
+            duty("D001", List.of(trip("RA@0", ra, 0)), -100),
+            duty("D002", List.of(trip("RB@5", rb, 5)), -40));
+    List<VehicleDuty> duties = new ArrayList<>();
+    for (VehicleDuty duty : base.duties()) {
+      duties.add(
+          !duty.dutyCode().equals("D002")
+              ? duty
+              : new VehicleDuty(
+                  duty.id(),
+                  duty.timetableId(),
+                  duty.sequence(),
+                  duty.dutyCode(),
+                  duty.startDepotNodeId(),
+                  duty.endDepotNodeId(),
+                  Optional.of(cr),
+                  duty.returnRouteId(),
+                  duty.tripIds(),
+                  duty.plannedStartSecondOfDay(),
+                  duty.returnSecondOfDay(),
+                  duty.plannedEndSecondOfDay(),
+                  duty.closeReason()));
+    }
+    Timetable provisional = base.withTripsAndDuties(base.trips(), duties);
+
+    ResourceRepair.Result result =
+        ResourceRepair.repair(input(provisional, List.of(neighborOn("NC", DEP, A1, 20)), 60, 300));
+
+    int rbDeparture = departures(result.timetable()).get("RB@5");
+    VehicleDuty d002 = dutyOf(result.timetable(), "D002");
+    assertEquals(60, rbDeparture);
+    assertTrue(
+        d002.plannedStartSecondOfDay() + plans.get(cr).totalRunSeconds() <= rbDeparture,
+        () -> "出库到站不能晚于首班发车: " + d002);
+  }
+
+  /**
+   * 回库晚走也不能让交路超出时长上限，时长按改写后的交路量。
+   *
+   * <p>D002 先跑 RQ（100 发）再跑 RB@205，RB 为 RA@200 让到 240，回库随之从 285 推到 320；回库走行接着撞上邻表在 C:2–B 上 325 发的车，
+   * 要再晚 45 秒。按原表的起讫（100～310）加 45 是 255，没超 270 的上限；实际交路已经是 100～345，再晚 45 就是 290。
+   */
+  @Test
+  void returnDelayRespectsTheRewrittenDutyDuration() {
+    Timetable provisional =
+        timetable(
+            duty("D001", List.of(trip("RA@200", ra, 200)), 100),
+            duty("D002", List.of(trip("RQ@100", rq, 100), trip("RB@205", rb, 205)), 100));
+    ResourceRepair.Input base = input(provisional, List.of(neighborOn("NC", C2, B, 325)), 60, 300);
+    ResourceRepair.Input input =
+        new ResourceRepair.Input(
+            base.provisional(),
+            base.profiles(),
+            base.index(),
+            base.zeroSecondOfDay(),
+            base.horizonSeconds(),
+            base.separationSeconds(),
+            base.maxWaitSeconds(),
+            base.toleranceSeconds(),
+            base.legs(),
+            new VehicleDutyPlanner.Limits(4, 270, TurnaroundTable.fixed(TURNAROUND)),
+            base.routesEndingAtDepot(),
+            base.neighbors());
+
+    ResourceRepair.Result result = ResourceRepair.repair(input);
+
+    VehicleDuty d002 = dutyOf(result.timetable(), "D002");
+    assertTrue(
+        d002.plannedEndSecondOfDay() - d002.plannedStartSecondOfDay() <= 270,
+        () -> "交路超出时长上限: " + d002);
+  }
+
   /** 同一段上连着的几处冲突（区间、站台、单线段）是同一次等待：取最长的 35，不是三处相加的 80。 */
   @Test
   void overlappingConflictsAreWaitedOnceNotSummed() {
@@ -409,8 +493,13 @@ class ResourceRepairTest {
 
   /** 邻表：一趟 NB（A:1→B）在相对 {@code start} 秒发车，占 A:1–B 边 10 秒。 */
   private NeighborTimetable neighborOnEdgeAb(int start) {
-    UUID nb = TimetableTestFixtures.routeId("NB");
-    RouteDefinition definition = TimetableTestFixtures.route("NB", List.of(A1, B));
+    return neighborOn("NB", A1, B, start);
+  }
+
+  /** 邻表：一趟 {@code code}（{@code from}→{@code to}）在相对 {@code start} 秒发车。 */
+  private NeighborTimetable neighborOn(String code, String from, String to, int start) {
+    UUID nb = TimetableTestFixtures.routeId(code);
+    RouteDefinition definition = TimetableTestFixtures.route(code, List.of(from, to));
     List<RouteStop> stops = TimetableTestFixtures.stops(nb, 2, 0);
     TimetableTimingCalculator.TimingResult timing =
         new TimetableTimingCalculator()
@@ -426,7 +515,7 @@ class ResourceRepairTest {
             TimetableConflictChecker.platformsOf(
                 timing.stops(), stops, definition.waypoints(), index.nodeTypes()));
     return new NeighborTimetable(
-        UUID.nameUUIDFromBytes("NL-TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+        UUID.nameUUIDFromBytes("L2-TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
         NEIGHBOR,
         Instant.parse("2026-02-28T12:00:00Z"),
         ZoneId.of("UTC"),

@@ -41,11 +41,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteDispatchMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPatternLength;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.BuildPool;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CapacityReport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ConsistFleet;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
@@ -151,8 +153,10 @@ public final class FtaTimetableCommand {
     var maxDutyFlag = intFlag("max-duty-minutes", "<minutes>", 1, 1440);
     var turnaroundFlag = intFlag("turnaround", "<seconds>", 0, 3600);
     var separationFlag = intFlag("separation", "<seconds>", 0, 3600);
+    var maxCancelFlag = intFlag("max-cancel", "<trips>", 0, TimetableBuildOptions.MAX_TRIPS);
     CommandFlag<Void> strictFlag = CommandFlag.builder("strict").build();
     CommandFlag<Void> rapidStaggerFlag = CommandFlag.builder("rapid-stagger").build();
+    var staggerMinutesFlag = intFlag("stagger-minutes", "<minutes>", 0, 1440);
 
     manager.command(
         manager
@@ -183,7 +187,9 @@ public final class FtaTimetableCommand {
             .flag(maxWaitFlag)
             .flag(maxIdleFlag)
             .flag(strictFlag)
+            .flag(maxCancelFlag)
             .flag(rapidStaggerFlag)
+            .flag(staggerMinutesFlag)
             .flag(nameFlag)
             .flag(prefixFlag)
             .handler(
@@ -209,7 +215,10 @@ public final class FtaTimetableCommand {
                             ctx.flags().getValue(maxWaitFlag).orElse(null),
                             ctx.flags().getValue(maxIdleFlag).orElse(null),
                             ctx.flags().isPresent(strictFlag),
+                            intValue(
+                                ctx, maxCancelFlag, TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS),
                             ctx.flags().isPresent(rapidStaggerFlag),
+                            ctx.flags().getValue(staggerMinutesFlag).orElse(null),
                             ctx.flags().getValue(nameFlag).orElse(null),
                             ctx.flags().getValue(prefixFlag).orElse(null)))));
 
@@ -359,7 +368,9 @@ public final class FtaTimetableCommand {
         Component.text(
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
                 + " --max-duty-minutes --turnaround --separation --max-wait --max-idle --strict"
-                + " --rapid-stagger --name --prefix",
+                + " --max-cancel（缺省为运营班次的 "
+                + TimetableBuildOptions.DEFAULT_MAX_CANCEL_PERCENT
+                + "%，至少 1 班） --rapid-stagger --stagger-minutes --name --prefix",
             NamedTextColor.DARK_GRAY));
     sender.sendMessage(hint("参数一览", "/fta timetable config <company> <operator> <line>"));
     sender.sendMessage(hint("列表", "/fta timetable list <company> <operator> <line>"));
@@ -559,7 +570,17 @@ public final class FtaTimetableCommand {
             groupIntervals,
             repairOptions(sender, flags.maxWaitSeconds()),
             flags.rapidStagger(),
-            following);
+            following,
+            // 顺推按运行时晚点追赶的停站压缩判：与运行时用同一份配置。
+            timetableSettings().recoveryMinDwellSeconds(),
+            flags.maxCancelTrips(),
+            // 表上的喂车多停靠早到等点兑现：上限与运行时同一份配置，再被调度层的硬上限封顶。
+            (int)
+                Math.min(
+                    holdMaxSeconds(),
+                    org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator
+                        .HOLD_CEILING.toSeconds()),
+            flags.staggerMinutesOrDefault());
     String timetableName = flags.name() == null ? code : flags.name();
 
     // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是
@@ -597,7 +618,8 @@ public final class FtaTimetableCommand {
                       graphSnapshot,
                       model,
                       Optional.empty())
-                  .withFleet(fleetOf(member.consistPlans(), graph.worldId())),
+                  .withFleet(fleetOf(member.consistPlans(), graph.worldId()))
+                  .withCouplings(member.couplings()),
               member.line().line().code(),
               display,
               member.ownRouteIds()));
@@ -629,10 +651,22 @@ public final class FtaTimetableCommand {
             .append(Component.text(" "))
             .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与所处阶段")));
     if (flags.rapidStagger()) {
+      int staggerMinutes = flags.staggerMinutesOrDefault();
       sender.sendMessage(
-          Component.text("已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟；在后台线程运行，不阻塞服务器主线程。", NamedTextColor.GRAY));
+          Component.text(
+              "已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟"
+                  + (staggerMinutes > 0
+                      ? "（约 " + staggerMinutes + " 分钟上限，到点后编完当时那一批，就在已编过的候选里挑）"
+                      : "（不限时）")
+                  + "；在后台线程运行，不阻塞服务器主线程。",
+              NamedTextColor.GRAY));
+    } else if (flags.staggerMinutes() != null) {
+      sender.sendMessage(
+          Component.text(
+              "--stagger-minutes 只在 --rapid-stagger 时生效；这次没开快车错峰搜索，忽略。", NamedTextColor.GRAY));
     }
     Instant builtAt = Instant.now();
+    int threads = buildThreads();
     TimetableHeadwayDefaults.Choice headwayChoice = headway;
     plugin
         .getServer()
@@ -656,7 +690,7 @@ public final class FtaTimetableCommand {
                     neighborInputs.project(graphSnapshot, index, footprint, options);
                 progress.checkpoint();
                 result =
-                    new TimetableSetBuilder(progress)
+                    new TimetableSetBuilder(progress, threads)
                         .build(
                             new TimetableSetBuilder.SetInput(setMembers, neighbors),
                             options,
@@ -674,6 +708,7 @@ public final class FtaTimetableCommand {
                         index,
                         neighbors,
                         options);
+                platformPlans.requireFeasibleRestrictedAssignments();
                 result =
                     withCapacity(
                         result, tableProfiles, platformPlans, index, options, model, graphSnapshot);
@@ -692,7 +727,16 @@ public final class FtaTimetableCommand {
                         plugin,
                         () ->
                             sender.sendMessage(
-                                Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
+                                ex
+                                        instanceof
+                                        TimetablePlatformPlanner.RestrictedPlatformException
+                                        restricted
+                                    ? plugin
+                                        .getLocaleManager()
+                                        .component(
+                                            restricted.messageKey(), restricted.placeholders())
+                                    : Component.text(
+                                        "编表失败：" + ex.getMessage(), NamedTextColor.RED)));
                 return;
               } catch (Error error) {
                 buildJobs.finish(job.id());
@@ -731,6 +775,7 @@ public final class FtaTimetableCommand {
                                   groupSources,
                                   maxTripsSource,
                                   buildWarnings,
+                                  progress.snapshot(),
                                   release);
                         } finally {
                           // 交给了落库就等事务结束再解锁；没走到落库（编表失败、拆表出错）当场解锁。
@@ -760,7 +805,8 @@ public final class FtaTimetableCommand {
       WorldGraph graph,
       UUID timetableId,
       Map<UUID, Long> trainLengths,
-      ConsistPlans consistPlans) {}
+      ConsistPlans consistPlans,
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingInputs couplings) {}
 
   /**
    * 一条线各 route 绑定的编组方案。
@@ -846,12 +892,14 @@ public final class FtaTimetableCommand {
               Optional.empty(),
               Optional.ofNullable(declared.typeOf().get(route.id())),
               externalRoutes.contains(route.id()),
-              readSpawnGroup(route));
+              readSpawnGroup(route),
+              RouteDispatchMetadata.enabled(route));
       // 带客的出库班（CREATE 且中途有停站）也是班次：DS 那种只有 CREATE + RETURN 的线一样能编表。
       anyOperation |=
           own.contains(route.id())
               && (route.operationType() == RouteOperationType.OPERATION
                   || (route.operationType() == RouteOperationType.CREATE
+                      && !routeInput.dispatchByOperation()
                       && ServiceGroupClassifier.carriesPassengers(routeInput)));
       routeInputs.add(routeInput);
     }
@@ -870,7 +918,72 @@ public final class FtaTimetableCommand {
         graph,
         existingId.orElseGet(UUID::randomUUID),
         trainLengthsOf(routes, routeInputs),
-        consistPlansOf(provider, routes));
+        consistPlansOf(provider, routes),
+        couplingInputsOf(routes, routeInputs));
+  }
+
+  /**
+   * 加解编编表要用的出车编组与组合写法各段节数（主线程读 TrainCarts）。线上没有一条交路写了 DECP/COPL 时不读。
+   *
+   * <p>编组写法的来源与车长同一套：route metadata 写明的，其次首站 CRET 指向的车库牌子。
+   */
+  private org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingInputs
+      couplingInputsOf(List<Route> routes, List<TimetableBuilder.RouteInput> inputs) {
+    boolean any =
+        inputs.stream()
+            .flatMap(input -> input.stops().stream())
+            .anyMatch(
+                stop ->
+                    org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .route
+                            .RouteCouplingDirectives
+                            .rawDecouple(stop)
+                            .isPresent()
+                        || org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .route
+                            .RouteCouplingDirectives
+                            .rawCouple(stop)
+                            .isPresent());
+    if (!any) {
+      return org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingInputs.NONE;
+    }
+    SignNodeRegistry registry = plugin.getSignNodeRegistry();
+    Map<UUID, String> patterns = new java.util.HashMap<>();
+    Map<String, List<Integer>> sizes = new java.util.HashMap<>();
+    for (TimetableBuilder.RouteInput input : inputs) {
+      Optional<Route> route =
+          routes.stream().filter(candidate -> candidate.id().equals(input.routeId())).findFirst();
+      Optional<String> pattern =
+          route
+              .flatMap(DepotSpawnPattern::fromRoute)
+              .or(
+                  () ->
+                      registry == null
+                          ? Optional.empty()
+                          : SpawnDirectiveParser.findDirectiveTarget(input.stops(), "CRET")
+                              .map(NodeId::of)
+                              .flatMap(depot -> DepotSpawnPattern.read(registry, depot)))
+              .flatMap(org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey::tidy);
+      if (pattern.isEmpty()) {
+        continue;
+      }
+      patterns.put(input.routeId(), pattern.get());
+      if (!sizes.containsKey(pattern.get())) {
+        org.fetarute
+            .fetaruteTCAddon
+            .dispatcher
+            .consist
+            .CompositeSpawnPattern
+            .parse(com.bergerkiller.bukkit.tc.TrainCarts.plugin, pattern.get())
+            .ifPresent(parsed -> sizes.put(pattern.get(), parsed.partSizes()));
+      }
+    }
+    return new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingInputs(
+        patterns, sizes);
   }
 
   /**
@@ -959,8 +1072,7 @@ public final class FtaTimetableCommand {
                             key,
                             profile.pattern(),
                             new RunCurveModel(
-                                base.withMotion(
-                                    new SpeedCurve(profile.accelBps2(), profile.decelBps2())),
+                                base.withTrain(profile.accelBps2(), profile.decelBps2()),
                                 capped(edges, profile.maxSpeedBps())),
                             profile.lengthBlocks(),
                             profile.spawnLimit()));
@@ -1061,7 +1173,7 @@ public final class FtaTimetableCommand {
   /**
    * 给编出来的表排计划站台（异步线程）：时刻用表上落库的时刻（{@link NeighborInputs#myProfiles}），与运行时、邻表同一口径。 编表失败时不排。
    *
-   * <p>计划站台只是选台偏好与站牌显示：排程出错时记下原因、不给计划，时刻表照常落库。
+   * <p>受限的允许集合（小于该站实际股道数）需要整段可用股道的证明，排程出错则拒绝保存；不限股道或覆盖全部股道的交路保留计划偏好兜底。 只看本次编的表，邻表的写法不影响。
    */
   private static TimetablePlatformPlanner.Result planPlatforms(
       TimetableSetBuilder.SetResult result,
@@ -1074,20 +1186,24 @@ public final class FtaTimetableCommand {
     if (!result.success()) {
       return new TimetablePlatformPlanner.Result(Map.of(), 0, 0);
     }
+    TimetablePlatformPlanner.Input input =
+        new TimetablePlatformPlanner.Input(
+            List.copyOf(result.tables().values()),
+            profiles,
+            inputs.stopsByRoute(),
+            inputs.definitions(),
+            graph,
+            index,
+            neighbors,
+            options.serviceStartSecondOfDay(),
+            (int) options.separation().toSeconds());
     try {
-      List<Timetable> tables = List.copyOf(result.tables().values());
-      return TimetablePlatformPlanner.plan(
-          new TimetablePlatformPlanner.Input(
-              tables,
-              profiles,
-              inputs.stopsByRoute(),
-              inputs.definitions(),
-              graph,
-              index,
-              neighbors,
-              options.serviceStartSecondOfDay(),
-              (int) options.separation().toSeconds()));
+      return TimetablePlatformPlanner.plan(input);
     } catch (RuntimeException ex) {
+      if (TimetablePlatformPlanner.hasRestrictedStops(input)) {
+        throw new TimetablePlatformPlanner.RestrictedPlatformException(
+            "command.timetable.build.restricted-plan-failed", "reason", String.valueOf(ex), ex);
+      }
       return TimetablePlatformPlanner.Result.failed(ex.toString());
     }
   }
@@ -1147,6 +1263,7 @@ public final class FtaTimetableCommand {
   /**
    * 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。落库交给异步事务。
    *
+   * @param progress 编完时的进度：报告里写用时与各用途的完整构建次数
    * @param saved 落库事务结束（成功、被拒或出错）后在主线程调用；返回 false 时不会被调用
    * @return 交给了落库为 true
    */
@@ -1163,11 +1280,21 @@ public final class FtaTimetableCommand {
       Map<String, String> groupSources,
       String maxTripsSource,
       List<String> warnings,
+      TimetableBuildProgress.Snapshot progress,
       Runnable saved) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
     report.sendBuildReport(
         result, options, headway, groupSources, maxTripsSource, describeRun(run));
+    sender.sendMessage(
+        field(
+            "编表用时",
+            elapsed(progress.elapsed())
+                + "，完整构建 "
+                + progress.fullBuilds()
+                + " 次（"
+                + progress.describeTrials()
+                + "）"));
     for (String warning : warnings) {
       sender.sendMessage(Component.text("  ! " + warning, NamedTextColor.YELLOW));
     }
@@ -1869,6 +1996,27 @@ public final class FtaTimetableCommand {
             CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-wait ", "只对这一次构建生效")));
     sender.sendMessage(
         configRow(
+            "顺推可追回",
+            settings.recoveryMinDwellSeconds() > 0
+                ? "途中站最短停 " + settings.recoveryMinDwellSeconds() + "s"
+                : "不按追回量判",
+            "config.yml 的 timetable.recovery.min-dwell-seconds",
+            Component.empty()));
+    sender.sendMessage(
+        configRow(
+            "严格模式取消上限",
+            "运营班次的 " + TimetableBuildOptions.DEFAULT_MAX_CANCEL_PERCENT + "%（至少 1 班）",
+            "默认（无持久化位置），仅 --strict 时生效；--max-cancel 给绝对班数",
+            CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-cancel ", "只对这一次构建生效")));
+    sender.sendMessage(
+        configRow(
+            "快车错峰时限",
+            TimetableBuildOptions.DEFAULT_STAGGER_MINUTES + " 分钟",
+            "默认（无持久化位置），仅 --rapid-stagger 时生效；到点后编完当时那一批才停；0 为不限",
+            CommandUx.suggestAction(
+                "[本次覆盖]", buildPrefix + " --rapid-stagger --stagger-minutes ", "只对这一次构建生效")));
+    sender.sendMessage(
+        configRow(
             "占用裕量",
             TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS + "s",
             "默认（无持久化位置）",
@@ -1893,6 +2041,16 @@ public final class FtaTimetableCommand {
             "停站开销",
             run.stationStopOverheadSeconds() + "s",
             "config.yml 的 timetable.station-stop-overhead-seconds：车站停车在 dwell 之外多算的秒数",
+            Component.empty()));
+    sender.sendMessage(
+        configRow(
+            "编表线程",
+            buildThreads() + " 个",
+            settings.buildThreads() == ConfigManager.TimetableSettings.AUTO_BUILD_THREADS
+                ? "config.yml 的 timetable.build-threads（auto：核数的一半，至多 "
+                    + BuildPool.DEFAULT_MAX_THREADS
+                    + " 个）；只影响编表快慢，不影响结果"
+                : "config.yml 的 timetable.build-threads；只影响编表快慢，不影响结果",
             Component.empty()));
     sender.sendMessage(
         configRow(
@@ -2649,7 +2807,7 @@ public final class FtaTimetableCommand {
       if (!snapshot.detail().isBlank()) {
         lines.add(field("  正在", snapshot.detail()));
       }
-      lines.add(field("  完整构建", snapshot.fullBuilds() + " 次"));
+      lines.add(field("  完整构建", snapshot.fullBuilds() + " 次（" + snapshot.describeTrials() + "）"));
     }
     return lines;
   }
@@ -2773,11 +2931,13 @@ public final class FtaTimetableCommand {
   static String describeRun(RunCurveModel.Settings run) {
     return String.format(
         java.util.Locale.ROOT,
-        "起步 %.2f / 制动 %.2f 格/秒²，进站 %.0f 格内限 %.1f 格/秒，车站停站 = dwell + %ds",
+        "起步 %.2f / 制动 %.2f 格/秒²（常用制动的 %.0f%%），车站刹到停车点，区间停车点 %.0f 格内限 %.1f 格/秒，"
+            + "车站停站 = dwell + %ds",
         run.motion().accelBps2(),
         run.motion().decelBps2(),
+        run.atoBrakeFraction() * 100.0,
         run.approach().windowBlocks(),
-        run.approach().stationSpeedBps(),
+        run.approach().waypointSpeedBps(),
         run.stationStopOverheadSeconds());
   }
 
@@ -2796,8 +2956,10 @@ public final class FtaTimetableCommand {
         Math.max(
             runtime.followingMinClearBlocks(),
             runtime.followingStopMarginBlocks() + runtime.movementAuthorityCautionMarginBlocks());
+    // 后车在信号与移动授权前按常用制动刹停（不乘自动运行的舒适比例），闭塞时间按它算。
+    ConfigManager.TrainConfigSettings trains = config.trainConfigSettings();
     return new TimetableBuildOptions.Following(
-        runCurveSettings(config).motion().decelBps2(),
+        trains.forType(trains.defaultTrainType()).decelBps2(),
         margin,
         runtime.rearGuardEdges(),
         runtime.dispatchTickIntervalTicks() / 20.0D,
@@ -2980,6 +3142,18 @@ public final class FtaTimetableCommand {
     }
     return new TimetableBuildOptions.Repair(
         Duration.ofSeconds(maxWait), Duration.ofSeconds(tolerance));
+  }
+
+  /** 编表线程数：{@code timetable.build-threads} 换算后的值（auto 按核数取）。 */
+  private int buildThreads() {
+    return BuildPool.resolveThreads(timetableSettings().buildThreads());
+  }
+
+  /** 当前的时刻表配置；读不到时用缺省值。 */
+  private ConfigManager.TimetableSettings timetableSettings() {
+    return plugin.getConfigManager() != null && plugin.getConfigManager().current() != null
+        ? plugin.getConfigManager().current().timetableSettings()
+        : ConfigManager.TimetableSettings.defaults();
   }
 
   /** 站台扣留上限：报告里用它区分让车发生在站台还是资源前。 */
@@ -3527,7 +3701,9 @@ public final class FtaTimetableCommand {
    * @param turnaroundSeconds 终端折返时间；{@code null} 表示不覆盖，按各 route 终到站的 dwell 算
    * @param separationSeconds 冲突检查里相邻占用之间的最小间隔
    * @param strict 目标 headway 有冲突时构建失败而不是回退
+   * @param maxCancelTrips 严格模式最多取消几班让不掉的班次；0 表示不取消；没给 {@code --max-cancel} 时为负，按运营班次的比例定
    * @param rapidStagger 快车错峰搜索：逐个试原地折返端的折返、快车组的平移与停站、按成品表实测挑（慢）
+   * @param staggerMinutes 快车错峰搜索的时间上限（分钟，0 表示不限）；没给 {@code --stagger-minutes} 时为空
    * @param name 时刻表展示名
    * @param tripCodePrefix 车次号前缀
    */
@@ -3544,7 +3720,17 @@ public final class FtaTimetableCommand {
       Integer maxWaitSeconds,
       Integer maxIdleSeconds,
       boolean strict,
+      int maxCancelTrips,
       boolean rapidStagger,
+      Integer staggerMinutes,
       String name,
-      String tripCodePrefix) {}
+      String tripCodePrefix) {
+
+    /** 错峰时间上限：没给时取缺省值。 */
+    int staggerMinutesOrDefault() {
+      return staggerMinutes == null
+          ? TimetableBuildOptions.DEFAULT_STAGGER_MINUTES
+          : staggerMinutes;
+    }
+  }
 }

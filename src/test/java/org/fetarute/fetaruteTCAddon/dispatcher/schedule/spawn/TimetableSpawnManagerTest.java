@@ -51,6 +51,204 @@ class TimetableSpawnManagerTest {
   private static final UUID TRIP_TWO = UUID.randomUUID();
   private static final Instant DAY = Instant.parse("2026-03-02T00:00:00Z");
 
+  /** 带客出库展示行只绑定走行票，不另外出车，也不消耗首个运营班次的进度。 */
+  @Test
+  void passengerCreateDisplayRowSharesOneTicketAndKeepsOperationProgressAtZero() {
+    Timetable table = timetable();
+    var createTrip =
+        new TimetableTrip(
+            UUID.randomUUID(),
+            TIMETABLE,
+            CREATE_ROUTE,
+            2,
+            "CRT-001",
+            8 * 3600 - 180,
+            Optional.of(DUTY));
+    List<TimetableTrip> rows = new ArrayList<>(table.trips());
+    rows.add(createTrip);
+    Fixture fixture = fixture(table.withTripsAndDuties(rows, table.duties()));
+    List<SpawnTicket> tickets = fixture.pollAll();
+    assertEquals(4, tickets.size(), "展示行不增加独立出票");
+    assertEquals(
+        TRIP_ONE,
+        fixture.manager.pickupTripOf(tickets.get(0)).orElseThrow().trip().id(),
+        "驾驶员接车仍以要接的运营班次为准");
+    fixture.manager.onDispatched(tickets.get(0), "passenger-create");
+    assertEquals(
+        Optional.of(createTrip.id()),
+        fixture
+            .service
+            .assignmentOf("passenger-create")
+            .map(
+                org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment
+                    ::tripId));
+    assertEquals(
+        0, fixture.service.dutyProgressOf("passenger-create").orElseThrow().assignedTrips());
+    assertEquals(
+        Optional.of(tickets.get(0).dueAt()),
+        fixture.service.plannedDepartureOf("passenger-create", 0),
+        "窗口前出库的展示车次仍属于实际出票当天");
+    fixture.manager.onDispatched(tickets.get(1), "passenger-create");
+    assertEquals(
+        1, fixture.service.dutyProgressOf("passenger-create").orElseThrow().assignedTrips());
+  }
+
+  /** 未派出的带客出库票作废时同步取消展示车次，不把取消记到运营首班。 */
+  @Test
+  void abandonedPassengerCreateCancelsItsDisplayTrip() {
+    Timetable table = passengerCreateTimetable();
+    Fixture fixture = fixture(table);
+    SpawnTicket create = fixture.pollAll().get(0);
+    var display = table.legTrip(table.duties().get(0), RouteOperationType.CREATE).orElseThrow();
+    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TripCancellations.Cancellation>
+        cancelled = new ArrayList<>();
+    fixture.service.setCancellationListener(cancelled::add);
+
+    fixture.manager.complete(create);
+    fixture.manager.complete(create);
+
+    var date = java.time.LocalDate.ofInstant(create.dueAt(), ZONE);
+    assertEquals(1, cancelled.size(), "重复完成不能重复发送取消事件");
+    assertTrue(fixture.service.cancellationOf(TIMETABLE, display.id(), date).isPresent());
+    assertTrue(fixture.service.cancellationOf(TIMETABLE, TRIP_ONE, date).isEmpty());
+  }
+
+  /** 提前出票进入重试队列的带客出库票过期，仍走同一取消路径。 */
+  @Test
+  void expiredPassengerCreateRetryCancelsItsDisplayTrip() {
+    Timetable table = passengerCreateTimetable();
+    Fixture fixture = fixture(table);
+    fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(7 * 3600));
+    SpawnTicket create =
+        fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 - 180)).get(0);
+    fixture.manager.requeue(create);
+    fixture.manager.pollDueTickets(fixture.provider, create.dueAt().plusSeconds(301));
+    var display = table.legTrip(table.duties().get(0), RouteOperationType.CREATE).orElseThrow();
+    assertTrue(
+        fixture
+            .service
+            .cancellationOf(
+                TIMETABLE, display.id(), java.time.LocalDate.ofInstant(create.dueAt(), ZONE))
+            .isPresent());
+  }
+
+  /** 中途开服没有出库票窗口：缺车的按需交路只补还能准点接上的班次，按它的计划出库时刻出票，并且一单只派一辆。 */
+  @Test
+  void coldStartRecoversAnUnboundOperationDispatchedDuty() {
+    SpawnService create = service(CREATE_ROUTE, "CRT", "OP:D:DEP:1");
+    SpawnPlan demandPlan =
+        new SpawnPlan(
+            Instant.EPOCH,
+            List.of(
+                new SpawnService(
+                    create.key(),
+                    create.companyId(),
+                    create.companyCode(),
+                    create.operatorId(),
+                    create.operatorCode(),
+                    create.lineId(),
+                    create.lineCode(),
+                    create.routeId(),
+                    create.routeCode(),
+                    Optional.empty(),
+                    create.depotNodeId()),
+                service(ROUTE, "R1", "OP:D:DEP:1"),
+                service(RETURN_ROUTE, "RET", "OP:D:DEP:1")));
+    Fixture fixture = fixture(timetable(), demandPlan);
+    fixture.service.setPendingTicketProbe(fixture.manager::hasPendingTicket);
+    assertTrue(
+        fixture
+            .manager
+            .pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 + 5 * 60))
+            .isEmpty(),
+        "第二班 08:10 的替补 08:07 才出库");
+    Instant now = DAY.plusSeconds(8 * 3600 + 7 * 60);
+
+    List<SpawnTicket> tickets = fixture.manager.pollDueTickets(fixture.provider, now);
+
+    assertEquals(1, tickets.size(), tickets::toString);
+    SpawnTicket replacement = tickets.get(0);
+    assertEquals(CREATE_ROUTE, replacement.service().routeId());
+    assertEquals(
+        1,
+        fixture
+            .manager
+            .pickupTripOf(replacement)
+            .orElseThrow()
+            .timetable()
+            .duties()
+            .get(0)
+            .tripIds()
+            .indexOf(TRIP_TWO));
+    assertEquals(TRIP_TWO, fixture.manager.pickupTripOf(replacement).orElseThrow().trip().id());
+    assertTrue(fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).isEmpty());
+    fixture.manager.onDispatched(replacement, "replacement");
+    assertTrue(fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(2)).isEmpty());
+  }
+
+  /** 开服补车只补一次：交路时间窗还没过、但已经没有能补的班次时，后续出票不能每轮都重新补登、再以过期关掉（刷日志、重派已取消的班）。 */
+  @Test
+  void coldStartRecoveryRunsOnceAfterRestore() {
+    Fixture fixture = fixture(timetable(), demandPlan());
+    fixture.service.setPendingTicketProbe(fixture.manager::hasPendingTicket);
+    Instant now = DAY.plusSeconds(8 * 3600 + 16 * 60);
+
+    for (int i = 0; i < 3; i++) {
+      assertTrue(
+          fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(5L * i)).isEmpty());
+    }
+
+    long closed =
+        fixture.logs.stream()
+            .filter(line -> line.startsWith("TIMETABLE_DUTY_VACANCY_CLOSED"))
+            .count();
+    assertEquals(1, closed, fixture.logs::toString);
+  }
+
+  /** 替补票派出时交路已被别的车接下（重启后留在线上的车按时间绑回）：不能再把第二辆车绑上同一交路。 */
+  @Test
+  void dispatchDoesNotBindASecondVehicleToARunningDuty() {
+    Fixture fixture = fixture(timetable(), demandPlan());
+    fixture.service.setPendingTicketProbe(fixture.manager::hasPendingTicket);
+    fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 + 5 * 60));
+    Instant now = DAY.plusSeconds(8 * 3600 + 7 * 60);
+    SpawnTicket replacement = fixture.manager.pollDueTickets(fixture.provider, now).get(0);
+    var duty = fixture.manager.pickupTripOf(replacement).orElseThrow();
+    fixture.service.bindDuty(
+        "survivor",
+        new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService.DutyKey(
+            TIMETABLE,
+            duty.timetable().duties().get(0).id(),
+            java.time.LocalDate.ofInstant(now, ZONE)),
+        "test-survivor");
+
+    fixture.manager.onDispatched(replacement, "replacement");
+
+    assertTrue(fixture.service.dutyBindingOf("replacement").isEmpty(), "交路已有车时不绑第二辆");
+    assertTrue(fixture.service.dutyBindingOf("survivor").isPresent());
+  }
+
+  private static SpawnPlan demandPlan() {
+    SpawnService create = service(CREATE_ROUTE, "CRT", "OP:D:DEP:1");
+    return new SpawnPlan(
+        Instant.EPOCH,
+        List.of(
+            new SpawnService(
+                create.key(),
+                create.companyId(),
+                create.companyCode(),
+                create.operatorId(),
+                create.operatorCode(),
+                create.lineId(),
+                create.lineCode(),
+                create.routeId(),
+                create.routeCode(),
+                Optional.empty(),
+                create.depotNodeId()),
+            service(ROUTE, "R1", "OP:D:DEP:1"),
+            service(RETURN_ROUTE, "RET", "OP:D:DEP:1")));
+  }
+
   /** 一天之内的四张票按时间依次出现，各带正确的交路意图：CREATE、第 0 班、第 1 班、RETURN。 */
   @Test
   void ticketsCarryTheirDutyIntent() {
@@ -291,6 +489,104 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.service.cancellationOf(TIMETABLE, TRIP_TWO, date).isPresent());
   }
 
+  /** 站牌行的车次标识找回表上那一班：预测行按预测时记下的，已出没派的票按登记。 */
+  @Test
+  void aBoardRowsTripIdLeadsBackToItsDutyIntent() {
+    Fixture fixture = fixture();
+    List<SpawnTicket> forecast =
+        fixture.manager.snapshotForecast(DAY.plusSeconds(8 * 3600 - 60), Duration.ofMinutes(20), 5);
+    SpawnTicket second =
+        forecast.stream()
+            .filter(ticket -> ROUTE.equals(ticket.service().routeId()))
+            .filter(ticket -> ticket.dueAt().equals(DAY.plusSeconds(8 * 3600 + 600)))
+            .findFirst()
+            .orElseThrow();
+
+    TimetableService.TicketIntent intent =
+        fixture.manager.intentOfServiceTrip(second.serviceTripId().orElseThrow()).orElseThrow();
+    assertEquals(RouteOperationType.OPERATION, intent.kind());
+    assertEquals(1, intent.tripIndex());
+
+    List<SpawnTicket> issued = fixture.pollAll();
+    fixture.manager.snapshotForecast(DAY.plusSeconds(23 * 3600), Duration.ofMinutes(1), 5);
+    String firstTrip = issued.get(1).serviceTripId().orElseThrow();
+    assertEquals(
+        0,
+        fixture.manager.intentOfServiceTrip(firstTrip).orElseThrow().tripIndex(),
+        "预测窗口已过：按已出的票找");
+    fixture.manager.onDispatched(issued.get(1), "train-1");
+    assertEquals(
+        0,
+        fixture.manager.intentOfServiceTrip(firstTrip).orElseThrow().tripIndex(),
+        "派出后已出的票摘掉；预测时记下的意图保留到服务日过去");
+    assertTrue(fixture.manager.intentOfServiceTrip("no-such-trip").isEmpty());
+  }
+
+  /** 站台屏与只读 HTTP 接口用不同时间窗交错预测：后一次不冲掉前一次记下的意图；服务日早于前一天的随预测清掉。 */
+  @Test
+  void interleavedForecastsKeepEachOthersIntents() {
+    Fixture fixture = fixture();
+    String later =
+        fixture
+            .manager
+            .snapshotForecast(DAY.plusSeconds(8 * 3600 - 60), Duration.ofMinutes(20), 5)
+            .stream()
+            .filter(ticket -> ROUTE.equals(ticket.service().routeId()))
+            .filter(ticket -> ticket.dueAt().equals(DAY.plusSeconds(8 * 3600 + 600)))
+            .findFirst()
+            .orElseThrow()
+            .serviceTripId()
+            .orElseThrow();
+
+    fixture.manager.snapshotForecast(DAY.plusSeconds(8 * 3600 - 60), Duration.ofMinutes(2), 5);
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isPresent(), "窄时间窗的预测不冲掉宽时间窗记下的");
+
+    fixture.manager.snapshotForecast(DAY.plus(Duration.ofDays(3)), Duration.ofMinutes(1), 5);
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isEmpty(), "服务日早于前一天的清掉");
+  }
+
+  /** 重新发布时刻表（沿用 ID、更新时刻变了）：旧表记下的意图整本作废，不会被当成新表的同一车次；再预测一次又记上。 */
+  @Test
+  void republishingDiscardsForecastIntents() {
+    Timetable original = timetable();
+    Fixture fixture = fixture(original);
+    Instant at = DAY.plusSeconds(8 * 3600 - 60);
+    String later =
+        fixture.manager.snapshotForecast(at, Duration.ofMinutes(20), 5).stream()
+            .filter(ticket -> ROUTE.equals(ticket.service().routeId()))
+            .filter(ticket -> ticket.dueAt().equals(DAY.plusSeconds(8 * 3600 + 600)))
+            .findFirst()
+            .orElseThrow()
+            .serviceTripId()
+            .orElseThrow();
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isPresent());
+
+    Timetable republished =
+        new Timetable(
+            original.id(),
+            original.companyId(),
+            original.operatorId(),
+            original.lineId(),
+            original.code(),
+            original.name(),
+            original.status(),
+            original.zoneId(),
+            original.serviceStartSecondOfDay(),
+            original.serviceEndSecondOfDay(),
+            original.routePlans(),
+            original.trips(),
+            original.duties(),
+            original.notes(),
+            original.createdAt(),
+            original.updatedAt().plusSeconds(60));
+    when(fixture.provider().timetables().listPublished()).thenReturn(List.of(republished));
+    fixture.service().reload(fixture.provider());
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isEmpty(), "旧表的意图作废");
+
+    fixture.manager.snapshotForecast(at, Duration.ofMinutes(20), 5);
+    assertTrue(fixture.manager.intentOfServiceTrip(later).isPresent(), "按新表重新记上");
+  }
+
   /** 已取消的车次不会开出，站牌预测里不再出现；站牌与站台屏从时刻表的取消标记显示它。 */
   @Test
   void cancelledTripsAreLeftOutOfTheForecast() {
@@ -310,6 +606,102 @@ class TimetableSpawnManagerTest {
             .findFirst()
             .orElseThrow()
             .dueAt());
+  }
+
+  /** 发车计划里没有的交路：预测按现拼的发车服务照样列出表定班次；出票只给解编生出的交路用现拼的服务，普通交路仍然不出。 */
+  @Test
+  void routesOutsideThePlanAreForecastButNotTicketed() {
+    SpawnPlan withoutRoute =
+        new SpawnPlan(
+            Instant.EPOCH,
+            List.of(
+                service(CREATE_ROUTE, "CRT", "OP:D:DEP:1"),
+                service(RETURN_ROUTE, "RET", "OP:D:DEP:1")));
+    Fixture fixture = fixture(timetable(), withoutRoute);
+    Instant now = DAY.plusSeconds(8 * 3600 - 60);
+
+    assertTrue(
+        fixture.manager.snapshotForecast(now, Duration.ofMinutes(20), 5).stream()
+            .noneMatch(ticket -> ROUTE.equals(ticket.service().routeId())),
+        "没接入现拼服务：计划里没有就不列");
+
+    fixture.manager.setUnplannedServices(
+        routeId ->
+            ROUTE.equals(routeId)
+                ? Optional.of(service(ROUTE, "R1", "OP:D:DEP:1"))
+                : Optional.empty());
+
+    assertTrue(
+        fixture.manager.snapshotForecast(now, Duration.ofMinutes(20), 5).stream()
+            .anyMatch(ticket -> ROUTE.equals(ticket.service().routeId())));
+    assertTrue(
+        fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 + 60)).stream()
+            .noneMatch(ticket -> ROUTE.equals(ticket.service().routeId())),
+        "不是解编生出的交路：出票不用现拼的服务");
+  }
+
+  /** 解编生出的交路（解下的车接的班次）：交路不在发车计划里也要出票，否则解下的车等一张永远不来的票、堵住解编站。 */
+  @Test
+  void aSplitChildTripIsTicketedThoughItsRouteIsOutsideThePlan() {
+    Timetable base = timetable();
+    VehicleDuty plain = base.duties().get(0);
+    VehicleDuty child =
+        new VehicleDuty(
+            plain.id(),
+            plain.timetableId(),
+            plain.sequence(),
+            plain.dutyCode(),
+            "OP:S:AAA:1",
+            plain.endDepotNodeId(),
+            Optional.empty(),
+            plain.returnRouteId(),
+            plain.tripIds(),
+            8 * 3600,
+            plain.returnSecondOfDay(),
+            plain.plannedEndSecondOfDay(),
+            plain.closeReason(),
+            Optional.empty(),
+            new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.DutyCoupling(
+                Optional.of(UUID.randomUUID()), Optional.empty()));
+    Timetable table =
+        new Timetable(
+            base.id(),
+            base.companyId(),
+            base.operatorId(),
+            base.lineId(),
+            base.code(),
+            base.name(),
+            base.status(),
+            base.zoneId(),
+            base.serviceStartSecondOfDay(),
+            base.serviceEndSecondOfDay(),
+            base.routePlans(),
+            base.trips(),
+            List.of(child),
+            base.notes(),
+            base.createdAt(),
+            base.updatedAt());
+    Fixture fixture =
+        fixture(
+            table,
+            new SpawnPlan(
+                Instant.EPOCH,
+                List.of(
+                    service(CREATE_ROUTE, "CRT", "OP:D:DEP:1"),
+                    service(RETURN_ROUTE, "RET", "OP:D:DEP:1"))));
+    fixture.manager.setUnplannedServices(
+        routeId ->
+            ROUTE.equals(routeId)
+                ? Optional.of(service(ROUTE, "R1", "OP:S:AAA:1"))
+                : Optional.empty());
+
+    fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 - 60));
+    List<SpawnTicket> tickets =
+        fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 + 5));
+
+    assertTrue(
+        tickets.stream().anyMatch(ticket -> ROUTE.equals(ticket.service().routeId())),
+        () -> "解下的车接的第一班要出票: " + tickets + " " + fixture.logs);
   }
 
   /**
@@ -795,11 +1187,11 @@ class TimetableSpawnManagerTest {
   }
 
   /**
-   * 交路换车：车晚 460 秒到终点 CCC（超过容差 + 追赶余量），替补车现在出库还赶得上第二班（08:10 发、08:15 前），交路空出来；
-   * 下一次轮询发出替补出库票，派发时新车绑上交路。替补票作废则下一轮再发。
+   * 交路换车：车在 08:05 被清掉，交路空出来；替补车按第二班（08:10 发）的计划出库时刻 08:07 发出替补出库票，派发时新车绑上交路。 替补票作废时还来得及准点，下一轮再发。
    */
   @Test
   void aVacantDutyGetsAReplacementCreateTicket() {
+    Timetable table = passengerCreateTimetable();
     java.util.concurrent.atomic.AtomicReference<Instant> clock =
         new java.util.concurrent.atomic.AtomicReference<>(DAY.plusSeconds(8 * 3600 + 5));
     List<String> logs = new ArrayList<>();
@@ -810,7 +1202,7 @@ class TimetableSpawnManagerTest {
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);
-    when(repository.listPublished()).thenReturn(List.of(timetable()));
+    when(repository.listPublished()).thenReturn(List.of(table));
     service.reload(provider);
     SpawnManager delegate = mock(SpawnManager.class);
     when(delegate.pollDueTickets(any(), any())).thenReturn(List.of());
@@ -818,10 +1210,12 @@ class TimetableSpawnManagerTest {
     TimetableSpawnManager manager = new TimetableSpawnManager(delegate, service, logs::add);
 
     service.scheduledDepartureAt(stop("train-A", 0, clock.get()));
-    clock.set(DAY.plusSeconds(8 * 3600 + 11 * 60 + 30));
-    service.observeStop(stop("train-A", 1, clock.get()), false);
-    assertTrue(service.dutyBindingOf("train-A").isEmpty(), "晚 460 秒，交路换车");
+    clock.set(DAY.plusSeconds(8 * 3600 + 5 * 60));
+    service.release("train-A", "train-removed");
+    assertEquals(1, service.vacantDutyCount(), "车被清掉，交路空缺");
+    assertTrue(manager.pollDueTickets(provider, clock.get()).isEmpty(), "替补按计划 08:07 出库");
 
+    clock.set(DAY.plusSeconds(8 * 3600 + 7 * 60));
     List<SpawnTicket> first = manager.pollDueTickets(provider, clock.get());
     assertEquals(1, first.size(), first::toString);
     SpawnTicket replacement = first.get(0);
@@ -832,6 +1226,11 @@ class TimetableSpawnManagerTest {
         logs::toString);
 
     manager.complete(replacement);
+    UUID createTrip =
+        table.legTrip(table.duties().get(0), RouteOperationType.CREATE).orElseThrow().id();
+    assertTrue(
+        service.cancellationOf(TIMETABLE, createTrip, java.time.LocalDate.of(2026, 3, 2)).isEmpty(),
+        "中途替补弃票不能取消原始出库展示行");
     List<SpawnTicket> retried = manager.pollDueTickets(provider, clock.get().plusSeconds(5));
     assertEquals(1, retried.size(), "作废之后还赶得上，再发一张");
 
@@ -930,6 +1329,66 @@ class TimetableSpawnManagerTest {
     assertEquals(Optional.of("m8"), tickets.get(0).withRetry(DAY, "retry").consist(), "重试票保留车型");
   }
 
+  /** 拆挂链断了也能自己接上：主干交路首班要挂上的回程支线交路没有车时，出库票与首班票出联挂之后的整列；回程支线有车时照常出联挂之前的那一段。续班票不受影响。 */
+  @Test
+  void aTrunkWhoseFeederHasNoCarSpawnsTheWholeConsist() {
+    Timetable base = withDutyConsist(timetable(), "kiha");
+    VehicleDuty trunk = base.duties().get(0);
+    UUID feederId =
+        UUID.nameUUIDFromBytes("feeder".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    // 回程支线那一班排在主干之后，不挤占前面几张票的次序
+    TimetableTrip feederTrip =
+        new TimetableTrip(
+            UUID.nameUUIDFromBytes("feeder-trip".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+            base.id(),
+            ROUTE,
+            99,
+            "R1-099",
+            9 * 3600 + 1800,
+            Optional.of(feederId));
+    VehicleDuty feeder =
+        new VehicleDuty(
+            feederId,
+            trunk.timetableId(),
+            trunk.sequence() + 1,
+            "F001",
+            trunk.startDepotNodeId(),
+            trunk.endDepotNodeId(),
+            Optional.empty(),
+            Optional.empty(),
+            List.of(feederTrip.id()),
+            feederTrip.departureSecondOfDay(),
+            feederTrip.departureSecondOfDay() + 230,
+            feederTrip.departureSecondOfDay() + 230,
+            VehicleDuty.CloseReason.IDLE_LIMIT,
+            Optional.of("kiha"),
+            new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.DutyCoupling(
+                Optional.empty(), Optional.of(trunk.tripIds().get(0))));
+    List<TimetableTrip> trips = new ArrayList<>(base.trips());
+    trips.add(feederTrip);
+    Timetable published = base.withTripsAndDuties(trips, List.of(trunk, feeder));
+    Fixture fixture = fixture(published);
+    fixture.manager.setFullConsists(
+        route -> ROUTE.equals(route) ? Optional.of("kiha+kiha") : Optional.empty());
+
+    List<SpawnTicket> tickets = fixture.pollAll();
+    assertEquals(Optional.of("kiha+kiha"), tickets.get(0).consist(), "回程支线没车：出库票出整列");
+    assertEquals(Optional.of("kiha+kiha"), tickets.get(1).consist(), "首班票同样");
+    assertEquals(Optional.of("kiha"), tickets.get(2).consist(), "续班票照交路车型");
+
+    Fixture coming = fixture(published);
+    coming.manager.setFullConsists(
+        route -> ROUTE.equals(route) ? Optional.of("kiha+kiha") : Optional.empty());
+    coming
+        .service()
+        .bindDuty(
+            "feeder-train",
+            new TimetableService.DutyKey(
+                published.id(), feederId, java.time.LocalDate.of(2026, 3, 2)),
+            "test");
+    assertEquals(Optional.of("kiha"), coming.pollAll().get(0).consist(), "回程支线有车：出联挂之前的那一段");
+  }
+
   private static Timetable withDutyConsist(Timetable source, String consist) {
     List<VehicleDuty> duties = new ArrayList<>();
     for (VehicleDuty duty : source.duties()) {
@@ -953,6 +1412,21 @@ class TimetableSpawnManagerTest {
     return source.withTripsAndDuties(source.trips(), duties);
   }
 
+  private static Timetable passengerCreateTimetable() {
+    Timetable table = timetable();
+    List<TimetableTrip> rows = new ArrayList<>(table.trips());
+    rows.add(
+        new TimetableTrip(
+            UUID.randomUUID(),
+            TIMETABLE,
+            CREATE_ROUTE,
+            2,
+            "CRT-001",
+            8 * 3600 - 180,
+            Optional.of(DUTY)));
+    return table.withTripsAndDuties(rows, table.duties());
+  }
+
   private static Fixture fixture() {
     return fixture(timetable());
   }
@@ -963,7 +1437,7 @@ class TimetableSpawnManagerTest {
 
   private static Fixture fixture(Timetable published, SpawnPlan spawnPlan) {
     List<String> logs = new ArrayList<>();
-    TimetableService service = new TimetableService(Instant::now, logs::add);
+    TimetableService service = new TimetableService(() -> DAY.plusSeconds(8 * 3600), logs::add);
     service.applySettings(
         new TimetableService.Settings(
             true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofHours(24)));

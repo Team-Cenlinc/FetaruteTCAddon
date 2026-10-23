@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.api;
 import java.util.Optional;
 import java.util.function.LongSupplier;
 import org.bukkit.plugin.Plugin;
+import org.fetarute.fetaruteTCAddon.api.call.CallApi;
 import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
 import org.fetarute.fetaruteTCAddon.api.drive.GuardApi;
 import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
@@ -82,6 +83,7 @@ public final class FetaruteApi {
   private final LongSupplier dataRevision;
   private volatile DriveApi driveApi = DriveApi.UNAVAILABLE;
   private volatile GuardApi guardApi = GuardApi.UNAVAILABLE;
+  private volatile CallApi callApi = CallApi.UNAVAILABLE;
 
   private FetaruteApi(
       GraphApi graphApi,
@@ -241,6 +243,13 @@ public final class FetaruteApi {
   }
 
   /**
+   * 叫车 API（1.14.0）：车站上能叫车的方向与此刻能不能叫、叫车单。叫车功能未加载时返回占位实现，{@link CallApi#enabled()} 为 {@code false}。
+   */
+  public CallApi call() {
+    return callApi;
+  }
+
+  /**
    * 当前 API 版本。
    *
    * @return 语义版本字符串
@@ -371,6 +380,14 @@ public final class FetaruteApi {
     FetaruteApi current = instance;
     if (current != null) {
       current.guardApi = guard == null ? GuardApi.UNAVAILABLE : guard;
+    }
+  }
+
+  /** 接上叫车 API（仅供 {@code FetaruteTCAddon} 调用）；传 {@code null} 恢复占位实现。 */
+  public static void installCall(CallApi call) {
+    FetaruteApi current = instance;
+    if (current != null) {
+      current.callApi = call == null ? CallApi.UNAVAILABLE : call;
     }
   }
 

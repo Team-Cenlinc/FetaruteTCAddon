@@ -123,7 +123,7 @@ class DynamicPlatformPhysicalOrderTest {
    * <p>这正是修复前骨架里的时序：后车 tick 0 订走 2 道，前车随后才登记等待。
    */
   @Test
-  void reservationTakenFirstByTheTrainBehindIsRevokedOnceTheTrainAheadWaits() {
+  void rearYieldsReservationButKeepsMaterializedTargetWhenTheFrontWaits() {
     occupyB1();
     positions.put("front", W);
     positions.put("rear", X1);
@@ -132,7 +132,11 @@ class DynamicPlatformPhysicalOrderTest {
 
     waits.register("front", ROUTE_ID, 0, 1, stationResources(), W);
 
-    assertBlocked(resolve("rear"));
+    var blocked = resolve("rear");
+    assertTrue(blocked.isBlocked());
+    assertEquals("materialized-platform-unavailable", blocked.reason());
+    assertEquals(java.util.Optional.of(B2), allocator.getAllocation("rear", ROUTE_ID, 0));
+    allocator.recordMaterialization("rear", route, 1, B2);
     assertEquals(B2, selected(resolve("front")));
   }
 

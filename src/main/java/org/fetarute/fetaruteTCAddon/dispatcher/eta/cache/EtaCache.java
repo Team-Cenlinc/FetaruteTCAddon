@@ -39,7 +39,8 @@ public final class EtaCache<K, V> {
     }
     Instant t = now != null ? now : Instant.now();
     if (Duration.between(e.createdAt, t).compareTo(ttl) > 0) {
-      map.remove(key);
+      // 只删读到的这一条：别的线程刚写进去的新条目不动
+      map.remove(key, e);
       return Optional.empty();
     }
     return Optional.ofNullable(e.value);

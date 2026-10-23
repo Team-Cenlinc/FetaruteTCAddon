@@ -14,14 +14,16 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 public final class RouteStopDirectives {
 
   private static final Pattern ACTION_PREFIX_PATTERN =
-      Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
+      Pattern.compile(
+          "^(CHANGE|DYNAMIC|ACTION|POWER|DECP|COPL|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
   private RouteStopDirectives() {}
 
   /**
    * 读取指定前缀的指令内容。
    *
-   * <p>备注可有多行，取第一条前缀匹配（不区分大小写）且内容非空的指令；内容取前缀（及其后的冒号）之后、第一个空格之前的部分。
+   * <p>备注可有多行，取第一条前缀匹配（不区分大小写）且内容非空的指令；内容取前缀（及其后的冒号）之后、第一个空格之前的部分。 DYNAMIC 与选台、编表读同一段（{@link
+   * DynamicStopMatcher#parseDynamicSpec(RouteStop)}）：可以跟在 CRET/DSTY/STOP 之后，选择器内的空白不截断。
    *
    * @param stop 停靠点
    * @param prefix 指令前缀，如 CHANGE/DYNAMIC/DSTY
@@ -30,6 +32,9 @@ public final class RouteStopDirectives {
   public static Optional<String> target(RouteStop stop, String prefix) {
     if (stop == null || prefix == null || prefix.isBlank() || stop.notes().isEmpty()) {
       return Optional.empty();
+    }
+    if ("DYNAMIC".equalsIgnoreCase(prefix.trim())) {
+      return DynamicStopMatcher.directiveTarget(stop);
     }
     String raw = stop.notes().orElse("");
     if (raw.isBlank()) {

@@ -428,6 +428,162 @@ class TrainHealthMonitorTest {
         alerts::toString);
   }
 
+  /** 终点待命的车停着等下一趟发车，停几分钟是计划内的：不发停滞告警，不派恢复动作（刷新信号、解锁、重下硬停车），不进停滞清车，也不走互卡销毁兜底与它的跳过诊断。 */
+  @Test
+  void layoverTrainWaitingPastEveryThresholdIsLeftAlone() {
+    parkedTrain("parked", true);
+    configureFastCleanup();
+    monitor.setDeadlockMinStopDuration(Duration.ofSeconds(2));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(10));
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    for (int i = 0; i <= 30; i++) {
+      TrainHealthMonitor.CheckResult result =
+          monitor.check(Set.of("parked"), t0.plusSeconds(10L * i));
+      assertEquals(0, result.progressStuckCount(), "t+" + (10 * i));
+      assertEquals(0, result.recoveryDispatchedCount(), "t+" + (10 * i));
+    }
+
+    assertTrue(alerts.isEmpty(), alerts::toString);
+    verifyNoRecoveryFor("parked");
+    assertTrue(
+        debugLogs.stream().noneMatch(line -> line.startsWith("DEADLOCK_DESTROY_SKIPPED")),
+        debugLogs::toString);
+    assertTrue(
+        debugLogs.stream().noneMatch(line -> line.startsWith("SMART_RECOVERY_ACTION_ORDER")),
+        debugLogs::toString);
+  }
+
+  /** 同样停着、但不在终点待命的车照常告警并派恢复动作：豁免只认待命登记。 */
+  @Test
+  void sameStopOutsideLayoverStillAlertsAndRecovers() {
+    parkedTrain("parked", false);
+    configureFastCleanup();
+    monitor.setDeadlockMinStopDuration(Duration.ofSeconds(2));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(10));
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    int progressStuck = 0;
+    for (int i = 0; i <= 30; i++) {
+      progressStuck +=
+          monitor.check(Set.of("parked"), t0.plusSeconds(10L * i)).progressStuckCount();
+    }
+
+    assertTrue(progressStuck > 0);
+    assertTrue(
+        alerts.stream()
+            .anyMatch(
+                alert ->
+                    alert.type() == HealthAlert.AlertType.PROGRESS_STUCK
+                        && alert.trainName().equals("parked")),
+        alerts::toString);
+    verify(dispatchService, atLeastOnce()).refreshSignalByName("parked");
+    assertTrue(
+        debugLogs.stream().anyMatch(line -> line.startsWith("DEADLOCK_DESTROY_SKIPPED")),
+        debugLogs::toString);
+  }
+
+  /** 待命期间时钟锚定到当前：开出（不再登记待命）后又停住，停滞从开出那一刻起算，不把待命的几分钟算进去。 */
+  @Test
+  void leavingLayoverStartsTheProgressClockFromZero() {
+    AtomicBoolean layover = new AtomicBoolean(true);
+    parkedTrain("parked", true);
+    when(dispatchService.deadlockTrainContext("parked"))
+        .thenAnswer(invocation -> Optional.of(layoverContext("parked", layover.get())));
+    monitor.setTrainCleanupEnabled(true);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(30));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(30));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i <= 30; i++) {
+      monitor.check(Set.of("parked"), t0.plusSeconds(10L * i));
+    }
+
+    layover.set(false);
+    TrainHealthMonitor.CheckResult early = monitor.check(Set.of("parked"), t0.plusSeconds(320));
+    TrainHealthMonitor.CheckResult late = monitor.check(Set.of("parked"), t0.plusSeconds(340));
+
+    assertEquals(0, early.progressStuckCount(), "开出 20 秒，未到 30 秒阈值");
+    assertEquals(1, late.progressStuckCount(), "开出 40 秒仍未推进，照常判停滞");
+  }
+
+  /** 排在终点待命车后面的车照常告警，点名在等待命车；待命车自己不告警、不派恢复动作。 */
+  @Test
+  void followerOfALayoverTrainIsStillReportedWhileTheLayoverTrainIsNot() {
+    stuckWaiting("waiting", "parked");
+    parkedTrain("parked", true);
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i < 4; i++) {
+      monitor.check(Set.of("waiting", "parked"), t0.plusSeconds(10L * i));
+    }
+    alertBus.clear();
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+
+    monitor.check(Set.of("waiting", "parked"), t0.plusSeconds(40));
+
+    assertTrue(
+        alerts.stream()
+            .anyMatch(
+                alert ->
+                    alert.trainName().equals("waiting")
+                        && alert.message().contains("清车=等待 parked(终点待命)")),
+        alerts::toString);
+    assertTrue(
+        alerts.stream().noneMatch(alert -> alert.trainName().equals("parked")), alerts::toString);
+    verifyNoRecoveryFor("parked");
+  }
+
+  /** 停在站里、信号 STOP、无阻挡快照的车；{@code layover} 决定它是否登记了终点待命。 */
+  private void parkedTrain(String trainName, boolean layover) {
+    when(dwellRegistry.remainingSeconds(trainName)).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState(trainName))
+        .thenReturn(Optional.of(state(trainName, 9, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext(trainName))
+        .thenReturn(Optional.of(layoverContext(trainName, layover)));
+  }
+
+  private RuntimeDispatchService.DeadlockTrainContext layoverContext(
+      String trainName, boolean layover) {
+    return new RuntimeDispatchService.DeadlockTrainContext(
+        trainName,
+        9,
+        10,
+        SignalAspect.STOP,
+        0.0,
+        RouteOperationType.OPERATION,
+        0,
+        false,
+        false,
+        layover,
+        false,
+        true,
+        false,
+        false);
+  }
+
+  private void verifyNoRecoveryFor(String trainName) {
+    verify(dispatchService, never()).refreshSignalByName(trainName);
+    verify(dispatchService, never()).reapplyHardStopByName(eq(trainName), anyString());
+    verify(dispatchService, never()).clearSelfOwnedSingleDirectionMismatchByName(trainName);
+    verify(dispatchService, never()).reissueDestinationByName(trainName);
+    verify(dispatchService, never()).forceRelaunchByName(trainName);
+    verify(dispatchService, never())
+        .applySmartDrainUnlock(argThat(input -> input != null && trainName.equals(input.train())));
+    verify(dispatchService, never())
+        .applySmartSelfOwnedStaleRetainRelease(
+            argThat(input -> input != null && trainName.equals(input.train())));
+    verify(dispatchService, never())
+        .reviewStuckCleanupCandidate(
+            eq(trainName), anyInt(), anyBoolean(), any(), any(), any(), any());
+    verify(dispatchService, never()).destroyTrainByName(eq(trainName), anyString());
+  }
+
   /** 挡路的名字不在存活列车里：车已不在、占用还挂着。清车不动排队的车，告警点名残留占用。 */
   @Test
   void aTrainBlockedByALeftoverClaimIsReportedButNotCleaned() {

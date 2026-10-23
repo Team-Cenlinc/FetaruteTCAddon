@@ -31,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
@@ -194,7 +195,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   public static final String TAG_CALL_TURNBACK = "FTA_CALL_TURNBACK";
 
   /** 在车库等计划时刻的提前出车写在列车上的标签：{@code 放行时刻(epoch 秒)[;交路意图]}。门控与扣车记录只在内存里，重启或重载后按它重新扣住、 重新绑回交路。 */
-  static final String TAG_EARLY_SPAWN_HOLD = "FTA_EARLY_HOLD";
+  public static final String TAG_EARLY_SPAWN_HOLD = "FTA_EARLY_HOLD";
 
   /** 重启后找回提前出车的扫描间隔。 */
   private static final Duration EARLY_SPAWN_RESTORE_SCAN = Duration.ofSeconds(10);
@@ -237,6 +238,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private volatile EarlySpawnBinding earlySpawnBinding = EarlySpawnBinding.NONE;
+
+  /** 出库去联挂的主干：要挂的回程支线车已经停在联挂站、占着出库要走的资源时，只有那辆车不挡它出库，出车后扣在车库股道上等联挂进站。 默认没有。 */
+  public interface DepotTrunkHook {
+    /** 没有出库联挂。 */
+    DepotTrunkHook NONE =
+        new DepotTrunkHook() {
+          @Override
+          public void admit(SpawnTicket ticket, String trainName) {}
+
+          @Override
+          public void spawned(String trainName) {}
+        };
+
+    /** 出库预检之前：这张票开的是回程支线车正等着并进的那一班主干时登记下来，那辆车的占用不挡它出库。 */
+    void admit(SpawnTicket ticket, String trainName);
+
+    /** 出车拿到占用以后、第一拍信号之前：占用和回程支线车有重叠时扣在车库股道上。 */
+    void spawned(String trainName);
+  }
+
+  private volatile DepotTrunkHook depotTrunkHook = DepotTrunkHook.NONE;
 
   /** 当前所有已加载的列车，用于重启后找回在车库等候的提前出车。默认没有。 */
   private volatile java.util.function.Supplier<? extends java.util.Collection<RuntimeTrainHandle>>
@@ -636,11 +658,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
 
+    // 车型按方案分流在挑回库线路时已经做过（ReclaimManager）：这里不再拒，否则没有一条回库线路接这个车型的车会一直搁在线上
     LayoverRegistry.LayoverCandidate candidate = candidateOpt.get();
-    if (!acceptsConsist(ticket.routeId(), candidate)) {
-      debugLogger.accept("强制分配跳过: 车型不在线路的编组方案里 train=" + trainName + " route=" + ticket.routeId());
-      return false;
-    }
     SpawnControl.Lease lease =
         tryAcquireSpawnControlForLayover(
                 Optional.ofNullable(provider),
@@ -949,7 +968,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /** 回收派 RETURN：车库只收方案里的车型。裁决出错时放行，不让车滞留在终点。 */
-  private boolean acceptsConsist(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
+  @Override
+  public boolean acceptsConsist(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
     try {
       return consistArbiter.acceptsForRoute(routeId, candidate);
     } catch (RuntimeException failure) {
@@ -1890,14 +1910,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private java.util.OptionalLong resolveLayoverFallbackTimeoutSeconds(SpawnService service) {
-    if (service == null || service.baseHeadway() == null) {
+    if (service == null || service.baseHeadway().isEmpty()) {
       return java.util.OptionalLong.empty();
     }
     double multiplier = configManager.current().spawnSettings().layoverFallbackMultiplier();
     if (multiplier <= 0D) {
       return java.util.OptionalLong.empty();
     }
-    long baselineSeconds = Math.max(1L, service.baseHeadway().getSeconds());
+    long baselineSeconds = Math.max(1L, service.baseHeadway().orElseThrow().getSeconds());
     long timeoutSeconds = (long) Math.ceil(baselineSeconds * multiplier);
     if (timeoutSeconds <= 0L) {
       return java.util.OptionalLong.empty();
@@ -2527,9 +2547,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   private static int estimateRouteTargetTrains(
       SpawnService service, Route routeEntity, RouteDefinition route) {
+    if (service != null && service.baseHeadway().isEmpty()) {
+      return 0;
+    }
     long headwaySeconds =
-        service != null && service.baseHeadway() != null
-            ? Math.max(1L, service.baseHeadway().getSeconds())
+        service != null && service.baseHeadway().isPresent()
+            ? Math.max(1L, service.baseHeadway().orElseThrow().getSeconds())
             : 60L;
     long runtimeSeconds =
         routeEntity != null
@@ -2649,24 +2672,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private static Optional<String> parseDynamicDirectionKey(String dynamicSpec) {
-    if (dynamicSpec == null || dynamicSpec.isBlank()) {
-      return Optional.empty();
-    }
-    if (!dynamicSpec.startsWith("dynamic:")) {
-      return Optional.empty();
-    }
-    String rest = dynamicSpec.substring("dynamic:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3) {
-      return Optional.empty();
-    }
-    String operator = parts[0].trim();
-    String type = parts[1].trim();
-    String name = parts[2].trim();
-    if (operator.isBlank() || type.isBlank() || name.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.of(operator + ":" + type + ":" + name);
+    return DynamicStopMatcher.parseDynamicSpec(dynamicSpec)
+        .map(DynamicStopMatcher.DynamicSpec::toTerminalKey);
   }
 
   /** 定期清理长时间未更新的拥挤门控状态，避免内存累积。 */
@@ -3126,6 +3133,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.depotSpawnHold = hold == null ? (ticket, trainName) -> false : hold;
   }
 
+  /** 注册出库去联挂的主干的登记与扣车（见 {@link DepotTrunkHook}）。传入 {@code null} 恢复"没有"。 */
+  public void setDepotTrunkHook(DepotTrunkHook hook) {
+    this.depotTrunkHook = hook == null ? DepotTrunkHook.NONE : hook;
+  }
+
   /** 注册提前出车与交路的绑定（见 {@link EarlySpawnBinding}）。传入 {@code null} 恢复"不记、不绑"。 */
   public void setEarlySpawnBinding(EarlySpawnBinding binding) {
     this.earlySpawnBinding = binding == null ? EarlySpawnBinding.NONE : binding;
@@ -3152,6 +3164,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
               + trainName
               + " error="
               + failure.getMessage());
+    }
+  }
+
+  private void admitDepotTrunk(SpawnTicket ticket, String trainName) {
+    try {
+      depotTrunkHook.admit(ticket, trainName);
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "出库联挂登记回调异常: ticket="
+              + ticket.id()
+              + " train="
+              + trainName
+              + " error="
+              + failure.getMessage());
+    }
+  }
+
+  private void holdDepotTrunk(String trainName) {
+    try {
+      depotTrunkHook.spawned(trainName);
+    } catch (RuntimeException failure) {
+      debugLogger.accept("出库联挂扣车回调异常: train=" + trainName + " error=" + failure.getMessage());
     }
   }
 
@@ -4020,6 +4054,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       deferWithoutAttempt(effectiveTicket, now, "materialized-rollback-identity-live");
       return Optional.empty();
     }
+    if (entry.isEmpty()) {
+      admitDepotTrunk(effectiveTicket, trainName);
+    }
 
     Optional<java.util.UUID> worldIdOpt =
         entry.isPresent()
@@ -4341,6 +4378,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
       holdDepotSpawnIfRequested(context.ticket(), context.trainName());
       holdEarlySpawnUntilDue(context.ticket(), context.trainName(), train, context.now());
+      holdDepotTrunk(context.trainName());
       if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
           runtimeDispatchService,
           train,
@@ -5016,13 +5054,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private static boolean isDynamicDepotSpec(String dynamicSpec) {
-    if (dynamicSpec == null
-        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
-      return false;
-    }
-    String rest = dynamicSpec.substring("DYNAMIC:".length());
-    String[] parts = rest.split(":", 4);
-    return parts.length >= 2 && "D".equalsIgnoreCase(parts[1]);
+    return SpawnDirectiveParser.dynamicDepot(dynamicSpec).isPresent();
   }
 
   /**
@@ -5802,85 +5834,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * 两种常用写法。后者需要按轨道号过滤，否则负载统计与实际发车会把同名 depot 的其它股道错误纳入候选。
    */
   private static boolean matchesDynamicDepotNode(String dynamicSpec, String nodeId) {
-    if (dynamicSpec == null
-        || nodeId == null
-        || !SpawnDirectiveParser.isDynamicTarget(dynamicSpec)) {
-      return false;
-    }
-    String rest = dynamicSpec.substring("DYNAMIC:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3 || !"D".equalsIgnoreCase(parts[1].trim())) {
-      return false;
-    }
-    String prefix = parts[0].trim() + ":" + parts[1].trim() + ":" + parts[2].trim() + ":";
-    if (!nodeId.toUpperCase(Locale.ROOT).startsWith(prefix.toUpperCase(Locale.ROOT))) {
-      return false;
-    }
-    if (parts.length < 4 || parts[3].isBlank()) {
-      return true;
-    }
-    Optional<TrackRange> range = parseTrackRange(parts[3]);
-    if (range.isEmpty()) {
-      return true;
-    }
-    int track = extractTrackNumber(nodeId);
-    return track >= range.get().from() && track <= range.get().to();
+    return SpawnDirectiveParser.dynamicDepot(dynamicSpec)
+        .filter(spec -> DynamicStopMatcher.matches(nodeId, spec))
+        .isPresent();
   }
-
-  /**
-   * 解析 DYNAMIC 轨道范围。
-   *
-   * <p>当前仅支持单股道（{@code 2}）和闭区间（{@code [1:3]}）。解析失败返回 empty，上层会按“无范围限制” 处理，以兼容历史上未写范围的 DYNAMIC
-   * depot。
-   */
-  private static Optional<TrackRange> parseTrackRange(String rawRange) {
-    if (rawRange == null || rawRange.isBlank()) {
-      return Optional.empty();
-    }
-    String trimmed = rawRange.trim();
-    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-      String inner = trimmed.substring(1, trimmed.length() - 1);
-      int colon = inner.indexOf(':');
-      if (colon > 0) {
-        try {
-          int from = Integer.parseInt(inner.substring(0, colon).trim());
-          int to = Integer.parseInt(inner.substring(colon + 1).trim());
-          return Optional.of(new TrackRange(Math.min(from, to), Math.max(from, to)));
-        } catch (NumberFormatException ignored) {
-          return Optional.empty();
-        }
-      }
-    }
-    try {
-      int track = Integer.parseInt(trimmed);
-      return Optional.of(new TrackRange(track, track));
-    } catch (NumberFormatException ignored) {
-      return Optional.empty();
-    }
-  }
-
-  /**
-   * 从 NodeId 最后一段提取轨道号。
-   *
-   * <p>Depot 行为节点的轨道号位于最后一段；若传入的是无法识别的咽喉/自定义节点，则返回 {@link Integer#MAX_VALUE}， 使带范围的 DYNAMIC 匹配自然失败。
-   */
-  private static int extractTrackNumber(String nodeId) {
-    if (nodeId == null || nodeId.isBlank()) {
-      return Integer.MAX_VALUE;
-    }
-    int lastColon = nodeId.lastIndexOf(':');
-    if (lastColon < 0 || lastColon >= nodeId.length() - 1) {
-      return Integer.MAX_VALUE;
-    }
-    try {
-      return Integer.parseInt(nodeId.substring(lastColon + 1).trim());
-    } catch (NumberFormatException ignored) {
-      return Integer.MAX_VALUE;
-    }
-  }
-
-  /** DYNAMIC depot 轨道号闭区间。 */
-  private record TrackRange(int from, int to) {}
 
   /** 本轮执行排序使用的 depot 负载候选。 */
   private record DepotExecutionCandidate(SpawnTicket ticket, int originalIndex, double loadScore) {}
@@ -6061,14 +6018,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   private static Optional<String> resolveDepotSpec(
       SpawnService service, Optional<String> depotOverride) {
-    if (service == null) {
-      return Optional.empty();
-    }
-    String depotSpec = depotOverride.filter(s -> !s.isBlank()).orElseGet(service::depotNodeId);
-    if (depotSpec == null || depotSpec.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.of(depotSpec.trim());
+    return service == null
+        ? Optional.empty()
+        : SpawnDirectiveParser.effectiveDepotSpec(service.depotNodeId(), depotOverride);
   }
 
   /**
@@ -6394,20 +6346,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return Optional.of(candidates.get(Math.floorMod(cursor, candidates.size())));
   }
 
+  /** DYNAMIC 车库写法在牌子注册表里匹配的节点，按股道号数字排序（与出车器、运行时选台一致）。 */
   private List<SignNodeRegistry.SignNodeInfo> findDynamicDepotNodeInfos(String dynamicSpec) {
-    if (dynamicSpec == null
-        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
-      return List.of();
-    }
-    String rest = dynamicSpec.substring("DYNAMIC:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3) {
-      return List.of();
-    }
-    String operatorCode = parts[0].trim();
-    String nodeType = parts[1].trim();
-    String nodeName = parts[2].trim();
-    if (operatorCode.isEmpty() || nodeType.isEmpty() || nodeName.isEmpty()) {
+    Optional<DynamicStopMatcher.DynamicSpec> spec = SpawnDirectiveParser.dynamicDepot(dynamicSpec);
+    if (spec.isEmpty()) {
       return List.of();
     }
     Map<String, SignNodeRegistry.SignNodeInfo> infos = signNodeRegistry.snapshotInfos();
@@ -6416,14 +6358,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     return infos.values().stream()
         .filter(info -> info != null && info.definition() != null)
-        .filter(
-            info -> {
-              String nodeIdValue = info.definition().nodeId().value();
-              return matchesDynamicDepotNode(dynamicSpec, nodeIdValue);
-            })
+        .filter(info -> DynamicStopMatcher.matches(info.definition().nodeId(), spec.get()))
         .sorted(
             Comparator.comparing(
-                info -> info.definition().nodeId().value(), String.CASE_INSENSITIVE_ORDER))
+                (SignNodeRegistry.SignNodeInfo info) -> info.definition().nodeId(),
+                DynamicStopMatcher.TRACK_ORDER))
         .toList();
   }
 }

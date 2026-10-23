@@ -4,19 +4,34 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
+import com.bergerkiller.bukkit.tc.controller.components.RailPath;
+import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
+import com.bergerkiller.bukkit.tc.controller.components.RailState;
+import com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.NodeToNodeEdgeExplorer.WalkerStep;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
 
 final class NodeToNodeEdgeExplorerTest {
 
-  private static final NodeId START = NodeId.of("SURC:S:CHT:3");
-  private static final NodeId OTHER = NodeId.of("SWITCHER:Towny:-141:90:367");
+  private static final NodeId START = NodeId.of("OP:S:A:3");
+  private static final NodeId OTHER = NodeId.of("SWITCHER:world:-141:90:367");
   private static final double LIMIT = 4096.0;
 
   @Test
@@ -95,5 +110,96 @@ final class NodeToNodeEdgeExplorerTest {
         new RailGraphBuildOutcome(result, RailGraphBuildCompletion.COMPLETE, null, directions);
     directions.clear();
     assertEquals(1, outcome.unterminatedDirections().size());
+  }
+
+  @Test
+  void zeroLengthWarningNamesBothNodesAndAnchors() {
+    String warning =
+        NodeToNodeEdgeExplorer.zeroLengthWarning(
+            NodeId.of("SWITCHER:world:-673:41:735"),
+            new RailBlockPos(-673, 41, 735),
+            NodeId.of("OP:S:B:2"),
+            null);
+    assertTrue(warning.contains("SWITCHER:world:-673:41:735 (-673, 41, 735)"));
+    assertTrue(warning.contains("OP:S:B:2 (?)"));
+  }
+
+  @Test
+  void adjacentRailsAreOneBlockApartEvenWhenWalkerStartsAtJunctionBoundary() throws Exception {
+    assertZeroWalkerDistanceEdge(1, 0);
+  }
+
+  @Test
+  void differentNodesSharingAnAnchorKeepTheirEdgeAndWarnOnce() throws Exception {
+    assertZeroWalkerDistanceEdge(0, 1);
+  }
+
+  private static void assertZeroWalkerDistanceEdge(int targetX, int expectedWarnings)
+      throws Exception {
+    World world = mock(World.class);
+    Block start = mock(Block.class);
+    Block target = mock(Block.class);
+    when(target.getX()).thenReturn(targetX);
+    when(world.getBlockAt(0, 0, 0)).thenReturn(start);
+    RailPiece piece = mock(RailPiece.class);
+    when(piece.getJunctions()).thenReturn(List.of());
+    RailState state = mock(RailState.class);
+    when(state.clone()).thenReturn(state);
+    when(state.position()).thenReturn(new RailPath.Position());
+    when(state.railBlock()).thenReturn(start);
+    RailPath path = RailPath.create(new Vector(0.2, 0.5, 0.5), new Vector(0.8, 0.5, 0.5));
+    List<String> warnings = new ArrayList<>();
+    NodeToNodeEdgeExplorer explorer =
+        new NodeToNodeEdgeExplorer(
+            world,
+            Map.of(new RailBlockPos(targetX, 0, 0), OTHER),
+            Set.of(),
+            EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
+            ignored -> {},
+            warnings::add);
+    explorer.addNode(START, Set.of(new RailBlockPos(0, 0, 0)));
+
+    try (MockedStatic<RailPiece> pieces = mockStatic(RailPiece.class);
+        MockedStatic<RailState> states = mockStatic(RailState.class);
+        MockedConstruction<TrackWalkingPoint> walkers =
+            mockConstruction(
+                TrackWalkingPoint.class,
+                (walker, context) -> {
+                  // TC 的行走状态为公开 final 字段；测试替身不运行实际世界轨道初始化。
+                  var stateField = TrackWalkingPoint.class.getField("state");
+                  assertTrue(stateField.trySetAccessible());
+                  stateField.set(walker, state);
+                  walker.currentRailPath = path;
+                  when(walker.moveFull())
+                      .thenAnswer(
+                          ignored -> {
+                            when(state.railBlock()).thenReturn(target);
+                            return true;
+                          });
+                })) {
+      pieces.when(() -> RailPiece.create(start)).thenReturn(piece);
+      states.when(() -> RailState.getSpawnState(piece)).thenReturn(state);
+      explorer.step(Long.MAX_VALUE, 10);
+    }
+
+    var edge = explorer.getExploredEdges().get(EdgeId.undirected(START, OTHER));
+    assertEquals(1, edge.lengthBlocks());
+    assertEquals(
+        targetX == 0
+            ? Set.of(new RailFootprintCell(0, 0, 0))
+            : Set.of(new RailFootprintCell(0, 0, 0), new RailFootprintCell(1, 0, 0)),
+        edge.footprint().cells());
+    assertTrue(edge.footprint().complete());
+    assertEquals(expectedWarnings, warnings.size(), "相邻轨道不告警；真实共享锚点两个方向只告警一次");
+  }
+
+  /** 步数只在几何距离不足一格时兜底：原版斜线轨道每块只有约 0.707 格，按步数取大值会把斜线区间放大约 41%。 */
+  @Test
+  void railStepsOnlyFloorASubBlockDistance() {
+    assertEquals(141.4, NodeToNodeEdgeExplorer.measuredDistance(141.4, 200), 1.0e-9, "斜线按几何长度");
+    assertEquals(35.0, NodeToNodeEdgeExplorer.measuredDistance(35.0, 35), 1.0e-9);
+    assertEquals(1.0, NodeToNodeEdgeExplorer.measuredDistance(0.0, 1), 1.0e-9, "从接点出发跨进相邻轨道算一格");
+    assertEquals(1.0, NodeToNodeEdgeExplorer.measuredDistance(0.3, 2), 1.0e-9);
+    assertEquals(0.0, NodeToNodeEdgeExplorer.measuredDistance(0.0, 0), 1.0e-9);
   }
 }

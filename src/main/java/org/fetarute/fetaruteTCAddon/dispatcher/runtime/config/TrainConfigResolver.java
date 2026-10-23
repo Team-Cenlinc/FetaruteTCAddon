@@ -43,8 +43,14 @@ public final class TrainConfigResolver {
   /** 动拖比，如 {@code 4M2T} 或 {@code 0.67}；用于手动驾驶。 */
   public static final String TAG_TRAIN_MT = "FTA_TRAIN_MT";
 
-  /** 受电方式：{@code ptg5} / {@code ptg6} 受电弓、{@code shoe} 集电靴、{@code diesel} 内燃；用于手动驾驶的启动流程。 */
+  /**
+   * 受电方式：{@code ptg5} / {@code ptg6} 受电弓、{@code shoe} 集电靴、{@code diesel} 内燃、{@code supercap} 超级电容。
+   * 写多个（逗号分隔）即多模车，第一个是默认模式，按交路备注 {@code POWER} 切换。
+   */
   public static final String TAG_TRAIN_POWER = "FTA_TRAIN_POWER";
+
+  /** 多模车当前用的受电方式（{@link #TAG_TRAIN_POWER} 里的一个）；换模时改写，随车走。 */
+  public static final String TAG_TRAIN_POWER_ACTIVE = "FTA_TRAIN_POWER_ACTIVE";
 
   /** 最高速度上限（格/秒）：手动驾驶的动力学上限，也是自动控车目标速度的上限（编组方案按车型写入）。 */
   public static final String TAG_TRAIN_MAX_BPS = "FTA_TRAIN_MAX_BPS";

@@ -2,7 +2,10 @@ package org.fetarute.fetaruteTCAddon.display.pids.announce;
 
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Function;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -15,6 +18,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsRow;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsText;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
 
 /**
  * 站台广播的文字。文案在语言文件 {@code pids.announce.*}，站名、线路色与站台屏同一来源（{@link PidsDirectory}）。
@@ -33,6 +38,7 @@ final class PidsAnnouncementText {
   private final PidsDirectory directory;
   private final Function<String, String> text;
   private final ZoneId zone;
+  private final PidsVocabulary vocabulary;
 
   /**
    * @param directory 名称目录
@@ -43,6 +49,7 @@ final class PidsAnnouncementText {
     this.directory = Objects.requireNonNull(directory, "directory");
     this.text = Objects.requireNonNull(text, "text");
     this.zone = Objects.requireNonNull(zone, "zone");
+    this.vocabulary = new PidsVocabulary(text);
   }
 
   /** 一条广播的文字。 */
@@ -58,8 +65,36 @@ final class PidsAnnouncementText {
             Placeholder.unparsed(
                 "minutes", String.valueOf(Lateness.minutes(row.delaySeconds().orElse(0L)))),
             Placeholder.unparsed("new", row.platform()),
-            Placeholder.unparsed("from", announcement.previousPlatform().orElse("-")));
+            Placeholder.unparsed("from", announcement.previousPlatform().orElse("-")),
+            Placeholder.unparsed("parts", divisionParts(row)));
     return MINI_MESSAGE.deserialize(text.apply(key(announcement)), resolver);
+  }
+
+  /** 在本站分行时两段各去哪里（“前 4 节开往南渡，后 4 节本站止”），与站台屏分行页同一说法；不在本站分行时为空。 */
+  private String divisionParts(PidsRow row) {
+    if (!row.dividesHere()) {
+      return "";
+    }
+    List<PidsRow.Division.Part> parts = row.dividing().orElseThrow().parts();
+    List<String> out = new ArrayList<>(parts.size());
+    for (int i = 0; i < parts.size(); i++) {
+      PidsRow.Division.Part part = parts.get(i);
+      out.add(
+          vocabulary
+              .divisionSegment(
+                  i == 0,
+                  part.cars(),
+                  part.destinationId()
+                      .flatMap(directory::stationName)
+                      .map(PidsAnnouncementText::compact),
+                  Optional.empty())
+              .primary());
+    }
+    return String.join("，", out);
+  }
+
+  private static PidsView.Names compact(PidsView.Names names) {
+    return new PidsView.Names(PidsText.compactSeparators(names.primary()), names.secondary());
   }
 
   /** 聊天广播超出上限时合成的一条。 */
@@ -77,6 +112,12 @@ final class PidsAnnouncementText {
       case ARRIVING -> {
         if (row.outOfService()) {
           yield "pids.announce.arriving-out-of-service";
+        }
+        if (row.dividesHere()) {
+          yield "pids.announce.arriving-divides-here";
+        }
+        if (row.joiningHere().isPresent()) {
+          yield "pids.announce.arriving-joins-here";
         }
         yield row.terminating() ? "pids.announce.arriving-terminating" : "pids.announce.arriving";
       }

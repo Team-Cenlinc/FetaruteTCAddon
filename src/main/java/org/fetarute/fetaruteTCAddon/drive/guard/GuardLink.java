@@ -102,6 +102,7 @@ public final class GuardLink {
   public void beginStationStop(DriverStationStop next) {
     settle();
     this.stop = Objects.requireNonNull(next, "next");
+    next.markDoorsByGuard();
     this.work = new GuardStopWork(config);
     this.settled = false;
   }

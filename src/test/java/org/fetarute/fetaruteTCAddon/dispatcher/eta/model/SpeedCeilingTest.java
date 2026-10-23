@@ -57,8 +57,8 @@ class SpeedCeilingTest {
   }
 
   /**
-   * 制动两端柔和：刚离开巡航速度时减速度只有 START_FLOOR 倍，贴近末速度时只有 END_FLOOR 倍。从天花板相邻两点反推减速度 {@code (v₁² − v₂²) /
-   * (2Δs)}。
+   * 制动两端柔和：刚离开巡航速度时减速度只有 START_FLOOR 倍，贴近末速度时只有 BRAKE_END_FLOOR 倍。从天花板相邻两点反推减速度 {@code (v₁² − v₂²)
+   * / (2Δs)}。
    */
   @Test
   void brakingIsSoftAtBothEnds() {
@@ -78,7 +78,7 @@ class SpeedCeilingTest {
     double middle = decel(ceiling, (firstBelowCruise + zoneStart) / 2);
 
     assertEquals(SpeedCurve.START_FLOOR, onset, 0.05, "开始制动时的减速度比例");
-    assertEquals(SpeedCurve.END_FLOOR, arrival, 0.02, "降到末速度前的减速度比例");
+    assertEquals(SpeedCurve.BRAKE_END_FLOOR, arrival, 0.02, "降到末速度前的减速度比例");
     assertEquals(1.0, middle, 1e-6, "中段常用制动");
   }
 

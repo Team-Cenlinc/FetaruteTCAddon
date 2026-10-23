@@ -13,7 +13,8 @@ import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
  * 级接着是压缩机、停放制动、制动试验与门旁路，standard 级最后一格是一键启动按钮。
  *
  * <p>第三排第一格是任务卡（调度列车写车次与评分，其余写列车参数）；第三至第六格是 simulation 级的表计与故障显示：主风缸表、制动缸表、
- * 制动管表（仅机车）与故障指示，只显示不操作，standard 级这几格空着。各组之间用灰色玻璃板隔开（{@link #isDivider}）。
+ * 制动管表（仅机车）与故障指示，只显示不操作，standard 级这几格空着；最后三格是多模车的受电方式（车上第 1、2、3 种，单模车是玻璃板）。 各组之间用灰色玻璃板隔开（{@link
+ * #isDivider}）。
  *
  * <p>本类不依赖服务器对象，便于单测。
  */
@@ -23,9 +24,9 @@ public final class MenuLayout {
   public static final int SIZE = 27;
 
   /** 分组之间的玻璃板。 */
-  private static final Set<Integer> DIVIDERS = Set.of(3, 6, 19, 24, 25, 26);
+  private static final Set<Integer> DIVIDERS = Set.of(3, 6, 19);
 
-  /** 材质包里模型键的前缀（命名空间之后）。 */
+  /** 材质包标记里键的前缀（命名空间之后）。 */
   public static final String MODEL_PREFIX = "panel/";
 
   private static final Map<Integer, MenuAction> ACTIONS =
@@ -46,7 +47,10 @@ public final class MenuLayout {
           Map.entry(17, MenuAction.START),
           Map.entry(7, MenuAction.DRIVING_MODE),
           Map.entry(8, MenuAction.END_DRIVING),
-          Map.entry(18, MenuAction.TASK_CARD));
+          Map.entry(18, MenuAction.TASK_CARD),
+          Map.entry(24, MenuAction.POWER_MODE_1),
+          Map.entry(25, MenuAction.POWER_MODE_2),
+          Map.entry(26, MenuAction.POWER_MODE_3));
 
   private static final Map<Integer, MenuIndicator> INDICATORS =
       Map.ofEntries(
@@ -135,7 +139,7 @@ public final class MenuLayout {
           case DOOR_LEFT -> "door_l" + onOff;
           case DOOR_RIGHT -> "door_r" + onOff;
           case KEY -> "key" + onOff;
-          case POWER -> powerKey(supply) + onOff;
+          case POWER, POWER_MODE_1, POWER_MODE_2, POWER_MODE_3 -> powerKey(supply) + onOff;
           case BREAKER -> "breaker" + onOff;
           case AUX -> "aux" + onOff;
           case START -> "start" + onOff;

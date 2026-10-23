@@ -74,7 +74,7 @@ TERM_ARRIVING: <template line>
 AT_LAST_STATION: <template line>
 ```
 
-- 状态：`DEFAULT` / `IDLE` / `AT_LAST_STATION` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `TERM_ARRIVING` / `IN_TRIP` / `OUT_OF_SERVICE`
+- 状态：`DEFAULT` / `IDLE` / `AT_LAST_STATION` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `TERM_ARRIVING` / `IN_TRIP` / `OUT_OF_SERVICE` / `JOIN_ARRIVING` / `AT_JOIN_STATION` / `DIVIDE_ARRIVING` / `AT_DIVIDE_STATION` / `CAR_ENDS_ARRIVING` / `AT_CAR_END`
 - 可选后缀 `_n` 表示轮播顺序（按数字升序轮播）
 - 若模板内没有任何状态行，则保持“整段文本作为单行标题”的兼容行为
 - 若某状态未定义，会优先回退到 `DEFAULT`，再回退到“无前缀模板行”
@@ -86,6 +86,11 @@ AT_LAST_STATION: <template line>
   **只有模板写了 `OUT_OF_SERVICE` 行才生效**：没写的模板（包括此前的全部模板）仍按停站、运行、临时停车等状态显示，不会回退到 `DEFAULT`。
   越过运营终点后 `next_station` 为 `-`（不再退回去显示已经过的终点站）。没改过的默认模板会自动升级到含这一状态的版本，改过的需手动加上，见上文“默认模板升级”
 - AT_LAST_STATION 表示停在终点站（EOP），优先级高于 AT_STATION
+- JOIN_ARRIVING / AT_JOIN_STATION 代替 TERM_ARRIVING / AT_LAST_STATION：交路是写了联挂（`COPL`）的主干的回程支线，运营终点就是联挂站，
+  车在那里挂上主干后接着走，不是终点站（此时 `dest_eop` 已是主干的终点，`join_station` 是联挂站）。与 OUT_OF_SERVICE 一样**只有模板写了才生效**，
+  没写时仍按终点站显示
+- DIVIDE_ARRIVING / AT_DIVIDE_STATION、CAR_ENDS_ARRIVING / AT_CAR_END 按玩家所在的车厢决定（同一列车上的乘客可能不同），见下文“分行字段”；
+  同样**只有模板写了才生效**
 - 兼容旧模板的 `STOP`/`LAYOVER`/`TERMINAL_ARRIVING` 前缀，解析时会视为 `AT_STATION`/`ON_LAYOVER`/`TERM_ARRIVING`
 
 轮播间隔可通过模板行配置：
@@ -220,6 +225,47 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
 - `through_operator`：换线后线路的运营商 code
   - 例：`本列车自 {through_station} 起直通运行 <{through_line_color_tag}>{through_line}</{through_line_color_tag}>`
 
+### 分行字段
+列车在前方（或此刻停着、还没拆的这一站）分行（交路 `DECP`）时按玩家所在的车厢给出，与站台屏分行页同一来源（解编服务的分行预测）；不分行、不知道玩家在第几节时都是 `-`。
+- `division_station` / `division_station_code` / `division_station_lang2`：分行站
+- `car_destination` / `car_destination_lang2`：本节车厢那一段分行后开往的车站；那一段分行后不载客（本站待命、回库）时为 `-`
+- `car_terminates` / `car_terminates_lang2`：本节车厢那一段分行后不载客时为分行站（本节车厢在那里停止载客），否则为 `-`
+- `car_change_destination` / `car_change_destination_lang2`：本节车厢那一段分行后不载客时，另一段开往的车站（去那里的乘客要在分行站换到另一段）；
+  本节车厢接着载客、另一段也不载客时为 `-`
+- `car_change_cars` / `car_change_cars_lang2`：另一段的节数（如 `4`）与英文写法（`4 cars`、`1 car`）；有 `car_change_destination` 时才有值
+- `car_change_end` / `car_change_end_lang2`：另一段在本节车厢的哪一头：`前` / `front`（另一段是车头一段）或 `后` / `rear`
+  - 例：`前往 {?car_change_destination} 请在该站换乘{car_change_end} {car_change_cars} 节` → `前往 南渡 请在该站换乘前 4 节`
+- 本节车厢那一段分行后接着载客、开往的又不是列车的终点时，玩家的 `dest_eop`（含 `_code`、`_lang2`）改为那一段的去向——乘客留在这节车厢里到的是那里，
+  `开往 {dest_eop}`（DEPARTING、DEFAULT、计分板表头、对话框标题）随之显示本节车厢的去向；`dest_eor` 原本与 `dest_eop` 是同一站时一并改写。
+  列车已不载客（`dest_eop` 为「回库」）时不改
+- 默认模板的 ActionBar 在站内（`AT_STATION`）与行驶中（`IN_TRIP`）各轮播一句：`本列车在 {?division_station} 分行 ┃ 本节车厢开往 {?car_destination}`，
+  本节车厢不再载客时改为 `本列车在 {?car_terminates} 分行 ┃ 本节车厢在该站停止载客`
+- 在运营终点分行、玩家这节车厢分行后接着载客时（`car_destination` 有值、分行站就是下一站或此刻这一站），`TERM_ARRIVING` / `AT_LAST_STATION`
+  换成 `DIVIDE_ARRIVING` / `AT_DIVIDE_STATION`（模板写了才换）：报“本站分行，本节车厢开往 X”与“请留在车内”，不报终点站
+- 玩家这节车厢分行后不载客时（`car_terminates` 有值），到分行站时 `ARRIVING` / `TERM_ARRIVING` 换成 `CAR_ENDS_ARRIVING`，停在分行站、还没拆时
+  `AT_STATION` / `AT_LAST_STATION` 换成 `AT_CAR_END`（模板写了才换；分行站在途中、在运营终点都换）：报“本节车厢终点 X 即将到达”“本节车厢在本站止，请下车”，
+  默认 ActionBar 另报“本节车厢（第 n 节）在 X 止，前往 Y 请在该站换乘前 N 节”“前往 Y 的乘客请下车，经站台换乘前 N 节”
+- 计分板列表与后续站点对话框的前方各站也按玩家所在的车厢：先列本交路到分行站（含）为止的各站；那一段分行后不载客时列到分行站为止，分行站记为终点；
+  那一段改跑另一条交路时接着列那条交路分行站之后、到运营终点为止的各站（这些站没有本车的 ETA 与晚点，ETA 显示为不可用）；接着跑本交路时与整列车相同。
+  不分行、不知道玩家在第几节时照整列车
+- 后续站点对话框每行另有 `stop_car_destination` / `stop_car_terminates`（这一行是分行站时为上面两个值）与 `stop_join_destination`（这一行是联挂站时为联挂后开往的车站），
+  语言文件 `display.trip.row.coupling` 的说明行用它们（接在 `details` 之后，已部署的语言文件只补缺的键）
+
+### 待命字段
+- `next_trip_destination` / `next_trip_destination_code` / `next_trip_destination_lang2`：待命车接下来那一趟开往的车站（按表运行时表上已定；那一趟联挂时为联挂后的终点）；
+  不在待命、不按表或查不到时为 `-`
+- `next_trip_departure`：那一趟的计划发车时刻（`HH:mm`，服务器时区）；不在待命、不按表或查不到时为 `-`
+- `next_trip_minutes`：离那一趟发车还有几分钟（向上取整，已过发车时刻时为 `0`）；折返整备好的时刻晚于计划发车时刻时按整备好的时刻算。缺失同上
+- 默认模板在 `ON_LAYOVER` 时 BossBar 轮播 `本列车下一趟 {?next_trip_departure} 开往 {?next_trip_destination}`，
+  ActionBar 轮播 `本列车下一趟开往 {?next_trip_destination}` 与 `还有 {?next_trip_minutes} 分钟发车 ┃ 可留在车上等候`
+
+### 联挂字段
+交路是写了联挂（`COPL FROM:<交路>`）的主干的回程支线、只挂上这一条主干时，`dest_eop` 显示联挂后主干的终点（乘客留在车上就到那里），并给出联挂站；
+不联挂、挂上不同的主干（去向说不准）、越过运营终点时都是 `-`，`dest_eop` 照本交路自己的终点。
+- `join_station` / `join_station_code` / `join_station_lang2`：联挂站（本交路的运营终点）
+- 默认模板的 ActionBar 在站内（`AT_STATION`）与行驶中（`IN_TRIP`）各轮播一句 `本列车在 {?join_station} 联挂 ┃ 继续开往 {dest_eop}`；
+  到联挂站时（`JOIN_ARRIVING`、`AT_JOIN_STATION`）报“本列车在本站联挂后开往 X”与“继续乘车的乘客请留在车内”，不报终点站
+
 ### 换乘与晚点字段
 - `transfer_lines`：下一站可换乘的线路，每条线一个线路色色块紧跟线路代码（如 `█DS █WS`）；没有换乘为 `-`
 - `transfer_line_names` / `transfer_line_names_lang2`：同上，文字为线路名 / 第二语言名（未填写时为线路名）
@@ -342,6 +388,7 @@ Scoreboard 使用 HUD 状态名分组，`_n` 为页序号（排序轮播）：
 - `TERM_ARRIVING_*`
 - `IN_TRIP_*`
 - `OUT_OF_SERVICE_*`（只有写了才生效，见上文“状态模板”）
+- `JOIN_ARRIVING_*`、`AT_JOIN_STATION_*`、`DIVIDE_ARRIVING_*`、`AT_DIVIDE_STATION_*`、`CAR_ENDS_ARRIVING_*`、`AT_CAR_END_*`（同上）
 
 ### 静态页
 - `kind` 可省略或设为 `static`。
@@ -351,7 +398,7 @@ Scoreboard 使用 HUD 状态名分组，`_n` 为页序号（排序轮播）：
 ### list_page（页面生成器）
 字段说明：
 - `kind`: `list_page`
-- `source`: 列表数据源（当前仅 `next_stops`）
+- `source`: 列表数据源（当前仅 `next_stops`；列车分行时按玩家所在的车厢，见“分行字段”）
 - `limit`: 最大条目数（用于截断列表总长度）
 - `row`: 每行模板（MiniMessage + item 占位符，可写为字符串或列表）
 - `header` / `footer`: 可选，列表前后附加行

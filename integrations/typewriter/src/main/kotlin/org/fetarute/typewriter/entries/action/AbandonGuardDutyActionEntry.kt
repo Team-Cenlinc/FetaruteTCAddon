@@ -17,15 +17,15 @@ import org.fetarute.typewriter.SOURCE
 import org.fetarute.typewriter.assignedBy
 import org.fetarute.typewriter.guardApi
 
-@Entry("fetarute_abandon_guard_duty", "Abandon the player's FetaruteTC guard duty", Colors.RED, "mdi:bell-off")
+@Entry("fetarute_abandon_guard_duty", "放弃玩家的 FTCA 车掌任务", Colors.RED, "mdi:bell-off")
 /**
- * The `Abandon Guard Duty` action ends the player's current guard duty, if Typewriter gave it.
- * A duty not yet started is dropped; a guard on duty goes off duty and the doors go back to the driver or the station.
+ * “放弃车掌任务”动作：结束玩家由 Typewriter 派出的车掌任务。
+ * 还没上岗的直接作废；正在值乘的离岗，车门交还驾驶员或站台。
  *
- * Guard duties the player took from the in-game guard board are left alone.
+ * 玩家自己从车掌任务板领的任务不受影响。
  *
- * ## How could this be used?
- * Cancel the guard duty when the player gives up the quest.
+ * ## 用法示例
+ * 玩家放弃剧情任务时，一并取消派给他的车掌任务。
  */
 class AbandonGuardDutyActionEntry(
     override val id: String = "",
@@ -33,7 +33,7 @@ class AbandonGuardDutyActionEntry(
     override val criteria: List<Criteria> = emptyList(),
     override val modifiers: List<Modifier> = emptyList(),
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only a duty given by this action. Leave empty for any duty given by Typewriter.")
+    @Help("只放弃这个动作派出的车掌任务；留空则放弃任何由 Typewriter 派出的车掌任务。")
     val assignedBy: Ref<AssignGuardDutyActionEntry> = emptyRef(),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {

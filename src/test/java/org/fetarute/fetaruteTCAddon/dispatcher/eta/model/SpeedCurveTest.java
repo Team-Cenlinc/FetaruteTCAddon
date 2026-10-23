@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -23,7 +24,7 @@ class SpeedCurveTest {
         SpeedCurve.START_FLOOR * 1.2, METRO.decelerationBps2(22.2, 22.2, 10.0), 1e-12, "开始制动");
     assertEquals(1.2, METRO.decelerationBps2(16.0, 22.2, 10.0), 1e-12, "中段常用制动");
     assertEquals(
-        SpeedCurve.END_FLOOR * 1.2, METRO.decelerationBps2(10.0, 22.2, 10.0), 1e-12, "减到末速度");
+        SpeedCurve.BRAKE_END_FLOOR * 1.2, METRO.decelerationBps2(10.0, 22.2, 10.0), 1e-12, "减到末速度");
   }
 
   /**
@@ -49,6 +50,30 @@ class SpeedCurveTest {
               + (target - startBand - endBand) / accel;
       assertEquals(expected, seconds, 0.01, "accel=" + accel);
       assertEquals(2.08, expected - target / accel, 0.01, "比恒加速度多出的秒数");
+    }
+  }
+
+  /**
+   * 停车前的收尾比加速到速快：制动从满值线性收到 BRAKE_END_FLOOR 再刹停，用时恰为 BRAKE_END_SECONDS（约 1.6 秒，冲动约 1 m/s³，与实车 ATO
+   * 停车前缓解制动相当），不再像加速到速那样用 2.5 秒、最后一格慢慢挪。
+   */
+  @Test
+  void theFinalStopEasesOffQuicklyLikeARealTrain() {
+    // 各车种自动运行的减速度（常用制动 × 0.75）：metro 0.9、emu 0.75、dmu 0.675、电力机车 0.6、内燃推拉 0.525。
+    for (double decel : new double[] {0.525, 0.6, 0.675, 0.75, 0.9}) {
+      SpeedCurve curve = new SpeedCurve(1.0, decel);
+      double band =
+          SpeedCurve.BRAKE_END_SECONDS * decel / (Math.log(1.0 / SpeedCurve.BRAKE_END_FLOOR) + 1.0);
+      double speed = band;
+      double seconds = 0.0;
+      double dt = 1.0e-4;
+      while (speed > 0.0) {
+        speed -= curve.decelerationBps2(speed, 22.2, 0.0) * dt;
+        seconds += dt;
+      }
+      assertEquals(SpeedCurve.BRAKE_END_SECONDS, seconds, 0.01, "decel=" + decel);
+      double jerk = decel / (band / decel);
+      assertTrue(jerk <= 1.1, "收尾冲动 " + jerk + " m/s³");
     }
   }
 

@@ -20,24 +20,23 @@ import org.fetarute.typewriter.assignedBy
 import org.fetarute.typewriter.entries.action.AssignTripActionEntry
 import kotlin.reflect.KClass
 
-@Entry("fetarute_task_started_event", "When a player starts driving a FetaruteTC task", Colors.YELLOW, "mdi:train")
+@Entry("fetarute_task_started_event", "玩家开始驾驶 FTCA 驾驶任务时", Colors.YELLOW, "mdi:train")
 @ContextKeys(TaskStartedContextKeys::class)
 /**
- * The `Task Started Event` is triggered when the player has taken over the train of a driving task
- * and starts to drive.
+ * “开始驾驶任务”事件：玩家接管驾驶任务的列车、开始驾驶时触发。
  *
- * ## How could this be used?
- * Show a title with the trip number, or start a quest objective "drive to the next station".
+ * ## 用法示例
+ * 用标题显示车次号，或开始一个“开到下一站”的剧情目标。
  */
 class TaskStartedEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only tasks given by this action. Leave empty for any task.")
+    @Help("只要这个动作派出的驾驶任务；留空不限。")
     val assignedBy: Ref<AssignTripActionEntry> = emptyRef(),
-    @Help("Only trips of this route code. Leave blank for any route.")
+    @Help("只要这个交路编号的车次；留空不限交路。")
     val route: String = "",
-    @Help("Only tasks from these sources. Leave empty for any source.")
+    @Help("只要这些来源的驾驶任务；留空不限来源。")
     val sources: List<TaskSource> = emptyList(),
 ) : EventEntry
 

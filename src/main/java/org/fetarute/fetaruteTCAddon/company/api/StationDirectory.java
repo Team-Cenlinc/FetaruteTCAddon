@@ -783,6 +783,27 @@ public final class StationDirectory {
       return List.copyOf(all);
     }
 
+    /** 公司记录；主数据未加载或不存在时为空。 */
+    public Optional<Company> company(UUID companyId) {
+      return Optional.ofNullable(companyId).map(catalog.companiesById::get);
+    }
+
+    /** 全部运营商，按代码排序；主数据未加载时为空。 */
+    public List<Operator> operators() {
+      List<Operator> all = new ArrayList<>(catalog.operatorsById.values());
+      all.sort(Comparator.comparing((Operator operator) -> lower(operator.code())));
+      return List.copyOf(all);
+    }
+
+    /** 全部线路，按所属运营商、线路代码排序；主数据未加载时为空。 */
+    public List<Line> lines() {
+      List<Line> all = new ArrayList<>(catalog.linesById.values());
+      all.sort(
+          Comparator.comparing((Line line) -> String.valueOf(line.operatorId()))
+              .thenComparing(line -> lower(line.code())));
+      return List.copyOf(all);
+    }
+
     /**
      * 运营商代码（不区分大小写）所属的公司；HUD 的公司占位符用它，与车站、线路查找同一套运营商代码口径。
      *

@@ -122,6 +122,69 @@ class VehicleDutyPlannerTest {
         .orElseThrow();
   }
 
+  /** 合格出库候选可按资源压力选择，不能仍然无条件使用走行最短的库。 */
+  @Test
+  void openingUsesTheSelectedFeasibleDepot() {
+    UUID quiet = id("QUIET-CREATE");
+    VehicleDutyPlanner.Leg shortLeg = new VehicleDutyPlanner.Leg(CREATE_ROUTE, "SHORT", DEPOT, 240);
+    VehicleDutyPlanner.Leg quietLeg =
+        new VehicleDutyPlanner.Leg(quiet, "QUIET", "OP:D:QUIET:1", 300);
+    VehicleDutyPlanner.Legs legs =
+        VehicleDutyPlanner.Legs.of(
+            List.of(shortLeg, quietLeg),
+            hubLegs().returnCandidates().get(HUB),
+            Map.of(CREATE_ROUTE, HUB, quiet, HUB, RETURN_ROUTE, HUB));
+
+    VehicleDutyPlanner.Result result =
+        VehicleDutyPlanner.plan(
+            TIMETABLE,
+            loopTrips(1, 300, 600),
+            legs,
+            VehicleDutyPlanner.Limits.defaults(),
+            Map.of(),
+            Map.of(),
+            (trip, candidates, limits) ->
+                candidates.stream()
+                    .filter(leg -> leg.routeId().equals(quiet))
+                    .findFirst()
+                    .orElseThrow());
+
+    assertEquals(Optional.of(quiet), result.duties().get(0).createRouteId());
+    assertEquals("OP:D:QUIET:1", result.duties().get(0).startDepotNodeId());
+  }
+
+  /** 出库候选的硬时长必须包含回原库的实际尾段，不能拿另一车库较短的 RETURN 来替代。 */
+  @Test
+  void depotPreferenceDoesNotUnderestimateItsReturnTail() {
+    UUID quietCreate = id("QUIET-CREATE");
+    UUID quietReturn = id("QUIET-RETURN");
+    var shortLeg = new VehicleDutyPlanner.Leg(CREATE_ROUTE, "SHORT", DEPOT, 10);
+    var quietLeg = new VehicleDutyPlanner.Leg(quietCreate, "QUIET", "OP:D:QUIET:1", 20);
+    var legs =
+        VehicleDutyPlanner.Legs.of(
+            List.of(shortLeg, quietLeg),
+            List.of(
+                new VehicleDutyPlanner.Leg(RETURN_ROUTE, "SHORT-RETURN", DEPOT, 10),
+                new VehicleDutyPlanner.Leg(quietReturn, "QUIET-RETURN", "OP:D:QUIET:1", 300)),
+            Map.of(CREATE_ROUTE, HUB, quietCreate, HUB, RETURN_ROUTE, HUB, quietReturn, HUB));
+    var result =
+        VehicleDutyPlanner.plan(
+            TIMETABLE,
+            loopTrips(1, 300, 100),
+            legs,
+            new VehicleDutyPlanner.Limits(1, 200, TurnaroundTable.none()),
+            Map.of(),
+            Map.of(),
+            (trip, candidates, limits) ->
+                candidates.stream()
+                    .filter(leg -> leg.equals(quietLeg))
+                    .findFirst()
+                    .orElse(candidates.get(0)));
+
+    assertTrue(result.duties().get(0).plannedDurationSeconds() <= 200);
+    assertEquals(Optional.of(CREATE_ROUTE), result.duties().get(0).createRouteId());
+  }
+
   /** 每一趟车都恰好属于且只属于一个 duty：没有孤儿班次，也没有被两辆车同时承担的班次。 */
   @Test
   void everyTripBelongsToExactlyOneDuty() {

@@ -93,6 +93,7 @@ class DepotSpawnPatternTest {
     when(world.isChunkLoaded(-2, 3)).thenReturn(false);
 
     try (MockedStatic<Bukkit> bukkit = mockStatic(Bukkit.class)) {
+      bukkit.when(Bukkit::isPrimaryThread).thenReturn(true);
       bukkit.when(() -> Bukkit.getWorld(WORLD_ID)).thenReturn(world);
 
       DepotSpawnPattern.SignRead read = DepotSpawnPattern.readLoaded(registry, DEPOT);
@@ -105,6 +106,7 @@ class DepotSpawnPatternTest {
   @Test
   void unloadedWorldCountsAsUnloaded() {
     try (MockedStatic<Bukkit> bukkit = mockStatic(Bukkit.class)) {
+      bukkit.when(Bukkit::isPrimaryThread).thenReturn(true);
       bukkit.when(() -> Bukkit.getWorld(WORLD_ID)).thenReturn(null);
 
       assertEquals(
@@ -124,11 +126,30 @@ class DepotSpawnPatternTest {
 
     try (MockedStatic<Bukkit> bukkit = mockStatic(Bukkit.class);
         MockedStatic<SignActionHeader> headers = trainHeader()) {
+      bukkit.when(Bukkit::isPrimaryThread).thenReturn(true);
       bukkit.when(() -> Bukkit.getWorld(WORLD_ID)).thenReturn(world);
 
       assertEquals(
           DepotSpawnPattern.SignRead.loaded(Optional.of("metro6")),
           DepotSpawnPattern.readLoaded(depotRegistry(), DEPOT));
+    }
+  }
+
+  @Test
+  void offTheMainThreadTheWorldIsNotTouched() {
+    World world = mock(World.class);
+    when(world.isChunkLoaded(-2, 3)).thenReturn(true);
+
+    try (MockedStatic<Bukkit> bukkit = mockStatic(Bukkit.class)) {
+      bukkit.when(Bukkit::isPrimaryThread).thenReturn(false);
+      bukkit.when(() -> Bukkit.getWorld(WORLD_ID)).thenReturn(world);
+
+      assertEquals(
+          DepotSpawnPattern.SignRead.notOnMainThread(),
+          DepotSpawnPattern.readLoaded(depotRegistry(), DEPOT),
+          "只读 HTTP 接口在后台线程算站牌：不读，标明不在主线程");
+      verify(world, never()).getBlockAt(anyInt(), anyInt(), anyInt());
+      bukkit.verify(() -> Bukkit.getWorld(WORLD_ID), never());
     }
   }
 

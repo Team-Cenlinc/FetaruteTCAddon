@@ -185,6 +185,90 @@ class TimetableConflictCheckerTest {
         () -> "两股道停三辆车必须有站台冲突: " + three.conflicts());
   }
 
+  /**
+   * 容量大于 1 的资源满了：后来的车等的是<b>最先腾出</b>的那一股道，前车记在场里最早离开的那辆。
+   *
+   * <p>记成最早到的那辆会把等待算成它整段待命——两股道的终点站上，一辆长时间待命的车会让每一处冲突都按它离开的时刻算等待， 让车修复与残余分类据此高估等待、误判让车点无容量。
+   */
+  @Test
+  void aFullMultiTrackResourceBlamesTheOccupantThatLeavesFirst() {
+    TimetableConflictChecker.GraphIndex index =
+        new TimetableConflictChecker.GraphIndex(null, Map.of("OP:S:B", 2), Map.of());
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(B, "OP:S:B", true);
+
+    TimetableConflictChecker.Report report =
+        TimetableConflictChecker.check(
+            index,
+            Map.of(),
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("LONG", platform, 0, 300),
+                new TimetableConflictChecker.Stay("SHORT", platform, 10, 60),
+                new TimetableConflictChecker.Stay("LATE", platform, 40, 100)),
+            0);
+
+    assertEquals(1, report.conflicts().size(), () -> report.conflicts().toString());
+    assertEquals("SHORT", report.conflicts().get(0).first());
+    assertEquals(60, report.conflicts().get(0).firstTo());
+  }
+
+  /**
+   * 同一辆车在场的几条占用（到站、待命的重复投影）按它最晚离开的那条算：它走之前那股道一直被它占着。
+   *
+   * <p>A 的两条占用 250、400 离开，B 300 离开：最先腾出股道的是 B，不是 A 早结束的那一条。
+   */
+  @Test
+  void aVehicleWithSeveralOccupationsLeavesWithItsLastOne() {
+    TimetableConflictChecker.GraphIndex index =
+        new TimetableConflictChecker.GraphIndex(null, Map.of("OP:S:B", 2), Map.of());
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(B, "OP:S:B", true);
+
+    TimetableConflictChecker.Report report =
+        TimetableConflictChecker.check(
+            index,
+            Map.of(),
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("A1", platform, 0, 250),
+                new TimetableConflictChecker.Stay("A2", platform, 10, 400),
+                new TimetableConflictChecker.Stay("B1", platform, 20, 300),
+                new TimetableConflictChecker.Stay("C1", platform, 200, 260)),
+            0,
+            code -> code.substring(0, 1));
+
+    assertEquals(1, report.conflicts().size(), () -> report.conflicts().toString());
+    assertEquals("B1", report.conflicts().get(0).first());
+    assertEquals(300, report.conflicts().get(0).firstTo());
+  }
+
+  /** 股道资格受限时的匹配路径同一口径：被挡住的车里按车取最晚离开，再取最先腾出的那辆。 */
+  @Test
+  void restrictedEligibilityBlamesTheVehicleThatClearsFirst() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of(B, B2, "OP:S:B:3"), new int[] {100, 100}, new double[] {10.0, 10.0});
+    TimetableConflictChecker.Platform narrow = dynamicPlatform("[1,2]");
+
+    TimetableConflictChecker.Report report =
+        TimetableConflictChecker.check(
+            TimetableConflictChecker.GraphIndex.of(graph),
+            Map.of(),
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("A1", narrow, 0, 250),
+                new TimetableConflictChecker.Stay("A2", narrow, 10, 400),
+                new TimetableConflictChecker.Stay("B1", narrow, 20, 300),
+                new TimetableConflictChecker.Stay("C1", narrow, 200, 260)),
+            0,
+            code -> code.substring(0, 1));
+
+    assertEquals(1, report.conflicts().size(), () -> report.conflicts().toString());
+    assertEquals("B1", report.conflicts().get(0).first());
+    assertEquals(300, report.conflicts().get(0).firstTo());
+  }
+
   /** 待命的车占着单股道车站：不停靠经过它的车撞上去。 */
   @Test
   void passingThroughAnOccupiedSingleTrackStationConflicts() {
@@ -216,6 +300,195 @@ class TimetableConflictCheckerTest {
             .anyMatch(c -> c.kind() == TimetableConflictChecker.Kind.PLATFORM),
         () -> "经过被占用的站台必须冲突: " + blocked.conflicts());
     assertTrue(free.clean(), () -> "待命在列车经过之后开始，不该冲突: " + free.conflicts());
+  }
+
+  /** 两辆车都只允许 1 道时，本站有两股道也不能按容量 2 放行。 */
+  @Test
+  void dynamicEligibilityLimitsGroupCapacity() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(List.of(B, B2), new int[] {100}, new double[] {10.0});
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            0,
+            Optional.empty(),
+            Optional.of(B),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DYNAMIC:OP:S:B:[1]"));
+    TimetableConflictChecker.Platform platform =
+        TimetableConflictChecker.platformsOf(
+                List.of(
+                    new TimetableStop(
+                        0, Optional.of("B"), Optional.of(B), 0, 0, RouteStopPassType.STOP)),
+                List.of(stop),
+                List.of(NodeId.of(B)))
+            .get(0);
+    assertFalse(
+        TimetableConflictChecker.check(
+                graph,
+                Map.of(),
+                List.of(),
+                List.of(
+                    new TimetableConflictChecker.Stay("T1", platform, 0, 100),
+                    new TimetableConflictChecker.Stay("T2", platform, 0, 100)),
+                0)
+            .clean());
+  }
+
+  /** 允许集合有交集，但三辆车都挤在两条允许股道时仍不可行（共享子集瓶颈）。 */
+  @Test
+  void overlappingAllowedSetsRequireAnInjectiveAssignment() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of(B, B2, "OP:S:B:3"), new int[] {100, 100}, new double[] {10.0, 10.0});
+    TimetableConflictChecker.Platform narrow = dynamicPlatform("[1,2]");
+    List<TimetableConflictChecker.Stay> crowded =
+        List.of(
+            new TimetableConflictChecker.Stay("T1", narrow, 0, 100),
+            new TimetableConflictChecker.Stay("T2", narrow, 1, 100),
+            new TimetableConflictChecker.Stay("T3", narrow, 2, 100));
+    assertFalse(TimetableConflictChecker.check(graph, Map.of(), List.of(), crowded, 0).clean());
+    List<TimetableConflictChecker.Stay> feasible =
+        List.of(
+            crowded.get(0),
+            crowded.get(1),
+            new TimetableConflictChecker.Stay("T3", dynamicPlatform("[2,3]"), 2, 100));
+    assertTrue(TimetableConflictChecker.check(graph, Map.of(), List.of(), feasible, 0).clean());
+  }
+
+  /** 固定 1 道的车辆与只能用 1 道的动态车辆争用，同站其他空道不能兜底。 */
+  @Test
+  void fixedPlatformCompetesWithRestrictedDynamicPlatform() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(List.of(B, B2), new int[] {100}, new double[] {10.0});
+    assertFalse(
+        TimetableConflictChecker.check(
+                graph,
+                Map.of(),
+                List.of(),
+                List.of(
+                    new TimetableConflictChecker.Stay(
+                        "fixed", new TimetableConflictChecker.Platform(B, "OP:S:B", false), 0, 100),
+                    new TimetableConflictChecker.Stay("dynamic", dynamicPlatform("[1]"), 1, 100)),
+                0)
+            .clean());
+  }
+
+  /** 连续到发取交集；交集为空时即使只有一辆车，也不能发布不可执行的计划。 */
+  @Test
+  void continuousStayUsesTheIntersectionAndCountsTheVehicleOnce() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(List.of(B, B2), new int[] {100}, new double[] {10.0});
+    TimetableConflictChecker.Platform arrival = dynamicPlatform("[1,2]");
+    TimetableConflictChecker.Platform departure = dynamicPlatform("[2]");
+    List<TimetableConflictChecker.Stay> feasible =
+        List.of(
+            new TimetableConflictChecker.Stay("T1", arrival.intersect(departure), 0, 100),
+            new TimetableConflictChecker.Stay("T1", departure, 50, 100),
+            new TimetableConflictChecker.Stay("T2", dynamicPlatform("[1]"), 0, 100));
+    assertTrue(TimetableConflictChecker.check(graph, Map.of(), List.of(), feasible, 0).clean());
+    assertFalse(
+        TimetableConflictChecker.check(
+                graph,
+                Map.of(),
+                List.of(),
+                List.of(
+                    new TimetableConflictChecker.Stay(
+                        "T1", dynamicPlatform("[1]").intersect(departure), 0, 100)),
+                0)
+            .clean());
+  }
+
+  /** 两端都是固定股道时不取交集，只登记到站股道；否则股道不同的现有交路会必然编表失败。 */
+  @Test
+  void twoFixedPlatformsKeepTheArrivalTrack() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(List.of(B, B2), new int[] {100}, new double[] {10.0});
+    TimetableConflictChecker.Platform arrival =
+        new TimetableConflictChecker.Platform(B, "OP:S:B", false);
+    TimetableConflictChecker.Platform departure =
+        new TimetableConflictChecker.Platform(B2, "OP:S:B", false);
+    assertEquals(arrival, arrival.intersect(departure));
+    assertTrue(
+        TimetableConflictChecker.check(
+                graph,
+                Map.of(),
+                List.of(),
+                List.of(
+                    new TimetableConflictChecker.Stay("T1", arrival.intersect(departure), 0, 100)),
+                0)
+            .clean());
+  }
+
+  /** 已离开股道的安全裕量不能与当前停靠取空交集，从而吞掉另一辆车的真实争用。 */
+  @Test
+  void successiveVisitsRetainBothSeparationAndCurrentPlatformRestrictions() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of(B, B2, "OP:S:B:3"), new int[] {100, 100}, new double[] {10.0, 10.0});
+    List<TimetableConflictChecker.Stay> visits =
+        List.of(
+            new TimetableConflictChecker.Stay("T1", dynamicPlatform("[1]"), 0, 10),
+            new TimetableConflictChecker.Stay("T1", dynamicPlatform("[3]"), 20, 100));
+    for (String selector : List.of("[1]", "[3]")) {
+      List<TimetableConflictChecker.Stay> crowded = new java.util.ArrayList<>(visits);
+      crowded.add(new TimetableConflictChecker.Stay("T2", dynamicPlatform(selector), 25, 90));
+      assertFalse(
+          TimetableConflictChecker.check(graph, Map.of(), List.of(), crowded, 30).clean(),
+          () -> selector + " 仍受上一股道安全裕量或当前股道占用限制");
+    }
+    List<TimetableConflictChecker.Stay> free = new java.util.ArrayList<>(visits);
+    free.add(new TimetableConflictChecker.Stay("T2", dynamicPlatform("[2]"), 25, 90));
+    assertTrue(TimetableConflictChecker.check(graph, Map.of(), List.of(), free, 30).clean());
+  }
+
+  private static TimetableConflictChecker.Platform dynamicPlatform(String selector) {
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            0,
+            Optional.empty(),
+            Optional.of(B),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DYNAMIC:OP:S:B:" + selector));
+    return TimetableConflictChecker.platformsOf(
+            List.of(
+                new TimetableStop(
+                    0, Optional.of("B"), Optional.of(B), 0, 0, RouteStopPassType.STOP)),
+            List.of(stop),
+            List.of(NodeId.of(B)))
+        .get(0);
+  }
+
+  /** 辅助动态 Station 指令不把固定 CRET Depot 投影成另一个站台组。 */
+  @Test
+  void fixedDepotKeepsItsGroupWhenItCarriesAnAuxiliaryDynamicStation() {
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            0,
+            Optional.empty(),
+            Optional.of("OP:D:DEP:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET OP:D:DEP:1\nDYNAMIC:OP:S:B:[1,3]"));
+    var platform =
+        TimetableConflictChecker.platformsOf(
+                List.of(
+                    new TimetableStop(
+                        0,
+                        Optional.empty(),
+                        Optional.of("OP:D:DEP:1"),
+                        0,
+                        0,
+                        RouteStopPassType.PASS)),
+                List.of(stop),
+                List.of(NodeId.of("OP:D:DEP:1")))
+            .get(0);
+    assertEquals("OP:D:DEP", platform.group());
+    assertFalse(platform.dynamic());
   }
 
   /** 道岔：两条互不共边的线路在同一道岔同时通过，冲突；隔开就没有。 */

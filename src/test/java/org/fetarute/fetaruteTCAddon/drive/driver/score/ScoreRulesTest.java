@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.drive.driver.score;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -54,6 +55,31 @@ class ScoreRulesTest {
     assertEquals(ScoreRules.Grade.D, ScoreRules.evaluate(score, false).grade());
     score.setCounts(0, 0, 10, 0, 0, 0.0, 0, 0);
     assertEquals(0, ScoreRules.evaluate(score, true).points());
+  }
+
+  @Test
+  @DisplayName("车门归车掌的站：开错门、站台代开不记给驾驶员")
+  void guardDoorFaultsAreNotTheDrivers() {
+    DriverStationStop own =
+        new DriverStationStop(
+            NodeId.of("OP:S:STA:1"), "一站", UUID.randomUUID(), new Vector(), null, false, true);
+    DriverStationStop guarded =
+        new DriverStationStop(
+            NodeId.of("OP:S:STA:2"), "二站", UUID.randomUUID(), new Vector(), null, false, true);
+    guarded.markDoorsByGuard();
+    for (DriverStationStop stop : java.util.List.of(own, guarded)) {
+      stop.updateOffset(0.0);
+      stop.markStopped();
+      stop.reportDoors(false, true, true);
+      stop.markDoorsTakenOver();
+      stop.end();
+    }
+
+    StopScore driverDoors = StopScore.of(own);
+    assertTrue(driverDoors.wrongDoor() && driverDoors.doorsTakenOver(), "驾驶员自己开关门的站照扣");
+    StopScore guardDoors = StopScore.of(guarded);
+    assertFalse(guardDoors.wrongDoor());
+    assertFalse(guardDoors.doorsTakenOver());
   }
 
   @Test

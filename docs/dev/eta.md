@@ -64,16 +64,17 @@ ETA = 行程 + 停站 + 等待。停站的口径与运行时实际怎么停一�
 | 已到站、停站计时尚未注册（停稳前约 3 秒） | 本站计划停站（靠 `StationPresenceTracker` 识别在站）。此前这几秒按 0 计，ETA 先提前一整段停站再跳回 |
 | 本站停站计时已结束（关门、等发车许可） | 0，超时部分按扣停处理（见上节） |
 
-途中车站的停站另加 `timetable.station-stop-overhead-seconds`（默认 4 秒：压牌后居中刹停约 3 秒，停稳后 AutoStation 再过 1 秒开门，
-dwell 从开门起算）；车库与区间停车点只有 dwell。与编表同一口径（`RouteStopPlan#stopSecondsBetween`）。
+途中车站的停站另加 `timetable.station-stop-overhead-seconds`（默认 1 秒：停稳后 AutoStation 再过 1 秒开门，dwell 从开门起算；
+刹车在走行里算）；车库与区间停车点只有 dwell。与编表同一口径（`RouteStopPlan#stopSecondsBetween`）。
 
 ## 走行（与编表同一条运行曲线）
 
 行程由 `TravelTimeModel` 按途中停车点**拆段**，每段交给 `RunCurveModel`——编表用的同一个模型（见 `timetable.md`「走行」）：
 
 - 第一段从列车当前位置、当前速度出发（边内进度扣掉首边已走的部分）；之后每段从停车点静止起步。
-- 每段以进站规则收尾：`runtime.approach-window-blocks` / `approach-window-edges` 窗口内按 `approach-speed-bps`（车库
-  `approach-depot-speed-bps`）行驶，触发节点与运行时 `resolveApproachControl` 同一规则（`StopApproach`）。目标不停车（PASS）时不减速。
+- 每段以进站规则收尾：车站沿自动运行曲线（车种减速度 × `train.ato-brake-fraction`）刹到站牌节点；车库与区间停车点在
+  `runtime.approach-window-blocks` / `approach-window-edges` 窗口内按 `approach-depot-speed-bps` / `approach-speed-bps` 行驶，
+  触发节点与运行时 `resolveApproachControl` 同一规则（`StopApproach`）。目标不停车（PASS）时不减速。
 - 是否停车只看 `passType`，不看 `dwell` 是否为 0。
 
 与编表只差两处，都是有意的：
@@ -129,7 +130,7 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
 
 - **在站列车**：列车到站后进度已推进到本站，本站不再是“下一个目标”。在站记录（`StationPresenceTracker`，到站事件到发车许可之间）表明列车停在本站时，单独列一行 `AT_STATION`，状态文本为 `Boarding`；否则列车一停稳就会从站牌上消失。通过不停的车站不列。
 - **晚点口径**：运行中为预计到达减表定到达（`TimetableService#plannedArrivalOf`）；在站为预计发车（当前时刻 + 剩余停站 + 扣停估算）减表定发车；未发车的表定票据为 ETA 推算的起点发车减表定发车——走行与停站按编表同一条运行曲线估算，所以它就是到本站的偏差。按间隔发车的票据没有表定时刻，为空。
-- **取消车次**：时刻表预测（`TimetableSpawnManager#snapshotForecast`）排除整趟取消的车次，站牌不再把它当作计划显示；需要显示“取消”的地方（站台屏）从 `TimetableApi#departuresAt` 的取消标记取。
+- **取消车次**：时刻表预测（`TimetableSpawnManager#snapshotForecast`）排除整趟取消的车次，站牌不再把它当作计划显示；需要显示“取消”的地方（站台屏）从 `TimetableApi#departuresAt` 的取消标记取。站台屏只在计划到达之前列出取消班次（过了就撤；与运行中列车的到站时刻同一口径），同一站台正在进站、停靠中的车排在它前面，行数不够时真会来的车优先；2×1 停站屏的车次与停站表只按真车画，下一班已在进站或停靠时终点下面一行不写取消。
 - **票据与预测去重**：表定票据按车次去重（`serviceTripId`），已出票的车次不再以预测重复出现——出了票的发车时刻会被起点待命车的就绪时刻改写，按“交路 + 发车时刻”比对不上。
   间隔票据仍按交路与发车时刻。按间隔发车的回库交路每条只列最早的一班（间隔票据不对应具体车次）；表定的带客回库班各是一个车次，逐条列出。
 - **终点上的下一趟**（按交路运行时，`DutyContinuitySupport`）：交路终点上的车接下来开哪一趟已经确定，站牌列那一趟代替“本站终到”——
@@ -140,6 +141,8 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
   - 不知道下一趟（间隔发车、交路跑完）或下一趟不从本站始发时，照旧列“本站终到”。
   - 下一趟取交路里**真会开的**那一班（`TimetableService#nextDepartureOf`），与派车同一口径：已取消的、过了发车容差且票也不在了的都跳过——
     开服或刚发布时表从半路生效，车按时间绑到的那一班之后常有几班早已过了时刻，不会再出票，车接的是后面那一班。
+    票还在等这辆车时（续班票等本交路的车不按容差到期）晚过容差也照列那一班，车到终点确实接着开它；直到晚点上限把车换下（换下的车没有下一趟、列“本站终到”，
+    那一班由替补接或已取消）。票不在、替补又能准点接后面某一班时，同一轮出票扫描就把车换下，不会出现站牌列着、车却不开的那一班。
     带客回库班同理；车停在它的起点站时回收会等它、回收也优先走它的线路（见 reclaim-policy.md），站牌写的终点与车实际开去的车库一致。
 - **晚点穿过终点**：续班票（与带客回库票）要等本交路的车跑完上一趟。车已在终点待命按待命登记的就绪时刻，还在路上按到终点的 ETA 加终点计划停站，
   这一班的发车取 max(票面, 车就绪)，下游各站的预计与晚点随之推后。不知道是哪辆车时（间隔发车）仍按起点第一辆待命车估。

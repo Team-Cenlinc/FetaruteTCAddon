@@ -42,6 +42,22 @@ import java.util.UUID;
  */
 public final class ResourcePhasePlanner {
 
+  /**
+   * 粗档把一个间隔分成几份：起点 + 间隔 × k / 份数（k = 1 … 份数 − 1，取模）。
+   *
+   * <p>完整候选每个都是一次完整构建，不能逐 {@link #SCAN_STEP_SECONDS} 秒扫一整个间隔；五等分时最远的两档离起点五分之二个间隔，
+   * 足以把一个单元挪到周期里另一段空当。
+   */
+  static final int COARSE_DIVISIONS = 5;
+
+  /**
+   * 细档取粗档步长（间隔 / {@value #COARSE_DIVISIONS}）的几分之几：四分之一、二分之一、四分之三，即间隔的 1/20、1/10、3/20。
+   *
+   * <p>粗档太粗：组间隔每变几秒，不可吸收数就可能大起大落，可行相位往往就在周期评估给的起点旁边、离起点不到一个粗档的地方。 细档把起点与最近的粗档之间等分填满，随间隔等比伸缩；向下取整到
+   * {@link #SCAN_STEP_SECONDS} 的倍数、不小于它，取整后重合的只算一个。
+   */
+  static final int FINE_QUARTERS = 3;
+
   /** 扫描步长。 */
   public static final int SCAN_STEP_SECONDS = 10;
 
@@ -57,6 +73,211 @@ public final class ResourcePhasePlanner {
   static final int MAX_CYCLES = 4 * CYCLES;
 
   private ResourcePhasePlanner() {}
+
+  /**
+   * 完成交路后的评分：硬冲突优先，其次取消数、发车偏移平方和、总冲突与等待量。
+   *
+   * <p>周期模板不含按需求补车和待命，不能替代这个判据。偏移平方和惩罚集中延后，避免只把平均频率排好。
+   *
+   * @param unabsorbableByDirection 方向键 → 它的班次卷进了几处不可吸收残余；不参与比较，只决定单元先后
+   */
+  public record CompletionScore(
+      int unabsorbable,
+      int dropped,
+      long displacement,
+      int conflicts,
+      long waitSeconds,
+      Map<String, Integer> unabsorbableByDirection)
+      implements Comparable<CompletionScore> {
+
+    public CompletionScore {
+      unabsorbableByDirection =
+          unabsorbableByDirection == null ? Map.of() : Map.copyOf(unabsorbableByDirection);
+    }
+
+    /** 不按方向分摊残余的评分。 */
+    public CompletionScore(
+        int unabsorbable, int dropped, long displacement, int conflicts, long waitSeconds) {
+      this(unabsorbable, dropped, displacement, conflicts, waitSeconds, Map.of());
+    }
+
+    @Override
+    public int compareTo(CompletionScore other) {
+      int value = Integer.compare(unabsorbable, other.unabsorbable);
+      if (value == 0) {
+        value = Integer.compare(dropped, other.dropped);
+      }
+      if (value == 0) {
+        value = Long.compare(displacement, other.displacement);
+      }
+      if (value == 0) {
+        value = Integer.compare(conflicts, other.conflicts);
+      }
+      return value == 0 ? Long.compare(waitSeconds, other.waitSeconds) : value;
+    }
+  }
+
+  /** 按完整派车、出入库与等待投影重选相位；评分器必须返回对应相位实际构建的结果。 */
+  public static PhasePlanner.Phases refineCompleted(
+      PhasePlanner.Phases phases,
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervals,
+      int maxIdleSeconds,
+      Set<UUID> inPlaceTurnbackRoutes,
+      java.util.function.Function<PhasePlanner.Phases, CompletionScore> complete) {
+    return refineCompleted(
+        phases,
+        groups,
+        intervals,
+        maxIdleSeconds,
+        inPlaceTurnbackRoutes,
+        complete,
+        BuildPool.serial());
+  }
+
+  /**
+   * 同上，一个单元的各候选并行评分。
+   *
+   * <p>单元内各候选只差这个单元的 δ，互不依赖；评完按原顺序逐个比，并列仍保留先评的那个，挑选与串行相同。单元之间有先后（后面的单元以前面定下的 δ 为起点），仍逐个来。
+   *
+   * <p>单元先后按它在起点评分的不可吸收残余里出现的次数排，多的先定，平局按原来的组名序：卡住的单元先挑， 后面的单元在它定下的相位上再挑。每个单元都试完自己的全部候选（{@link
+   * #candidatesOf}，至多 11 个），不设全局预算：完整构建次数随单元数线性增长（最多单元数 × 11 次），排在后面的单元不会被前面的吃光份额，
+   * 也就不会出现截断时只剩挤在起点旁边的细档、粗档被截掉的情况。实际试了几次写在构建进度与报告里。
+   *
+   * @param pool 并行池；{@code complete} 会在池内线程上被并发调用，必须线程安全
+   */
+  public static PhasePlanner.Phases refineCompleted(
+      PhasePlanner.Phases phases,
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervals,
+      int maxIdleSeconds,
+      Set<UUID> inPlaceTurnbackRoutes,
+      java.util.function.Function<PhasePlanner.Phases, CompletionScore> complete,
+      BuildPool pool) {
+    List<Direction> order = orderOf(groups, phases, intervals);
+    Map<String, Integer> delta = new LinkedHashMap<>(phases.deltaByDirection());
+    PhasePlanner.Phases bestPhases = phases;
+    CompletionScore best = complete.apply(phases);
+    List<String> notes = new ArrayList<>(phases.resourceNotes());
+    List<Unit> units =
+        prioritized(
+            unitsOf(order, groups, phases.connections(), inPlaceTurnbackRoutes),
+            best.unabsorbableByDirection());
+    // 单元的 δ 只在轮到它时才改，起点与候选在开始前就定了。
+    List<List<Integer>> candidates = new ArrayList<>(units.size());
+    for (Unit unit : units) {
+      // 正向平移一个整间隔与不平移完全相同：上限不含间隔本身。反向的 δ 是端点多等，受闲置上限约束。
+      int limit = unit.reverse() ? Math.min(maxIdleSeconds, unit.interval()) : unit.interval() - 1;
+      candidates.add(
+          candidatesOf(delta.getOrDefault(unit.keys().get(0), 0), unit.interval(), limit));
+    }
+    for (int u = 0; u < units.size(); u++) {
+      Unit unit = units.get(u);
+      int start = delta.getOrDefault(unit.keys().get(0), 0);
+      List<Integer> tried = candidates.get(u);
+      List<PhasePlanner.Phases> trials = new ArrayList<>(tried.size());
+      for (int candidate : tried) {
+        Map<String, Integer> trial = new LinkedHashMap<>(delta);
+        for (String key : unit.keys()) {
+          trial.put(key, candidate);
+        }
+        trials.add(withDelta(phases, trial, notes));
+      }
+      List<BuildPool.Evaluated<CompletionScore>> scores = pool.evaluate(trials, complete);
+      int chosen = start;
+      for (int i = 0; i < scores.size(); i++) {
+        CompletionScore score = scores.get(i).get();
+        // 禁止通过额外取消班次换取更低冲突数；并列保留原锚定相位。
+        if (score.dropped() <= best.dropped() && score.compareTo(best) < 0) {
+          best = score;
+          chosen = tried.get(i);
+          bestPhases = trials.get(i);
+        }
+      }
+      for (String key : unit.keys()) {
+        delta.put(key, chosen);
+      }
+      if (chosen != start) {
+        notes.add(
+            String.join(" + ", unit.keys())
+                + " 完整交路相位 "
+                + chosen
+                + "s（让不掉的 "
+                + best.unabsorbable()
+                + " 处）");
+      }
+    }
+    return bestPhases.equals(phases) ? phases : withDelta(phases, delta, notes);
+  }
+
+  /**
+   * 一个单元的完整候选，按试的先后：δ=0；离起点最远的两个粗档（起点 + 间隔 × 2/5、× 3/5）；再由近及远细粗交替——第一级细档 ±、 起点 + 间隔 × 1/5、第二级细档
+   * ±、起点 + 间隔 × 4/5、第三级细档 ±（细档见 {@link #fineSteps}，粗档取模）。去掉起点本身与落在 [0, {@code limit}] 之外的，去重。
+   *
+   * <p>评分并列时先试的胜出：远端粗档排在细档前面，把单元整体挪开一大段与在起点旁边微调评分相同时取前者。
+   */
+  static List<Integer> candidatesOf(int start, int interval, int limit) {
+    Set<Integer> out = new java.util.LinkedHashSet<>();
+    out.add(0);
+    out.add(coarse(start, interval, 2));
+    out.add(coarse(start, interval, 3));
+    int[] fine = fineSteps(interval);
+    int[] nearCoarse = {1, COARSE_DIVISIONS - 1};
+    for (int level = 0; level < fine.length; level++) {
+      out.add(start - fine[level]);
+      out.add(start + fine[level]);
+      if (level < nearCoarse.length) {
+        out.add(coarse(start, interval, nearCoarse[level]));
+      }
+    }
+    out.removeIf(candidate -> candidate == start || candidate < 0 || candidate > limit);
+    return List.copyOf(out);
+  }
+
+  /** 起点 + 间隔 × {@code k} / {@value #COARSE_DIVISIONS}，取模到 [0, 间隔)。 */
+  private static int coarse(int start, int interval, int k) {
+    return (int) Math.floorMod((long) start + (long) k * interval / COARSE_DIVISIONS, interval);
+  }
+
+  /**
+   * 细档的步长：粗档步长的 1/4、2/4、3/4，向下取整到 {@link #SCAN_STEP_SECONDS} 的倍数（不越过那个比例）、不小于它，重合的去掉。
+   *
+   * @param interval 组间隔
+   * @return 从小到大
+   */
+  static int[] fineSteps(int interval) {
+    Set<Integer> steps = new java.util.TreeSet<>();
+    for (int quarter = 1; quarter <= FINE_QUARTERS; quarter++) {
+      double raw = (double) Math.max(0, interval) * quarter / (4.0 * COARSE_DIVISIONS);
+      long floored = (long) Math.floor(raw / SCAN_STEP_SECONDS) * SCAN_STEP_SECONDS;
+      steps.add((int) Math.max(SCAN_STEP_SECONDS, floored));
+    }
+    return steps.stream().mapToInt(Integer::intValue).toArray();
+  }
+
+  /** 单元按卷进不可吸收残余的次数从多到少排；稳定排序，平局保持原来的组名序。 */
+  private static List<Unit> prioritized(List<Unit> units, Map<String, Integer> byDirection) {
+    if (byDirection.isEmpty()) {
+      return units;
+    }
+    List<Unit> out = new ArrayList<>(units);
+    out.sort(
+        java.util.Comparator.comparingInt(
+            (Unit unit) ->
+                -unit.keys().stream().mapToInt(key -> byDirection.getOrDefault(key, 0)).sum()));
+    return List.copyOf(out);
+  }
+
+  private static PhasePlanner.Phases withDelta(
+      PhasePlanner.Phases base, Map<String, Integer> delta, List<String> notes) {
+    return new PhasePlanner.Phases(
+        base.phaseByDirection(),
+        base.offsetByGroup(),
+        delta,
+        base.notes(),
+        notes,
+        base.connections());
+  }
 
   /**
    * 评分：越小越好，字典序。
@@ -192,6 +413,7 @@ public final class ResourcePhasePlanner {
       List<ServiceGroupClassifier.Group> groups,
       PhasePlanner.Phases phases,
       Map<String, Integer> intervalByGroup) {
+    PhasePlanner.requireUniqueKeys(groups);
     List<Direction> out = new ArrayList<>();
     for (ServiceGroupClassifier.Group group : groups) {
       int interval = intervalByGroup.getOrDefault(group.name(), 0);
@@ -356,10 +578,10 @@ public final class ResourcePhasePlanner {
     TimetableConflictChecker.Report report =
         TimetableConflictChecker.check(index, profiles, movements, List.of(), separationSeconds);
     // 与 builder 的成功判据同一把尺子：都按"后车在哪等"判，而不是按冲突落在哪个资源上。
-    // 这里没有成品表，但每条流的始发站台组是知道的，足够喂进同一条判据。
+    // 这里没有成品表，但每条流的始发站台组是知道的；铺开的运行与档案也在手上，冲突在途中停车点之后的同样认得出让车点。
     List<ConflictAbsorption.Residual> residuals =
         ConflictAbsorption.classify(
-            report, waitingPoints, index, separationSeconds, maxWaitSeconds);
+            report, waitingPoints, movements, profiles, index, separationSeconds, maxWaitSeconds);
     int unabsorbable = ConflictAbsorption.unabsorbable(residuals).size();
     long wait = residuals.stream().mapToLong(ConflictAbsorption.Residual::waitSeconds).sum();
     return new Score(unabsorbable, report.conflicts().size(), wait);

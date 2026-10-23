@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -28,9 +29,6 @@ public final class StopMarks {
 
   /** 标志在车站牌子（或车头）后方不超过这么多（格）时仍算在前方（同一段轨道上的测量误差）。 */
   public static final double BEHIND_TOLERANCE_BLOCKS = 0.5;
-
-  /** 开往标志时至少保持的速度（格/tick）：列车进站时已经很慢也不至于一路蠕行。 */
-  static final double MIN_HOLD_BPT = 0.1;
 
   /**
    * 轨道上的一块停车位置标。
@@ -86,16 +84,6 @@ public final class StopMarks {
       marks = List.copyOf(marks);
     }
   }
-
-  /**
-   * 自动运行开往标志的两段：先以 {@code holdBpt} 走 {@code holdBlocks}，再在 {@code brakeBlocks} 内制动停下。
-   *
-   * @param holdBlocks 保持速度的一段（格）；为 0 时直接制动
-   * @param holdBpt 保持的速度（格/tick）
-   * @param brakeBlocks 制动的一段（格）
-   * @param ticks 预计用时（tick）
-   */
-  public record Approach(double holdBlocks, double holdBpt, double brakeBlocks, int ticks) {}
 
   private record Step(RailBlockPos pos, double blocks) {}
 
@@ -243,6 +231,28 @@ public final class StopMarks {
   }
 
   /**
+   * 同 {@link #select}，但先按 {@code preferredCarriages} 选：先到联挂站、要停着等对方挂上来的车按挂上以后整列的节数停，在身后给后到的车留出位置；
+   * 没有对得上这个节数的标志时照列车节数选。
+   *
+   * @param preferredCarriages 挂上以后整列几节；为空或不比 {@code carriages} 多时同 {@link #select}
+   */
+  public static Optional<Selected> select(
+      List<Mark> marks,
+      Vector stationPoint,
+      Vector direction,
+      int carriages,
+      OptionalInt preferredCarriages) {
+    if (preferredCarriages.isPresent() && preferredCarriages.getAsInt() > carriages) {
+      Optional<Selected> preferred =
+          select(marks, stationPoint, direction, preferredCarriages.getAsInt());
+      if (preferred.isPresent()) {
+        return preferred;
+      }
+    }
+    return select(marks, stationPoint, direction, carriages);
+  }
+
+  /**
    * 列车在车站股道上的行进方向：车站轨道的走向按列车走向定正反。列车还在弯道上时，它此刻的走向与站台轨道差得很远，直接拿来判前后会判错。
    *
    * @param stationAxis 车站轨道的走向（不分正反）；为空或水平分量为零时直接用列车走向
@@ -258,27 +268,6 @@ public final class StopMarks {
     }
     double dot = stationAxis.getX() * travel.getX() + stationAxis.getZ() * travel.getZ();
     return dot < 0.0 ? stationAxis.clone().multiply(-1.0) : stationAxis.clone();
-  }
-
-  /**
-   * 自动运行怎么开到标志：保持进站速度（列车本来就更慢时保持现速，但不低于 {@link #MIN_HOLD_BPT}），在常用制动距离处开始制动，正好停在标志上。 距离不够制动时直接制动。
-   *
-   * @param distanceBlocks 车头沿轨道到标志的距离（格）
-   * @param currentBpt 此刻速度（格/tick）
-   * @param approachBpt 进站限速（格/tick）
-   * @param decelBpt2 常用制动减速度（格/tick²）
-   */
-  public static Approach approach(
-      double distanceBlocks, double currentBpt, double approachBpt, double decelBpt2) {
-    double ceiling = Math.max(MIN_HOLD_BPT, approachBpt);
-    double hold = Math.min(Math.max(MIN_HOLD_BPT, currentBpt), ceiling);
-    double brake = hold * hold / (2.0 * Math.max(1.0e-4, decelBpt2));
-    if (brake + BEHIND_TOLERANCE_BLOCKS >= distanceBlocks) {
-      return new Approach(0.0, hold, distanceBlocks, (int) Math.ceil(2.0 * distanceBlocks / hold));
-    }
-    double holdBlocks = distanceBlocks - brake;
-    return new Approach(
-        holdBlocks, hold, brake, (int) Math.ceil(holdBlocks / hold + 2.0 * brake / hold));
   }
 
   private static boolean better(Mark mark, double ahead, Selected best) {

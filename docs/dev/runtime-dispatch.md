@@ -249,6 +249,8 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
   从节点量会多盖半个车长，双站台终点的共用入口道岔正好落在里面，另一个站台就进不去（2026-09-27 实服 PPK：停 PPK:1 按表等约 5 分钟折返，
   分到 PPK:2 的后车在 RVS:1 一直等到它开走）。待命车只会原地等票或折返，身后的轨道对它没有用；车身区间的端点仍在保持范围内，同线开往同一站台的
   后车照样进不来。没停稳、覆盖不完整时保持原有的尾部保护；已有折返交接（dispatch attempt）时整条进路原样保持，不走这条收窄。
+- 这条收窄要靠待命 tick 跑起来。巡检对静止的车只在“由动转停”那一拍跑一次完整 tick，之后只复查有停因的车；AutoStation 要稳定几拍才停妥、挂发车门控，门控常常晚于那一拍，车身上就没有停因，终到停站结束由出站门控登记成待命车后再也没人给它跑 tick，尾部保护一直留着。所以 AutoStation 挂上门控后下一拍补一次 `refreshSignal`，待命登记时车身上没有停因的补记与待命 tick 同样的 `LAYOVER_HOLD` 停因（已有停因的不动，由下一拍待命 tick 改写），见 `LayoverRegistrationRecheckTest`。
+- 折返交接只被排队位挡住时（`LaunchAuthorizationService#authorizeHandoff` 的阻挡全是 `QUEUE_POSITION`），先按割排队边的同一套证据（`applySmartQueuePositionYield`：本车只被排队位挡、排队的车正被本车持有的资源挡着，两份阻挡快照都新鲜）割掉那条排队位，割成了当场再交接一次。健康层不巡检待命车，这一步只能在交接里做；不当场重试，排队的车下一拍就重新排回来。典型形态：尽头式终点待命车身后的咽喉还占着，去另一个站台的后车先在出站渡线上排了队、又被这段占用挡在站外。见 `LayoverTurnbackQueueYieldTest`。
 - 即时复用只有在 `readyAt` 已到、TrainCarts 句柄确认列车停稳、Waypoint 居中状态已结束且 `DwellRegistry` 不再有真实停站窗口时才进入折返授权；否则保留 Layover 候选，等待后续 spawn tick 重试。Waypoint TERM 的候选会在触牌时登记，实际 dwell 在居中完成后才启动，因此不能只相信预估的 `readyAt`。
 - 下一条交路的 DYNAMIC 站台没有空闲容量时，Layover 不领取 ticket、不执行 authority handoff，也不申请前向进路；候选保持可重试，待站台容量释放后再派发。
 - 同一 `ticketId` 在 `LayoverRegistry` 内最多只有一个 dispatch attempt owner。handoff 前被拒绝会释放 attempt，分配器仍可尝试下一辆 READY 候选；一旦 handoff 留下 attempt，当前 tick 与后续 tick 都只重试该 owner，不能把同一票据同时交给第二辆折返车。pending 的超时、fallback 与人工清理也不能删除 active attempt 对应票据。
@@ -297,12 +299,12 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
 - 当信号处于 PROCEED_WITH_CAUTION/CAUTION/STOP 时，会基于 lookahead 占用中的首个阻塞资源估算距离，提前下压速度；STOP 会额外用 TrainCarts railState 和图节点坐标估算剩余距离，避免固定节点距离导致红灯曲线长期保持非零。
 - 当“下一站”为 STOP/TERM waypoint 时，信号 tick 的距离只看前方 blocker（不看下一节点距离/CAUTION 距离），避免提前刹停在牌子前。
 - `runtime.speed-curve-type` 控制曲线形态（`physics/linear/quadratic/cubic`）。
-- `runtime.speed-curve-factor` 用于调节阻塞/授权终点停车曲线的激进程度（>1 更激进，<1 更保守）；进站区外制动与前方限速边按车型减速度原值计算，不受它影响（与编表运行曲线同口径）。
+- `runtime.speed-curve-factor` 用于调节阻塞/授权终点停车曲线的激进程度（>1 更激进，<1 更保守）；停车点、进站限速区与前方限速边的制动按自动运行曲线（车种减速度 × `train.ato-brake-fraction`）计算，不受它影响（与编表运行曲线同口径）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
-- `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
+- `runtime.approach-depot-speed-bps` 用于进库前限速（区间停车点由 `approach-speed-bps` 控制，车站不限速）。
 - 进站限速区由 `StopApproach.zones` 划定，与编表/ETA 运行曲线（`RunCurveModel`）共用同一判据。
-- 目标速度取速度天花板（`SpeedCeiling`，在 `resolveApproachControl` 里按到下一停车点的展开路径计算）：沿途各边限速、进站限速区与到站速度按 S 形制动曲线（`SpeedCurve`）往回推，与编表运行曲线同一个函数；天花板同时登记为逐 tick 斜坡的保持约束。SignalSystem 只提供信号、约束类型和距离。
-- 移动授权终点正是下一处计划停车点、且进站限速已就绪时，该终点不再按“刹到 0”参与移动授权、速度曲线与 Smart 前瞻，由进站控制按运行曲线接管（STOP 信号不变）。
+- 目标速度取速度天花板（`SpeedCeiling`，在 `resolveApproachControl` 里按到下一停车点的展开路径计算）：沿途各边限速、进站限速区与到站速度按自动运行的 S 形制动曲线（`SpeedCurve#ato`）往回推，与编表运行曲线同一个函数；天花板同时登记为逐 tick 斜坡的保持约束。SignalSystem 只提供信号、约束类型和距离。
+- 移动授权终点正是下一处计划停车点、且进站控制已就绪（车站：天花板算得出；车库与区间停车点：有进站限速与限速区）时，该终点不再按“刹到 0”参与移动授权、速度曲线与 Smart 前瞻，由进站控制按运行曲线接管（STOP 信号不变）。
 - 到下一停车点整段展开路径上的各边限速都在天花板内，远处慢速边与编表一样提前制动，不受 `lookahead-edges` 窗口限制。
 - 发车与调速用本插件的 `CurveLaunchAction`（S 形加速，每 tick 读当前限速），不用 TrainCarts 自带的 launch 曲线；详见 `docs/dev/train-config.md`。
 - 最短路距离会通过缓存复用，并按 `runtime.distance-cache-refresh-seconds` 异步刷新，降低高密度咽喉区的重复计算开销。
@@ -350,7 +352,7 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 - `bps2 -> bpt2`：除以 20^2
 
 ## 进站限速
-- `runtime.approach-speed-bps` 控制 approaching 速度上限（进站 + STOP/TERM waypoint handoff）。
+- `runtime.approach-speed-bps` 控制区间停车点（STOP/TERM waypoint handoff）的 approaching 速度上限。车站不限速：沿自动运行曲线刹到站牌，压上站牌后由 AutoStation 接着刹完（见 `docs/dev/autostation.md`）；关闭 `runtime.speed-curve-enabled` 时没有曲线可接，车站照旧按它进站。
 - `runtime.approach-window-blocks` / `runtime.approach-window-edges` 划定进站限速区：节点到其后第一个进站触发点的距离或边数不超过该值时，从该节点起按进站限速运行；停车点本身也算一个区。
 - 区外按车型的 S 形制动曲线提前降到区起点，不再有单独的预减速区或末边参数（`approach-target-edges` 已于 config-version 36 移除）。编表与 ETA 用同一判据，改动后需重新 build 时刻表；规则详见 `docs/dev/train-config.md`。
 
@@ -422,6 +424,8 @@ javap -p <class> | grep -cE '\(.*\)( throws [^;]*)?;$'
    早到的车等到表定时刻再走；扣留期间它对别的车完全透明。
    已到点/已晚点一律放行，扣留时长被 `HOLD_CEILING`（150 秒）硬封顶——必须低于发车门锁自身
    180 秒的回收时限，否则列车会进入"自己不动、也不再为别人排队"的状态。
+   回收时限只收回没人还的锁：AutoStation 停站任务还活着、还没放行时每秒用同一会话续锁（`renewDepartureGate`，锁已不在或换了会话时不动），
+   停得久的车（等车掌发车信号、等联挂、解下的车等下一班）不会被超时清掉门锁、再被信号 tick 放走。
 
 另有一处与车辆生命周期相关的接入点：`SimpleTicketAssigner#setLayoverReuseGate`。
 时刻表层通过它否决"交路额度已用完"的列车继续接运营班次，被否决的车留在 layover 闲置，

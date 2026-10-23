@@ -6,6 +6,7 @@ import com.bergerkiller.bukkit.common.protocol.PacketListener;
 import com.bergerkiller.bukkit.common.protocol.PacketType;
 import com.bergerkiller.bukkit.common.utils.PacketUtil;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayInBlockDigHandle;
+import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayInUseEntityHandle;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayInWindowClickHandle;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayOutSetSlotHandle;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayOutWindowItemsHandle;
@@ -46,6 +47,9 @@ public final class DrivePacketListener implements PacketListener {
     /** 驾驶员按下了潜行键（离座意图）。运行在网络线程，实现必须自行切回主线程处理。 */
     default void onSneak(Player player) {}
 
+    /** 任一玩家的客户端结束了一 tick（客户端时钟，见 {@link ClientClock}）。每名玩家每秒 20 次，运行在网络线程，实现必须轻量、线程安全。 */
+    default void onClientTickEnd(Player player) {}
+
     /** 诊断输出：驾驶员触发了某个数据包。运行在网络线程。 */
     default void trace(Player player, String message) {}
   }
@@ -56,9 +60,11 @@ public final class DrivePacketListener implements PacketListener {
     PacketType.IN_BLOCK_DIG,
     PacketType.IN_BLOCK_PLACE,
     PacketType.IN_USE_ITEM,
+    PacketType.IN_USE_ENTITY,
     PacketType.IN_WINDOW_CLICK,
     PacketType.IN_SET_CREATIVE_SLOT,
-    PacketType.IN_ENTITY_ACTION
+    PacketType.IN_ENTITY_ACTION,
+    PacketType.IN_CLIENT_TICK_END
   };
 
   private final Host host;
@@ -120,10 +126,18 @@ public final class DrivePacketListener implements PacketListener {
   @Override
   public void onPacketReceive(PacketReceiveEvent event) {
     Player player = event.getPlayer();
-    if (player == null || host.rewriterFor(player.getUniqueId()) == null) {
+    if (player == null) {
       return;
     }
     PacketType type = event.getType();
+    if (type == PacketType.IN_CLIENT_TICK_END) {
+      // 所有玩家都数：开始驾驶或值乘时客户端时钟已经在走
+      host.onClientTickEnd(player);
+      return;
+    }
+    if (host.rewriterFor(player.getUniqueId()) == null) {
+      return;
+    }
     if (type == PacketType.IN_BLOCK_DIG) {
       handleDig(event, player);
     } else if (type == PacketType.IN_BLOCK_PLACE) {
@@ -134,7 +148,10 @@ public final class DrivePacketListener implements PacketListener {
     } else if (type == PacketType.IN_USE_ITEM) {
       // 对方块右键：取消数据包会让客户端的方块预测悬空，这里只读取信号，由事件拦截取消并让服务器纠正客户端。
       host.trace(player, "右键使用(方块)");
-      host.onInput(player, InputSignal.USE);
+      host.onInput(player, InputSignal.USE_ON_BLOCK);
+    } else if (type == PacketType.IN_USE_ENTITY) {
+      // 对实体右键：只读取，不取消，由实体交互事件拦截（点自己的列车回座也在那里处理）。
+      handleUseEntity(event, player);
     } else if (type == PacketType.IN_ENTITY_ACTION) {
       // 只读取，不取消：离座由 TrainCarts 自己处理，我们只需要知道这是主动离座。
       handleEntityAction(event, player);
@@ -164,6 +181,20 @@ public final class DrivePacketListener implements PacketListener {
           && (packet.getButton() == 0 || packet.getButton() == 1);
     } catch (RuntimeException | LinkageError ex) {
       return false;
+    }
+  }
+
+  /** 每次右键客户端都先发一个 INTERACT_AT（每只手一个），只认它，免得同一次右键算两次；左键攻击不算。 */
+  private void handleUseEntity(PacketReceiveEvent event, Player player) {
+    try {
+      PacketPlayInUseEntityHandle packet =
+          PacketPlayInUseEntityHandle.createHandle(event.getPacket().getHandle());
+      if (packet.isInteractAt()) {
+        host.trace(player, "右键使用(实体)");
+        host.onInput(player, InputSignal.USE_ENTITY);
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      host.trace(player, "无法读取实体交互数据包: " + ex);
     }
   }
 
@@ -207,7 +238,12 @@ public final class DrivePacketListener implements PacketListener {
         host.trace(player, "与副手交换");
         host.onInput(player, InputSignal.SWAP_HANDS);
       }
-      case "RELEASE_USE_ITEM" -> event.setCancelled(true);
+      case "RELEASE_USE_ITEM" -> {
+        // 只有客户端处于使用状态时才发（车掌按住发车铃后松开）：服务器那边从没开始使用，不放行。
+        event.setCancelled(true);
+        host.trace(player, "松开右键");
+        host.onInput(player, InputSignal.RELEASE_USE);
+      }
       default -> {
         // 挖掘方块等动作放行，由事件拦截统一处理。
       }

@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -42,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.coupler.DivisionForecast;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaTarget;
@@ -61,6 +63,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.display.DisplayService;
@@ -89,6 +92,30 @@ public final class TrainHudContextResolver {
   private static final DateTimeFormatter CLOCK_MINUTES = DateTimeFormatter.ofPattern("HH:mm");
   private static final DateTimeFormatter CLOCK_SECONDS = DateTimeFormatter.ofPattern("HH:mm:ss");
 
+  /** 分行占位符：不分行、不知道玩家在第几节时都写 {@code -}，见 {@link #putDivisionPlaceholders}。 */
+  private static final List<String> DIVISION_KEYS =
+      List.of(
+          "division_station",
+          "division_station_code",
+          "division_station_lang2",
+          "car_destination",
+          "car_destination_lang2",
+          "car_terminates",
+          "car_terminates_lang2",
+          "car_change_destination",
+          "car_change_destination_lang2",
+          "car_change_cars",
+          "car_change_cars_lang2",
+          "car_change_end",
+          "car_change_end_lang2");
+
+  /** 另一段在本节车厢的哪一头（{@code car_change_end}）。 */
+  private static final String CAR_END_FRONT = "前";
+
+  private static final String CAR_END_REAR = "后";
+  private static final String CAR_END_FRONT_LANG2 = "front";
+  private static final String CAR_END_REAR_LANG2 = "rear";
+
   private final FetaruteTCAddon plugin;
   private final LocaleManager locale;
   private final EtaService etaService;
@@ -113,7 +140,11 @@ public final class TrainHudContextResolver {
   private final Map<String, Optional<TrainHudContext>> contextMemo = new HashMap<>();
   private final Map<TrainHudContext, Map<String, String>> placeholderMemo = new IdentityHashMap<>();
   private final Map<TrainHudContext, List<StopInfo>> upcomingMemo = new IdentityHashMap<>();
-  private final Map<TrainHudContext, Map<Integer, UpcomingStop>> upcomingStopMemo =
+  private final Map<TrainHudContext, Map<RowKey, UpcomingStop>> upcomingStopMemo =
+      new IdentityHashMap<>();
+
+  /** 分行时各段车厢自己的前方停靠列表，见 {@link #upcomingStops(TrainHudContext, int)}。 */
+  private final Map<TrainHudContext, Map<CarKey, List<StopInfo>>> carStopsMemo =
       new IdentityHashMap<>();
 
   private static final String ETA_STATUS_PREFIX = "display.hud.eta.status.";
@@ -179,6 +210,7 @@ public final class TrainHudContextResolver {
     placeholderMemo.clear();
     upcomingMemo.clear();
     upcomingStopMemo.clear();
+    carStopsMemo.clear();
   }
 
   /** 从玩家载具链路反查 TrainCarts 编组。 */
@@ -274,6 +306,15 @@ public final class TrainHudContextResolver {
     boolean terminalNextStop =
         nextStopOpt.map(NextStop::terminal).orElse(false) && !nextStation.isEmpty();
     Destinations destinations = resolveDestinations(routeOpt, routeIndex, operationType);
+    // 联挂：回程支线的车挂上主干后接着走，去向写主干的终点，原来的终点（联挂站）不再报终点站
+    StationDisplay joinStation = StationDisplay.empty();
+    if (!outOfService) {
+      StationDisplay trunkEnd = resolveContinuationEnd(routeOpt);
+      if (!trunkEnd.isEmpty() && !destinations.eop().isEmpty()) {
+        joinStation = destinations.eop();
+        destinations = new Destinations(destinations.eor(), trunkEnd);
+      }
+    }
 
     EtaResult eta = etaService.getForTrain(trainName, EtaTarget.nextStop());
     List<TrainHudContext.Transfer> nextStopTransfers =
@@ -310,6 +351,8 @@ public final class TrainHudContextResolver {
             && currentNode.isPresent()
             && eopStop.isPresent()
             && RouteTerminals.matches(currentNode.get(), eopStop.get());
+    Optional<TimetableService.DueTrip> nextTrip =
+        layover.isPresent() ? resolveNextTrip(trainName) : Optional.empty();
 
     TrainHudContext context =
         new TrainHudContext(
@@ -338,8 +381,57 @@ public final class TrainHudContextResolver {
             nextStopOpt
                 .filter(NextStop::ahead)
                 .map(next -> OptionalInt.of(next.stopIndex()))
-                .orElse(OptionalInt.empty()));
+                .orElse(OptionalInt.empty()),
+            joinStation,
+            nextTrip.map(this::resolveNextTripDestination).orElse(StationDisplay.empty()),
+            nextTrip.map(TimetableService.DueTrip::departure));
     return Optional.of(context);
+  }
+
+  /** 待命车接下来那一趟（按表运行时表上已定）；不按表或查不到时为空。 */
+  private Optional<TimetableService.DueTrip> resolveNextTrip(String trainName) {
+    if (plugin == null) {
+      return Optional.empty();
+    }
+    return plugin.getTimetableService().flatMap(service -> service.nextDepartureOf(trainName));
+  }
+
+  /** 待命车接下来那一趟开往哪里（那一趟联挂时为联挂后的终点）；查不到交路时为空。 */
+  private StationDisplay resolveNextTripDestination(TimetableService.DueTrip due) {
+    if (routeDefinitions == null || due == null || due.trip() == null) {
+      return StationDisplay.empty();
+    }
+    Optional<RouteDefinition> next = routeDefinitions.findById(due.trip().routeId());
+    if (next.isEmpty()) {
+      return StationDisplay.empty();
+    }
+    StationDisplay through = resolveContinuationEnd(next);
+    if (!through.isEmpty()) {
+      return through;
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(next.get().id());
+    return resolveStopDisplay(stops, RouteTerminals.endOfOperationIndex(stops));
+  }
+
+  /** 这条交路是写了联挂的主干的回程支线时，主干的运营终点（联挂后接着开往那里）；不联挂或解析不出时为空。 */
+  private StationDisplay resolveContinuationEnd(Optional<RouteDefinition> routeOpt) {
+    if (plugin == null || routeDefinitions == null || routeOpt == null || routeOpt.isEmpty()) {
+      return StationDisplay.empty();
+    }
+    Optional<RouteDefinition> trunk =
+        routeDefinitions
+            .findUuid(routeOpt.get().id())
+            .flatMap(
+                id ->
+                    plugin
+                        .getCouplerService()
+                        .flatMap(coupler -> coupler.coupling().continuationOf(id)))
+            .flatMap(continuation -> routeDefinitions.findById(continuation.trunkRoute()));
+    if (trunk.isEmpty()) {
+      return StationDisplay.empty();
+    }
+    List<RouteStop> stops = routeDefinitions.listStops(trunk.get().id());
+    return resolveStopDisplay(stops, RouteTerminals.endOfOperationIndex(stops));
   }
 
   /**
@@ -442,7 +534,25 @@ public final class TrainHudContextResolver {
    * <p>limit=0 仅返回 total 计数，不计算 ETA。
    */
   public UpcomingStops resolveUpcomingStops(TrainHudContext context, int limit) {
-    List<StopInfo> ahead = upcomingStops(context);
+    return resolveUpcomingStops(context, upcomingStops(context), limit);
+  }
+
+  /**
+   * 同 {@link #resolveUpcomingStops(TrainHudContext, int)}，但按玩家所在的车厢：列车分行时列这节车厢那一段的行程，见 {@link
+   * #upcomingStops(TrainHudContext, int)}。
+   *
+   * @param context 上下文
+   * @param limit 最多列出几站
+   * @param player 玩家
+   * @param group 玩家所乘的编组
+   */
+  public UpcomingStops resolveUpcomingStops(
+      TrainHudContext context, int limit, Player player, MinecartGroup group) {
+    return resolveUpcomingStops(context, upcomingStops(context, player, group), limit);
+  }
+
+  private UpcomingStops resolveUpcomingStops(
+      TrainHudContext context, List<StopInfo> ahead, int limit) {
     int count = Math.min(Math.max(0, limit), ahead.size());
     List<UpcomingStop> stops = new ArrayList<>(count);
     for (int position = 0; position < count; position++) {
@@ -460,6 +570,111 @@ public final class TrainHudContextResolver {
   public List<StopInfo> upcomingStops(TrainHudContext context) {
     syncMemo();
     return upcomingMemo.computeIfAbsent(context, this::computeUpcomingStops);
+  }
+
+  /**
+   * 玩家所在车厢的前方停靠列表，见 {@link #upcomingStops(TrainHudContext, int)}。
+   *
+   * @param context 上下文
+   * @param player 玩家
+   * @param group 玩家所乘的编组
+   */
+  public List<StopInfo> upcomingStops(TrainHudContext context, Player player, MinecartGroup group) {
+    return upcomingStops(context, resolvePlayerCarriageNo(player, group));
+  }
+
+  /**
+   * 第 {@code carriageNo} 节车厢的前方停靠列表：列车在前方（或此刻停着、还没拆的这一站）分行时跟着这节车厢那一段走——
+   *
+   * <ul>
+   *   <li>先列本交路到分行站（含）为止的各站；
+   *   <li>那一段分行后不载客：到分行站为止，分行站记为这节车厢的终点；
+   *   <li>那一段接着跑本交路：与整列车相同；
+   *   <li>那一段改跑另一条交路：接着列那条交路从分行站之后到运营终点的各站（{@link StopInfo#otherRoute}），查不到那条交路时到分行站为止。
+   * </ul>
+   *
+   * <p>不分行、不知道第几节、分行预测与当前交路对不上时与 {@link #upcomingStops(TrainHudContext)} 相同。同一 tick 内同一段只算一次。
+   *
+   * @param context 上下文
+   * @param carriageNo 第几节（从车头数起，1 起）；不知道时为 0
+   */
+  public List<StopInfo> upcomingStops(TrainHudContext context, int carriageNo) {
+    List<StopInfo> train = upcomingStops(context);
+    if (carriageNo <= 0) {
+      return train;
+    }
+    Optional<DivisionForecast> forecast = forecastOf(context.trainName());
+    OptionalInt part =
+        forecast.map(found -> partIndexOf(found, carriageNo)).orElse(OptionalInt.empty());
+    if (part.isEmpty()) {
+      return train;
+    }
+    return carStopsMemo
+        .computeIfAbsent(context, ignored -> new HashMap<>())
+        .computeIfAbsent(
+            new CarKey(forecast.get(), part.getAsInt()), key -> carStops(context, train, key));
+  }
+
+  /** 一段车厢的前方停靠列表（见 {@link #upcomingStops(TrainHudContext, int)}）。在复用表的计算里调用，里面不能再清空复用表。 */
+  private List<StopInfo> carStops(TrainHudContext context, List<StopInfo> train, CarKey key) {
+    DivisionForecast forecast = key.forecast();
+    DivisionForecast.Part part = forecast.parts().get(key.part());
+    Optional<RouteId> current = context.routeDefinition().map(RouteDefinition::id);
+    if (current.isEmpty()
+        || !forecast.routeId().equalsIgnoreCase(current.get().value())
+        || forecast.stopIndex() < context.routeIndex()) {
+      return train;
+    }
+    int division = forecast.stopIndex();
+    List<StopInfo> prefix = new ArrayList<>();
+    for (StopInfo info : train) {
+      if (info.index() <= division) {
+        prefix.add(info);
+      }
+    }
+    if (!part.inService()) {
+      return markDivision(prefix, division, true);
+    }
+    // 不知道交路时，留下的一段就是接着跑本交路
+    String route = part.route().orElse(part.detached() ? "" : current.get().value());
+    if (route.equalsIgnoreCase(current.get().value())) {
+      return train;
+    }
+    Optional<RouteDefinition> next =
+        route.isBlank()
+            ? Optional.empty()
+            : routeDefinitions.findUuid(RouteId.of(route)).flatMap(routeDefinitions::findById);
+    Optional<StopTable> table = next.flatMap(this::stopTable);
+    List<StopInfo> journey = markDivision(prefix, division, false);
+    if (table.isEmpty()) {
+      return journey;
+    }
+    OptionalInt end =
+        RouteTerminals.endOfOperationIndex(routeDefinitions.listStops(next.get().id()));
+    List<StopInfo> after = new ArrayList<>();
+    for (StopInfo info : table.get().infos()) {
+      if (info.index() > part.fromIndex() && end.isPresent() && info.index() <= end.getAsInt()) {
+        after.add(info);
+      }
+    }
+    List<StopInfo> out = new ArrayList<>(journey);
+    for (int i = 0; i < after.size(); i++) {
+      out.add(after.get(i).onOtherRoute(i == after.size() - 1));
+    }
+    return List.copyOf(out);
+  }
+
+  /** 分行站那一行（停靠表下标为 {@code division}）改记是否为这节车厢的终点；分行站不在列表里时原样。 */
+  private static List<StopInfo> markDivision(
+      List<StopInfo> prefix, int division, boolean terminal) {
+    List<StopInfo> out = new ArrayList<>(prefix.size());
+    for (StopInfo info : prefix) {
+      out.add(
+          info.index() == division && info.terminal() != terminal
+              ? info.withTerminal(terminal)
+              : info);
+    }
+    return List.copyOf(out);
   }
 
   private List<StopInfo> computeUpcomingStops(TrainHudContext context) {
@@ -482,13 +697,27 @@ public final class TrainHudContextResolver {
    */
   public UpcomingStop upcomingStop(TrainHudContext context, List<StopInfo> ahead, int position) {
     syncMemo();
+    StopInfo info = ahead.get(position);
     return upcomingStopMemo
         .computeIfAbsent(context, ignored -> new HashMap<>())
         .computeIfAbsent(
-            position, ignored -> materialize(context, ahead.get(position), position + 1));
+            new RowKey(position, info.index(), info.otherRoute(), info.terminal()),
+            ignored -> materialize(context, info, position + 1));
   }
 
   private UpcomingStop materialize(TrainHudContext context, StopInfo info, int sequence) {
+    if (info.otherRoute()) {
+      // 另一条交路上的站：下标不是本车交路的，不能拿去问本车的 ETA、晚点与选台
+      return new UpcomingStop(
+          sequence,
+          info.display(),
+          EtaResult.unavailable(HudText.MISSING, List.of()),
+          info.track(),
+          info.line(),
+          transfersOf(info, context.currentLine()),
+          OptionalLong.empty(),
+          info.terminal());
+    }
     EtaResult eta =
         etaService.getForTrain(context.trainName(), new EtaTarget.StopIndex(info.index()));
     return new UpcomingStop(
@@ -575,7 +804,8 @@ public final class TrainHudContextResolver {
               line,
               transfers,
               index == lastStopIndex,
-              dynamic));
+              dynamic,
+              false));
     }
     return new StopTable(stops, revision, List.copyOf(infos), lastStopIndex);
   }
@@ -653,6 +883,23 @@ public final class TrainHudContextResolver {
     putLinePlaceholders(placeholders, "", context.lineInfo(), lineCode);
     placeholders.put("operator", safeOrDash(operatorCode));
     putThroughPlaceholders(placeholders, context.throughService());
+    StationDisplay join = context.joinStation().sanitized();
+    boolean joining = !context.joinStation().isEmpty();
+    placeholders.put("join_station", joining ? join.label() : "-");
+    placeholders.put("join_station_code", joining ? join.code() : "-");
+    placeholders.put("join_station_lang2", joining ? join.lang2() : "-");
+    StationDisplay nextTrip = context.nextTripDestination().sanitized();
+    placeholders.put("next_trip_destination", nextTrip.label());
+    placeholders.put("next_trip_destination_code", nextTrip.code());
+    placeholders.put("next_trip_destination_lang2", nextTrip.lang2());
+    placeholders.put(
+        "next_trip_departure", nextTripClock(context.nextTripDeparture(), ZoneId.systemDefault()));
+    placeholders.put(
+        "next_trip_minutes",
+        nextTripMinutes(
+            context.nextTripDeparture(),
+            context.layover().map(LayoverRegistry.LayoverCandidate::readyAt),
+            Instant.now()));
     applyStopPlaceholders(
         placeholders, context.nextStopTransfers(), context.nextStopDelaySeconds());
     placeholders.put("route_code", safeOrDash(routeCode));
@@ -703,6 +950,38 @@ public final class TrainHudContextResolver {
                     formatDuration(Duration.between(candidate.readyAt(), Instant.now()))));
 
     return placeholders;
+  }
+
+  /**
+   * 待命车下一趟的计划发车时刻（{@code HH:mm}，服务器时区）。
+   *
+   * @param departure 计划发车时刻；不按表或查不到时为空
+   * @param zone 时区
+   * @return 不知道时为 {@code -}
+   */
+  static String nextTripClock(Optional<Instant> departure, ZoneId zone) {
+    return departure.map(at -> at.atZone(zone).format(CLOCK_MINUTES)).orElse(HudText.MISSING);
+  }
+
+  /**
+   * 离待命车下一趟发车还有几分钟：向上取整，已过发车时刻时为 0。折返整备好的时刻晚于计划发车时刻时，车要等整备好才发，按整备好的时刻算。
+   *
+   * @param departure 计划发车时刻；不按表或查不到时为空
+   * @param readyAt 折返整备好的时刻；不在待命时为空
+   * @param now 当前时刻
+   * @return 不知道计划发车时刻时为 {@code -}
+   */
+  static String nextTripMinutes(
+      Optional<Instant> departure, Optional<Instant> readyAt, Instant now) {
+    if (departure.isEmpty()) {
+      return HudText.MISSING;
+    }
+    Instant leaves = departure.get();
+    if (readyAt.isPresent() && readyAt.get().isAfter(leaves)) {
+      leaves = readyAt.get();
+    }
+    long millis = Duration.between(now, leaves).toMillis();
+    return millis <= 0 ? "0" : String.valueOf((millis + 59_999L) / 60_000L);
   }
 
   /**
@@ -836,6 +1115,9 @@ public final class TrainHudContextResolver {
       placeholders.put("station_track", HudText.MISSING);
       placeholders.put("eta", "");
       placeholders.put("eta_minutes", HudText.MISSING);
+      placeholders.put("stop_car_destination", HudText.MISSING);
+      placeholders.put("stop_car_terminates", HudText.MISSING);
+      placeholders.put("stop_join_destination", HudText.MISSING);
       applyEtaStatusPlaceholders(placeholders, null);
       applyStopPlaceholders(placeholders, List.of(), OptionalLong.empty());
       return placeholders;
@@ -854,10 +1136,31 @@ public final class TrainHudContextResolver {
     placeholders.put("eta_minutes", minutes >= 0 ? String.valueOf(minutes) : HudText.MISSING);
     applyEtaStatusPlaceholders(placeholders, row.eta());
     applyStopPlaceholders(placeholders, row.transfers(), row.delaySeconds());
+    // 分行站、联挂站那一行：本节车厢分行后去哪、联挂后接着开往哪里（与全局的分行、联挂占位符同一来源）
+    boolean divides = sameStation(base.get("division_station_code"), row.display().code());
+    placeholders.put(
+        "stop_car_destination",
+        divides ? base.getOrDefault("car_destination", HudText.MISSING) : HudText.MISSING);
+    placeholders.put(
+        "stop_car_terminates",
+        divides ? base.getOrDefault("car_terminates", HudText.MISSING) : HudText.MISSING);
+    placeholders.put(
+        "stop_join_destination",
+        sameStation(base.get("join_station_code"), row.display().code())
+            ? base.getOrDefault("dest_eop", HudText.MISSING)
+            : HudText.MISSING);
     row.line()
         .filter(line -> currentLine.map(current -> !current.sameLine(line)).orElse(true))
         .ifPresent(line -> applyLinePlaceholders(placeholders, line));
     return placeholders;
+  }
+
+  /** 两个站码是同一站（都有值）。 */
+  private static boolean sameStation(String code, String other) {
+    return code != null
+        && other != null
+        && !HudText.MISSING.equals(code)
+        && code.equalsIgnoreCase(other);
   }
 
   /**
@@ -902,6 +1205,12 @@ public final class TrainHudContextResolver {
     placeholders.put("player_carriage_no", carriageNo > 0 ? String.valueOf(carriageNo) : "-");
     placeholders.put(
         "player_carriage_total", carriageTotal > 0 ? String.valueOf(carriageTotal) : "-");
+    putDivisionPlaceholders(
+        placeholders,
+        group == null || group.getProperties() == null
+            ? null
+            : group.getProperties().getTrainName(),
+        carriageNo);
     placeholders.put(
         "trip_dialog_key",
         plugin
@@ -909,6 +1218,167 @@ public final class TrainHudContextResolver {
             .flatMap(DisplayService::tripDialog)
             .flatMap(dialog -> dialog.hintKey(player))
             .orElse(HudText.MISSING));
+  }
+
+  /**
+   * 分行占位符（按玩家所在的车厢）：列车在前方（或此刻停着、还没拆的这一站）分行时，
+   *
+   * <ul>
+   *   <li>{@code division_station} / {@code division_station_code} / {@code
+   *       division_station_lang2}：分行站
+   *   <li>{@code car_destination} / {@code
+   *       car_destination_lang2}：本节车厢那一段分行后开往的车站；那一段分行后不载客（本站待命、回库）时为 {@code -}
+   *   <li>{@code car_terminates} / {@code car_terminates_lang2}：本节车厢那一段分行后不载客时为分行站（本节车厢在那里止），否则为
+   *       {@code -}
+   *   <li>{@code car_change_destination} / {@code
+   *       car_change_destination_lang2}：本节车厢那一段分行后不载客时，另一段开往的车站（去那里的乘客要在分行站换到另一段）；
+   *       本节车厢接着载客、另一段也不载客时为 {@code -}
+   *   <li>{@code car_change_cars} / {@code car_change_cars_lang2}：另一段的节数（如 {@code 4}）与英文写法（如 {@code
+   *       4 cars}、{@code 1 car}）
+   *   <li>{@code car_change_end} / {@code car_change_end_lang2}：另一段在本节车厢的哪一头：{@code 前} / {@code
+   *       front}，或 {@code 后} / {@code rear}
+   * </ul>
+   *
+   * <p>本节车厢那一段分行后接着载客、开往的又不是列车的终点时，{@code dest_eop}（含 {@code _code}、{@code _lang2}）改写为那一段的去向：
+   * 乘客留在这节车厢里到的是那里；{@code dest_eor} 原本与 {@code dest_eop} 是同一站时一并改写。列车已不载客时不改。
+   *
+   * <p>不分行、不知道玩家在第几节时都是 {@code -}（{@code dest_eop} 照列车的终点），配合条件占位符只在要分行时显示。数据与站台屏同一来源（解编服务的分行预测）。
+   *
+   * @param placeholders 玩家的占位符（已含列车的全局占位符，就地改写）
+   * @param trainName 列车名
+   * @param carriageNo 玩家在第几节（从车头数起，1 起）；不知道时为 0
+   */
+  void putDivisionPlaceholders(Map<String, String> placeholders, String trainName, int carriageNo) {
+    Optional<DivisionForecast> forecast =
+        carriageNo <= 0 ? Optional.empty() : forecastOf(trainName);
+    OptionalInt index =
+        forecast.map(found -> partIndexOf(found, carriageNo)).orElse(OptionalInt.empty());
+    if (index.isEmpty()) {
+      for (String key : DIVISION_KEYS) {
+        placeholders.put(key, HudText.MISSING);
+      }
+      return;
+    }
+    List<DivisionForecast.Part> parts = forecast.get().parts();
+    DivisionForecast.Part part = parts.get(index.getAsInt());
+    StationDisplay station =
+        divisionStation(forecast.get().stationId(), forecast.get().station()).sanitized();
+    placeholders.put("division_station", station.label());
+    placeholders.put("division_station_code", station.code());
+    placeholders.put("division_station_lang2", station.lang2());
+    Optional<StationDisplay> destination = destinationOf(part);
+    placeholders.put(
+        "car_destination", destination.map(StationDisplay::label).orElse(HudText.MISSING));
+    placeholders.put(
+        "car_destination_lang2", destination.map(StationDisplay::lang2).orElse(HudText.MISSING));
+    placeholders.put("car_terminates", destination.isPresent() ? HudText.MISSING : station.label());
+    placeholders.put(
+        "car_terminates_lang2", destination.isPresent() ? HudText.MISSING : station.lang2());
+    destination.ifPresent(found -> putCarDestination(placeholders, found));
+    // 两段才分得出“另一段”；本节车厢接着载客时不必换车
+    int otherIndex = 1 - index.getAsInt();
+    Optional<DivisionForecast.Part> other =
+        destination.isEmpty() && parts.size() == 2
+            ? Optional.of(parts.get(otherIndex))
+            : Optional.empty();
+    Optional<StationDisplay> change = other.flatMap(this::destinationOf);
+    boolean front = otherIndex == 0;
+    placeholders.put(
+        "car_change_destination", change.map(StationDisplay::label).orElse(HudText.MISSING));
+    placeholders.put(
+        "car_change_destination_lang2", change.map(StationDisplay::lang2).orElse(HudText.MISSING));
+    int cars = other.map(DivisionForecast.Part::cars).orElse(0);
+    placeholders.put(
+        "car_change_cars", change.isPresent() ? String.valueOf(cars) : HudText.MISSING);
+    placeholders.put(
+        "car_change_cars_lang2",
+        change.isPresent() ? cars + (cars == 1 ? " car" : " cars") : HudText.MISSING);
+    placeholders.put(
+        "car_change_end",
+        change.isPresent() ? (front ? CAR_END_FRONT : CAR_END_REAR) : HudText.MISSING);
+    placeholders.put(
+        "car_change_end_lang2",
+        change.isPresent() ? (front ? CAR_END_FRONT_LANG2 : CAR_END_REAR_LANG2) : HudText.MISSING);
+  }
+
+  /** 一段分行后开往的车站；那一段分行后不载客时为空。 */
+  private Optional<StationDisplay> destinationOf(DivisionForecast.Part part) {
+    return part.destinationId().map(id -> divisionStation(id, part.destination()).sanitized());
+  }
+
+  /** 本节车厢那一段的去向写进 {@code dest_eop}：与列车的终点是同一站、列车已不载客时不改。 */
+  private static void putCarDestination(
+      Map<String, String> placeholders, StationDisplay destination) {
+    String eopCode = placeholders.get("dest_eop_code");
+    if (RouteTerminals.OUT_OF_SERVICE_ID.equals(eopCode)
+        || sameStop(destination, eopCode, placeholders.get("dest_eop"))) {
+      return;
+    }
+    boolean eorAlike = sameStation(placeholders.get("dest_eor_code"), eopCode);
+    placeholders.put("dest_eop", destination.label());
+    placeholders.put("dest_eop_code", destination.code());
+    placeholders.put("dest_eop_lang2", destination.lang2());
+    if (eorAlike) {
+      placeholders.put("dest_eor", destination.label());
+      placeholders.put("dest_eor_code", destination.code());
+      placeholders.put("dest_eor_lang2", destination.lang2());
+    }
+  }
+
+  /** 车站与另一站（站码、站名）是同一站：两边都有站码时比站码，否则比站名。 */
+  private static boolean sameStop(StationDisplay station, String code, String label) {
+    if (!HudText.MISSING.equals(station.code()) && HudText.present(code)) {
+      return station.code().equalsIgnoreCase(code);
+    }
+    return station.label().equals(label);
+  }
+
+  /** 列车的分行预测；没有解编服务、不分行时为空。 */
+  private Optional<DivisionForecast> forecastOf(String trainName) {
+    if (plugin == null || trainName == null || trainName.isBlank()) {
+      return Optional.empty();
+    }
+    return plugin.getCouplerService().flatMap(coupler -> coupler.decoupling().forecast(trainName));
+  }
+
+  /** 第 {@code carriageNo} 节（从车头数起）在分行后的哪一段；两段节数对不上编组时为空。 */
+  static Optional<DivisionForecast.Part> partOf(DivisionForecast forecast, int carriageNo) {
+    OptionalInt index = partIndexOf(forecast, carriageNo);
+    return index.isPresent()
+        ? Optional.of(forecast.parts().get(index.getAsInt()))
+        : Optional.empty();
+  }
+
+  /** 第 {@code carriageNo} 节（从车头数起）在分行后第几段（车头一段为 0）；两段节数对不上编组时为空。 */
+  static OptionalInt partIndexOf(DivisionForecast forecast, int carriageNo) {
+    int from = 0;
+    List<DivisionForecast.Part> parts = forecast.parts();
+    for (int i = 0; i < parts.size(); i++) {
+      int cars = parts.get(i).cars();
+      if (carriageNo > from && carriageNo <= from + cars) {
+        return OptionalInt.of(i);
+      }
+      from += cars;
+    }
+    return OptionalInt.empty();
+  }
+
+  /** 分行预测里的车站（{@code 运营商:站码}）：按车站目录取中英文名，查不到时用预测给的名字。 */
+  private StationDisplay divisionStation(String stationId, String fallbackName) {
+    int colon = stationId == null ? -1 : stationId.indexOf(':');
+    if (colon > 0 && colon < stationId.length() - 1) {
+      StationKey key =
+          new StationKey(stationId.substring(0, colon), stationId.substring(colon + 1));
+      StationDisplay resolved = resolveStationDisplay(key);
+      if (!resolved.isEmpty()) {
+        return resolved;
+      }
+      return StationDisplay.of(
+          fallbackName == null || fallbackName.isBlank() ? key.station() : fallbackName,
+          key.station(),
+          "-");
+    }
+    return StationDisplay.of(fallbackName, "-", "-");
   }
 
   /** 注入 ETA 状态占位符（含当前语言与指定语言版本）。 */
@@ -1910,8 +2380,9 @@ public final class TrainHudContextResolver {
    * @param track 站台号；无法解析或动态站台时为 {@code -}（动态站台的站台号随列车，见 {@code trackFor}）
    * @param line 列车在该站所属的线路（直通运转换线后为新线路）；交路线路不明时为空
    * @param transfers 可换乘线路（按该站所属线路排除本车）；交路线路不明时为空，届时按列车当前线路现算
-   * @param terminal 是否为本交路最后一个停车点
+   * @param terminal 是否为本交路最后一个停车点；分行时按车厢的列表里为这节车厢的终点
    * @param dynamic 动态站台（DYNAMIC）停靠；{@code nodeId} 是占位股道
+   * @param otherRoute 分行后这节车厢那一段改跑的另一条交路上的站：{@code index} 是那条交路里的下标，没有本车的 ETA、晚点与选台
    */
   public record StopInfo(
       int index,
@@ -1921,14 +2392,38 @@ public final class TrainHudContextResolver {
       Optional<RouteLineChanges.LineRef> line,
       Optional<List<TrainHudContext.Transfer>> transfers,
       boolean terminal,
-      boolean dynamic) {
+      boolean dynamic,
+      boolean otherRoute) {
     public StopInfo {
       Objects.requireNonNull(display, "display");
       nodeId = nodeId == null ? Optional.empty() : nodeId;
       line = line == null ? Optional.empty() : line;
       transfers = transfers == null ? Optional.empty() : transfers.map(List::copyOf);
     }
+
+    /** 改记是否为终点。 */
+    StopInfo withTerminal(boolean value) {
+      return new StopInfo(
+          index, nodeId, display, track, line, transfers, value, dynamic, otherRoute);
+    }
+
+    /** 记为另一条交路上的站：动态站台不知道会停哪一股，站台号写 {@code -}。 */
+    StopInfo onOtherRoute(boolean value) {
+      return new StopInfo(
+          index, nodeId, display, dynamic ? "-" : track, line, transfers, value, dynamic, true);
+    }
   }
+
+  /** 同 tick 复用的前方停靠行：同一列车上各段车厢的列表在分行站之后不同，按行序与站（哪条交路的第几个下标、是不是这节车厢的终点）一起区分。 */
+  private record RowKey(int position, int index, boolean otherRoute, boolean terminal) {}
+
+  /**
+   * 一段车厢：分行预测与第几段（车头一段为 0）。
+   *
+   * @param forecast 分行预测
+   * @param part 第几段
+   */
+  private record CarKey(DivisionForecast forecast, int part) {}
 
   /**
    * 交路的静态停靠表。

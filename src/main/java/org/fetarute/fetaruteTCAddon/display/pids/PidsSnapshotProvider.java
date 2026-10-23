@@ -32,7 +32,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
  *
  * <ul>
  *   <li>到发：{@link EtaApi#getBoard}，含运行中列车、已出票未发车与未出票预测
- *   <li>取消：{@link TimetableApi#departuresAt} 中带取消标记的计划到发。预测已排除取消车次，两处不会重复
+ *   <li>取消：{@link TimetableApi#departuresAt} 中带取消标记的计划到发，只列计划到达还没到的（过了就撤，不再挂在屏上）。预测已排除取消车次，两处不会重复
  *   <li>末班车：同一份计划到发里每个服务日开往各终点的最后一班（{@link PidsLastTrains}），只在按表运行启用时标
  * </ul>
  *
@@ -49,8 +49,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
  */
 public final class PidsSnapshotProvider {
 
-  /** 计划时刻已过多久的取消班次仍然显示，让乘客知道等的那班车不会来了。 */
-  static final Duration CANCELLED_LOOKBACK = Duration.ofMinutes(5);
+  /** 计划到发从多久之前查起：晚点的末班车计划发车已过、人还没开出，末班要比得上它。取消行另按计划到达筛，过了就不列。 */
+  static final Duration PLANNED_LOOKBACK = Duration.ofMinutes(5);
 
   /** 计划到发查多远：末班要比到当天最后一班，取时刻表接口的上限一整天。 */
   static final Duration TIMETABLE_WINDOW = Duration.ofHours(24);
@@ -145,13 +145,21 @@ public final class PidsSnapshotProvider {
       }
       Instant until = now.plus(horizon);
       timetable.cancelled().stream()
-          .filter(row -> row.expectedAt().isBefore(until))
+          .filter(row -> row.expectedAt().isAfter(now) && row.expectedAt().isBefore(until))
           .forEach(rows::add);
       rows.sort(Comparator.comparing(PidsRow::expectedAt));
       return new PidsSnapshot(station, now, rows);
     } catch (RuntimeException ex) {
       debugLogger.accept("PIDS_SNAPSHOT_FAILED station=" + station + " error=" + ex);
-      return new PidsSnapshot(station, now, previous == null ? List.of() : previous.rows());
+      List<PidsRow> kept =
+          previous == null
+              ? List.of()
+              : previous.rows().stream()
+                  .filter(
+                      row ->
+                          row.status() != PidsRow.Status.CANCELLED || row.expectedAt().isAfter(now))
+                  .toList();
+      return new PidsSnapshot(station, now, kept);
     }
   }
 
@@ -177,7 +185,36 @@ public final class PidsSnapshotProvider {
         row.cars().stream().map(car -> new PidsRow.Car(car.seats(), car.occupied())).toList(),
         row.trainName()
             .flatMap(train -> platformChanges.previousOf(train, station, row.platform())),
-        lastTrains.matches(row.routeId(), row.stopSequence(), expectedAt, row.delaySeconds()));
+        lastTrains.matches(row.routeId(), row.stopSequence(), expectedAt, row.delaySeconds()),
+        row.division().map(PidsSnapshotProvider::division),
+        row.joining()
+            .map(
+                joining ->
+                    new PidsRow.Joining(
+                        joining.stopSequence(),
+                        joining.stationId(),
+                        joining.ownCars(),
+                        joining.joiningCars(),
+                        joining.joiningStanding(),
+                        joining.continuesOnRouteId(),
+                        joining.continuesFromSequence())));
+  }
+
+  private static PidsRow.Division division(EtaApi.Division division) {
+    return new PidsRow.Division(
+        division.stopSequence(),
+        division.stationId(),
+        division.parts().stream()
+            .map(
+                part ->
+                    new PidsRow.Division.Part(
+                        part.cars(),
+                        part.detached(),
+                        part.destinationId(),
+                        part.routeId(),
+                        part.fromSequence()))
+            .toList(),
+        division.divided());
   }
 
   private static PidsRow.Status status(EtaApi.BoardPhase phase) {
@@ -200,7 +237,7 @@ public final class PidsSnapshotProvider {
   }
 
   /**
-   * 一个车站的计划到发派生出的两样：取消行（不限窗口，取快照时再按显示窗口筛）与末班。
+   * 一个车站的计划到发派生出的两样：取消行（不限窗口，取快照时再按计划到达与显示窗口筛）与末班。
    *
    * @param takenAt 取数时刻
    * @param cancelled 取消行
@@ -218,7 +255,7 @@ public final class PidsSnapshotProvider {
         timetables.departuresAt(
             null,
             station.stationCode(),
-            now.minus(CANCELLED_LOOKBACK),
+            now.minus(PLANNED_LOOKBACK),
             TIMETABLE_WINDOW,
             DEPARTURE_LOOKUP_LIMIT);
     List<TimetableApi.Departure> departures =

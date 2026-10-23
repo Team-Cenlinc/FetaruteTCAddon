@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Remark;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.RemarkPart;
 import org.junit.jupiter.api.Test;
 
-/** 备注：末班车、直通、经由（配置优先，没配置按换乘线路数、站台数、直通站推断）。 */
+/** 备注：末班车、分行、联挂、直通、经由（配置优先，没配置按换乘线路数、站台数、直通站推断）。 */
 class PidsRemarksTest {
 
   private static final Instant NOW = Instant.parse("2026-10-01T13:40:00Z");
@@ -166,6 +166,157 @@ class PidsRemarksTest {
         .filter(part -> part.tag().equals("pids.board.remark.via"))
         .flatMap(part -> part.items().stream())
         .toList();
+  }
+
+  /** 分行的文案用真实模板，其余照旧回显键名。 */
+  private static final Map<String, String> DIVISION_TEXT =
+      Map.of(
+          "pids.board.remark.division", "分行",
+          "pids.board.remark.division-here", "本站分行",
+          "pids.board.division.front", "前",
+          "pids.board.division.rear", "后",
+          "pids.board.division.remark", "<end> <cars> 节往<destination>",
+          "pids.board.division.ends", "<end> <cars> 节至<station>止",
+          "pids.board.division.ends-here", "<end> <cars> 节本站止");
+
+  private final PidsRemarks divisionRemarks =
+      new PidsRemarks(net, new PidsVocabulary(key -> DIVISION_TEXT.getOrDefault(key, key)));
+
+  @Test
+  void divisionComesAfterTheLastTrainAndBeforeThrough() {
+    PidsRow row =
+        withDivision(
+            row(0, true), division(2, part(4, false, "SURC:NTA"), part(4, true, "SURC:KPO")));
+
+    List<RemarkPart> parts = divisionRemarks.of(row, PidsTheme.DARK).orElseThrow().parts();
+
+    assertEquals("pids.board.remark.last-train", parts.get(0).tag());
+    assertEquals(
+        new RemarkPart("分行", PidsTheme.DARK.info(), List.of("后 4 节往KPO 站"), Optional.empty()),
+        parts.get(1),
+        "只写解下另走的那一段，留下那一段的终点就是这一行的终点");
+    assertEquals("pids.board.remark.through", parts.get(2).tag());
+  }
+
+  @Test
+  void divisionHereChangesTheTagAndCarsThatStopRunningSaySo() {
+    PidsRow here =
+        withDivision(row(2, false), division(2, part(2, true, null), part(6, false, "SURC:NTA")));
+    PidsRow ahead =
+        withDivision(row(0, false), division(2, part(6, false, "SURC:NTA"), part(2, true, null)));
+
+    assertEquals(
+        new RemarkPart("本站分行", PidsTheme.DARK.info(), List.of("前 2 节本站止"), Optional.empty()),
+        divisionRemarks.of(here, PidsTheme.DARK).orElseThrow().parts().get(0));
+    assertEquals(
+        new RemarkPart("分行", PidsTheme.DARK.info(), List.of("后 2 节至新笛矢·壑湖止"), Optional.empty()),
+        divisionRemarks.of(ahead, PidsTheme.DARK).orElseThrow().parts().get(0));
+  }
+
+  /** 在运营终点分行、解下的一段接着载客：这一行的主目的地已是解下那一段的去向，备注说留下、本站止的一段。 */
+  @Test
+  void whenTheRowAlreadyHeadsWhereTheDetachedCarsGoTheRemarkNamesTheOtherCars() {
+    PidsRow here =
+        withDivision(row(2, false), division(2, part(1, true, "SURC:NTA"), part(1, false, null)));
+
+    assertEquals(
+        new RemarkPart("本站分行", PidsTheme.DARK.info(), List.of("后 1 节本站止"), Optional.empty()),
+        divisionRemarks.of(here, PidsTheme.DARK).orElseThrow().parts().get(0));
+  }
+
+  /** 前方站分行、主目的地已写成解下那一段的远端：备注说留下、到分行站止的那一段。 */
+  @Test
+  void upstreamTheRemarkNamesWhereTheOtherCarsEnd() {
+    PidsRow ahead =
+        withDivision(row(0, false), division(2, part(1, true, "SURC:NTA"), part(1, false, null)));
+
+    assertEquals(
+        new RemarkPart("分行", PidsTheme.DARK.info(), List.of("后 1 节至新笛矢·壑湖止"), Optional.empty()),
+        divisionRemarks.of(ahead, PidsTheme.DARK).orElseThrow().parts().get(0));
+  }
+
+  @Test
+  void aDivisionBehindThisStationIsNotMentioned() {
+    PidsRow row =
+        withDivision(row(2, false), division(1, part(4, false, "SURC:NTA"), part(4, true, null)));
+
+    assertTrue(
+        divisionRemarks.of(row, PidsTheme.DARK).orElseThrow().parts().stream()
+            .noneMatch(part -> part.tag().equals("分行") || part.tag().equals("本站分行")));
+  }
+
+  /** 回程支线的车：联挂站之前写“联挂”与联挂站（主目的地已是联挂后主干的终点）；到了联挂站它在那里终到，不再写。 */
+  @Test
+  void joiningNamesTheJoinStationUntilItIsReached() {
+    PidsRow.Joining joining = new PidsRow.Joining(2, "SURC:HHU");
+
+    assertEquals(
+        new RemarkPart(
+            "pids.board.remark.join", PidsTheme.DARK.info(), List.of("新笛矢·壑湖"), Optional.empty()),
+        remarks
+            .of(withJoining(row(0, false), joining), PidsTheme.DARK)
+            .orElseThrow()
+            .parts()
+            .get(0));
+    assertTrue(
+        remarks.of(withJoining(row(2, false), joining), PidsTheme.DARK).stream()
+            .flatMap(remark -> remark.parts().stream())
+            .noneMatch(part -> part.tag().equals("pids.board.remark.join")));
+  }
+
+  private static PidsRow withJoining(PidsRow row, PidsRow.Joining joining) {
+    return new PidsRow(
+        row.status(),
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        row.platform(),
+        row.expectedAt(),
+        row.delaySeconds(),
+        row.stopSequence(),
+        row.passing(),
+        row.terminating(),
+        row.outOfService(),
+        row.trainName(),
+        row.platformPending(),
+        row.platformCandidates(),
+        row.cars(),
+        row.previousPlatform(),
+        row.lastTrain(),
+        Optional.empty(),
+        Optional.of(joining));
+  }
+
+  private static PidsRow.Division.Part part(int cars, boolean detached, String destination) {
+    return new PidsRow.Division.Part(cars, detached, Optional.ofNullable(destination));
+  }
+
+  private static PidsRow.Division division(int stopSequence, PidsRow.Division.Part... parts) {
+    return new PidsRow.Division(stopSequence, "SURC:HHU", List.of(parts));
+  }
+
+  private static PidsRow withDivision(PidsRow row, PidsRow.Division division) {
+    return new PidsRow(
+        row.status(),
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        row.platform(),
+        row.expectedAt(),
+        row.delaySeconds(),
+        row.stopSequence(),
+        row.passing(),
+        row.terminating(),
+        row.outOfService(),
+        row.trainName(),
+        row.platformPending(),
+        row.platformCandidates(),
+        row.cars(),
+        row.previousPlatform(),
+        row.lastTrain(),
+        Optional.of(division));
   }
 
   private static RouteStop stop(String station, boolean stops, RouteApi.LineRef change) {

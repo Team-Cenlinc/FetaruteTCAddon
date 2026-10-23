@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockAccess;
@@ -156,25 +157,6 @@ class StopMarksTest {
   }
 
   @Test
-  @DisplayName("自动运行开往标志：保持进站速度，按常用制动距离开始制动；距离不够时直接制动")
-  void approachPlan() {
-    // 进站 0.5 格/tick（10 格/秒），常用制动 1 格/秒² = 0.0025 格/tick²：制动距离 50 格。
-    StopMarks.Approach far = StopMarks.approach(80.0, 0.5, 0.5, 0.0025);
-    assertEquals(30.0, far.holdBlocks(), 1.0e-9);
-    assertEquals(0.5, far.holdBpt(), 1.0e-9);
-    assertEquals(50.0, far.brakeBlocks(), 1.0e-9);
-    assertEquals(60 + 200, far.ticks());
-
-    StopMarks.Approach near = StopMarks.approach(20.0, 0.5, 0.5, 0.0025);
-    assertEquals(0.0, near.holdBlocks(), 1.0e-9);
-    assertEquals(20.0, near.brakeBlocks(), 1.0e-9);
-
-    StopMarks.Approach slow = StopMarks.approach(20.0, 0.01, 0.5, 0.05);
-    assertEquals(StopMarks.MIN_HOLD_BPT, slow.holdBpt(), 1.0e-9, "进站已经很慢时不至于一路蠕行");
-    assertEquals(19.9, slow.holdBlocks(), 1.0e-9);
-  }
-
-  @Test
   @DisplayName("只认车站牌子前方、节数对得上的；写得越专门越优先，再取近的")
   void selectByCarriagesAndDirection() {
     Vector station = new Vector(0.5, 64.0, 0.5);
@@ -198,6 +180,34 @@ class StopMarksTest {
         pos(16),
         StopMarks.select(marks, station, new Vector(1, 0, 0), 8).orElseThrow().mark().rail());
     assertTrue(StopMarks.select(marks, station, new Vector(-1, 0, 0), 8).isEmpty());
+  }
+
+  @Test
+  @DisplayName("先到联挂站、等对方挂上来：按挂上以后的节数停，没有那个节数的标志时照本车节数")
+  void selectForTheMergedConsistWhenWaitingToBeJoined() {
+    Vector station = new Vector(0.5, 64.0, 0.5);
+    Vector east = new Vector(1, 0, 0);
+    List<StopMarks.Mark> marks = List.of(mark(4, "1"), mark(12, "2"));
+
+    assertEquals(
+        pos(12),
+        StopMarks.select(marks, station, east, 1, OptionalInt.of(2)).orElseThrow().mark().rail(),
+        "单节车先到、主干一节：停在两节车的标志，身后留出一节");
+    assertEquals(
+        pos(4),
+        StopMarks.select(marks, station, east, 1, OptionalInt.empty()).orElseThrow().mark().rail(),
+        "不等谁挂上来：照本车节数");
+    assertEquals(
+        pos(4),
+        StopMarks.select(marks, station, east, 1, OptionalInt.of(3)).orElseThrow().mark().rail(),
+        "没有三节车的标志：照本车节数");
+    assertEquals(
+        pos(12),
+        StopMarks.select(marks, station, east, 2, OptionalInt.of(1)).orElseThrow().mark().rail(),
+        "挂上以后不比本车长（读错了）：照本车节数");
+    assertTrue(
+        StopMarks.select(marks, station, new Vector(-1, 0, 0), 1, OptionalInt.of(2)).isEmpty(),
+        "方向照旧只认前方的标志");
   }
 
   @Test

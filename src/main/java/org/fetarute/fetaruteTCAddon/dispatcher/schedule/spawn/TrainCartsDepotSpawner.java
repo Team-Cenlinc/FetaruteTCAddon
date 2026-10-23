@@ -9,8 +9,10 @@ import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnLocat
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnMode;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -27,16 +29,21 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.coupler.CarTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -122,9 +129,19 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
     Route route = routeOpt.get();
 
-    // 解析 depot nodeId（可能是 DYNAMIC）
-    String depotSpec =
-        ticket.selectedDepotNodeId().filter(s -> !s.isBlank()).orElse(service.depotNodeId());
+    // 解析 depot nodeId（可能是 DYNAMIC）：与派票器同一口径校验已选股道
+    Optional<String> depotSpecOpt =
+        SpawnDirectiveParser.effectiveDepotSpec(
+            service.depotNodeId(), ticket.selectedDepotNodeId());
+    if (depotSpecOpt.isEmpty()) {
+      debugLogger.accept(
+          "自动发车失败: 出库写法无效或已选股道不在允许集合内 spec="
+              + service.depotNodeId()
+              + " selected="
+              + ticket.selectedDepotNodeId().orElse("-"));
+      return Optional.empty();
+    }
+    String depotSpec = depotSpecOpt.get();
     Optional<DepotInfo> depotInfoOpt = resolveDepotInfo(depotSpec);
     if (depotInfoOpt.isEmpty()) {
       debugLogger.accept("自动发车失败: 未找到 depot 牌子 spec=" + depotSpec);
@@ -160,17 +177,21 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
           "自动发车失败: 缺少 spawn pattern route=" + route.code() + " depot=" + depotId.value());
       return Optional.empty();
     }
-    String pattern = patternOpt.get();
-
     TrainCarts trainCarts = TrainCarts.plugin;
     if (trainCarts == null) {
       return Optional.empty();
     }
-    SpawnableGroup spawnable = SpawnableGroup.parse(trainCarts, pattern);
-    if (spawnable == null || spawnable.getMembers().isEmpty()) {
+    String pattern =
+        choice.kind() == ConsistArbiter.SpawnChoice.Kind.LEGACY
+            ? beforeJoin(provider, route, patternOpt.get(), trainCarts)
+            : patternOpt.get();
+    Optional<CompositeSpawnPattern.Parsed> parsed =
+        CompositeSpawnPattern.parse(trainCarts, pattern);
+    if (parsed.isEmpty()) {
       debugLogger.accept("自动发车失败: pattern 无效 pattern=" + pattern);
       return Optional.empty();
     }
+    SpawnableGroup spawnable = parsed.get().group();
 
     TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
     Set<RailBlockPos> anchors = findAnchorRails(access, depotInfo);
@@ -188,6 +209,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     MinecartGroup group = spawnedOpt.get();
     // 必须在本 tick 内（TrainCarts 首个物理 tick 之前）设置，否则未开启常驻加载的出库车会立刻被卸载。
     applySpawnPhysics(group.getProperties(), pattern, depotId);
+    CarTags.stampSpawnOrigins(group, parsed.get().parts(), parsed.get().partSizes());
     return Optional.of(
         new DepotSpawner.MaterializedSpawn(
             group,
@@ -270,11 +292,13 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     if (trainCarts == null) {
       return Optional.empty();
     }
-    SpawnableGroup spawnable = SpawnableGroup.parse(trainCarts, pattern);
-    if (spawnable == null || spawnable.getMembers().isEmpty()) {
+    Optional<CompositeSpawnPattern.Parsed> parsed =
+        CompositeSpawnPattern.parse(trainCarts, pattern);
+    if (parsed.isEmpty()) {
       debugLogger.accept("区间生成失败: pattern 无效 pattern=" + pattern);
       return Optional.empty();
     }
+    SpawnableGroup spawnable = parsed.get().group();
     // 区间点离玩家远，车身那一带常常没加载；TrainCarts 生成时会在主线程把每节车周围的区块同步读进来，几十个区块会卡服。
     // 还有没加载的就先在后台加载并挂票，这一次不生成，发车侧稍后再试。
     if (preloadEntryChunks(
@@ -303,6 +327,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
     MinecartGroup group = spawnedOpt.get();
     applySpawnPhysics(group.getProperties(), pattern, entry.node());
+    CarTags.stampSpawnOrigins(group, parsed.get().parts(), parsed.get().partSizes());
     return Optional.of(
         new DepotSpawner.MaterializedSpawn(
             group,
@@ -319,6 +344,64 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
                     now,
                     choice.tags(),
                     entry.index())));
+  }
+
+  /**
+   * 写了联挂（COPL）的主干按旧规则出车时只出联挂之前的那一段：route 上写的是联挂之后的完整写法（编表的要求），按表时票上已经是编表推好的那一段。 推法与编表相同（{@link
+   * CouplingPlanner#beforeJoin}）；没写联挂或推不出时照原写法。
+   */
+  private String beforeJoin(
+      StorageProvider provider, Route route, String pattern, TrainCarts trainCarts) {
+    try {
+      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      if (stops.stream().noneMatch(stop -> RouteCouplingDirectives.couple(stop).isPresent())) {
+        return pattern;
+      }
+      Map<String, Route> byCode = new HashMap<>();
+      Map<String, List<RouteStop>> stopsByCode = new HashMap<>();
+      List<RouteCouplingDirectives.RouteRef> lineRoutes = new ArrayList<>();
+      for (Route other : provider.routes().listByLine(route.lineId())) {
+        String code = other.code().toLowerCase(Locale.ROOT);
+        List<RouteStop> otherStops =
+            other.id().equals(route.id()) ? stops : provider.routeStops().listByRoute(other.id());
+        byCode.putIfAbsent(code, other);
+        stopsByCode.putIfAbsent(code, otherStops);
+        lineRoutes.add(
+            new RouteCouplingDirectives.RouteRef(
+                other.code(), RouteCouplingDirectives.groupOf(other.metadata()), otherStops));
+      }
+      Optional<String> kept =
+          CouplingPlanner.beforeJoin(
+              new RouteCouplingDirectives.RouteRef(
+                  route.code(), RouteCouplingDirectives.groupOf(route.metadata()), stops),
+              pattern,
+              lineRoutes,
+              code -> {
+                String key = code.toLowerCase(Locale.ROOT);
+                Route other = byCode.get(key);
+                List<RouteStop> otherStops = stopsByCode.getOrDefault(key, List.of());
+                return Optional.ofNullable(other)
+                    .flatMap(DepotSpawnPattern::fromRoute)
+                    .or(
+                        () ->
+                            otherStops.isEmpty()
+                                ? Optional.empty()
+                                : SpawnDirectiveParser.findDirectiveTarget(
+                                        otherStops.get(0), "CRET")
+                                    .flatMap(this::depotSignPattern));
+              },
+              composite ->
+                  CompositeSpawnPattern.parse(trainCarts, composite)
+                      .map(CompositeSpawnPattern.Parsed::partSizes));
+      kept.ifPresent(
+          value ->
+              debugLogger.accept(
+                  "出车按联挂之前的编组 route=" + route.code() + " pattern=" + pattern + " -> " + value));
+      return kept.orElse(pattern);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("推联挂之前的编组失败 route=" + route.code() + " error=" + ex);
+      return pattern;
+    }
   }
 
   /** 交路收尾 DSTY 那个车库牌子第 4 行的编组（回库交路首站不是车库，借它回的那个车库的）；没有 DSTY 或读不到时为空。 */
@@ -961,79 +1044,24 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
    * <p>解析 "DYNAMIC:OP:D:DEPOT" 或 "DYNAMIC:OP:D:DEPOT:[1:3]" 格式， 选择第一个可用（空闲）的轨道。
    */
   private Optional<DepotInfo> resolveDynamicDepotInfo(String dynamicSpec) {
-    // 解析 DYNAMIC:OP:D:DEPOT 或 DYNAMIC:OP:D:DEPOT:[1:3]
-    if (dynamicSpec == null
-        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
+    var parsed = SpawnDirectiveParser.dynamicDepot(dynamicSpec);
+    if (parsed.isEmpty()) {
+      debugLogger.accept("DYNAMIC depot: 定义无效 spec=" + dynamicSpec);
       return Optional.empty();
     }
-    String rest = dynamicSpec.substring("DYNAMIC:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3) {
-      return Optional.empty();
-    }
-    String operatorCode = parts[0].trim();
-    String nodeType = parts[1].trim(); // "D" for depot
-    String nodeName = parts[2].trim();
-
-    // 解析轨道范围
-    int fromTrack = 1;
-    int toTrack = 99;
-    if (parts.length >= 4) {
-      String rangeStr = parts[3].trim();
-      Optional<TrackRange> rangeOpt = parseTrackRange(rangeStr);
-      if (rangeOpt.isPresent()) {
-        fromTrack = rangeOpt.get().from();
-        toTrack = rangeOpt.get().to();
-      }
-    }
-
-    // 构建 nodeId 前缀用于匹配
-    String nodeIdPrefix = operatorCode + ":" + nodeType + ":" + nodeName + ":";
-
-    // 查找所有匹配的 depot 节点
-    List<SignNodeRegistry.SignNodeInfo> candidates =
+    var spec = parsed.get();
+    List<SignNodeRegistry.SignNodeInfo> inRange =
         signNodeRegistry.snapshotInfos().values().stream()
             .filter(info -> info != null && info.definition() != null)
             .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
-            .filter(
-                info -> {
-                  String nodeIdValue = info.definition().nodeId().value();
-                  return nodeIdValue != null
-                      && nodeIdValue
-                          .toUpperCase(java.util.Locale.ROOT)
-                          .startsWith(nodeIdPrefix.toUpperCase(java.util.Locale.ROOT));
-                })
-            .toList();
-
-    if (candidates.isEmpty()) {
-      debugLogger.accept("DYNAMIC depot: 未找到匹配节点 spec=" + dynamicSpec + " prefix=" + nodeIdPrefix);
-      return Optional.empty();
-    }
-
-    // 按轨道号排序并过滤范围
-    final int fFrom = fromTrack;
-    final int fTo = toTrack;
-    List<SignNodeRegistry.SignNodeInfo> inRange =
-        candidates.stream()
-            .filter(
-                info -> {
-                  int track = extractTrackNumber(info.definition().nodeId().value());
-                  return track >= fFrom && track <= fTo;
-                })
+            .filter(info -> DynamicStopMatcher.matches(info.definition().nodeId(), spec))
             .sorted(
-                java.util.Comparator.comparingInt(
-                    info -> extractTrackNumber(info.definition().nodeId().value())))
+                java.util.Comparator.comparing(
+                    (SignNodeRegistry.SignNodeInfo info) -> info.definition().nodeId(),
+                    DynamicStopMatcher.TRACK_ORDER))
             .toList();
-
     if (inRange.isEmpty()) {
-      debugLogger.accept(
-          "DYNAMIC depot: 范围内无节点 spec="
-              + dynamicSpec
-              + " range=["
-              + fromTrack
-              + ":"
-              + toTrack
-              + "]");
+      debugLogger.accept("DYNAMIC depot: 集合内无节点 spec=" + dynamicSpec);
       return Optional.empty();
     }
 
@@ -1077,62 +1105,6 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
             selected.z(),
             selected.locationText()));
   }
-
-  /**
-   * 解析轨道范围字符串。
-   *
-   * @param rangeStr 如 "[1:3]" 或 "1"
-   * @return TrackRange 或 empty
-   */
-  private static Optional<TrackRange> parseTrackRange(String rangeStr) {
-    if (rangeStr == null || rangeStr.isBlank()) {
-      return Optional.empty();
-    }
-    String trimmed = rangeStr.trim();
-    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-      String inner = trimmed.substring(1, trimmed.length() - 1);
-      int colonIdx = inner.indexOf(':');
-      if (colonIdx > 0) {
-        try {
-          int from = Integer.parseInt(inner.substring(0, colonIdx).trim());
-          int to = Integer.parseInt(inner.substring(colonIdx + 1).trim());
-          return Optional.of(new TrackRange(from, to));
-        } catch (NumberFormatException e) {
-          return Optional.empty();
-        }
-      }
-    }
-    // 单个数字
-    try {
-      int track = Integer.parseInt(trimmed);
-      return Optional.of(new TrackRange(track, track));
-    } catch (NumberFormatException e) {
-      return Optional.empty();
-    }
-  }
-
-  /**
-   * 从 nodeId 中提取轨道号。
-   *
-   * @param nodeId 如 "SURC:D:OFL:1"
-   * @return 轨道号，解析失败返回 Integer.MAX_VALUE
-   */
-  private static int extractTrackNumber(String nodeId) {
-    if (nodeId == null || nodeId.isBlank()) {
-      return Integer.MAX_VALUE;
-    }
-    int lastColon = nodeId.lastIndexOf(':');
-    if (lastColon < 0 || lastColon >= nodeId.length() - 1) {
-      return Integer.MAX_VALUE;
-    }
-    try {
-      return Integer.parseInt(nodeId.substring(lastColon + 1).trim());
-    } catch (NumberFormatException e) {
-      return Integer.MAX_VALUE;
-    }
-  }
-
-  private record TrackRange(int from, int to) {}
 
   private record DepotInfo(NodeId nodeId, UUID worldId, int x, int y, int z, String locationText) {}
 }

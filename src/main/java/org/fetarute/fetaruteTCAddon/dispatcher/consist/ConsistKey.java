@@ -39,4 +39,15 @@ public final class ConsistKey {
   public static Optional<String> of(String pattern) {
     return tidy(pattern).map(value -> value.toLowerCase(Locale.ROOT));
   }
+
+  /**
+   * 两处写法是不是同一个车型：都归一后比较。表上的车型（编表从交路编组推出，保留大小写）与车上的车型标签（归一后的键）比较时必须用它。
+   *
+   * @return 两边都没有车型、或归一后相同时为 true
+   */
+  public static boolean same(Optional<String> first, Optional<String> second) {
+    Optional<String> left = first == null ? Optional.empty() : first.flatMap(ConsistKey::of);
+    Optional<String> right = second == null ? Optional.empty() : second.flatMap(ConsistKey::of);
+    return left.equals(right);
+  }
 }

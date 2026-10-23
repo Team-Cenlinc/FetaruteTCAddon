@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.drive.session;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -48,7 +49,7 @@ class DriveParamsResolverTest {
   }
 
   @Test
-  // 出车写入标签后上车：满牵引的加速度、常用制动的减速度就是编表运行曲线的那组数
+  // 出车写入标签后上车：满牵引的加速度就是编表运行曲线的加速度；常用制动的减速度乘自动运行的舒适比例才是编表曲线的减速度
   void stampedTrainDrivesWithTimetableMotion() {
     TagStore train = new TagStore();
     SpawnMotionTags.stamp(train.properties(), config);
@@ -56,13 +57,17 @@ class DriveParamsResolverTest {
     DriveParams params = DriveParamsResolver.resolve(train.properties(), CARS, config, drive);
 
     assertEquals(timetable.accelBps2(), params.accelBps2());
-    assertEquals(timetable.decelBps2(), params.decelBps2());
+    assertEquals(
+        timetable.decelBps2(),
+        params.decelBps2() * config.trainConfigSettings().atoBrakeFraction(),
+        1e-12);
     assertEquals(DriveMode.MU, params.mode(), "默认车种为动车组，不按机车车厢数折算");
     assertEquals(drive.muReferenceMotorFraction(), params.motorFraction(), "未给动拖比不折算");
   }
 
   @Test
-  // 档位力度：P3 为满牵引、B4 为常用全制动，与编表曲线的满加速度、满减速度相同
+  // 档位力度：P3 为满牵引，与编表曲线的满加速度相同；B4 为常用全制动，编表曲线（自动运行）只用它的舒适比例，
+  // 人按全制动刹得比自动运行狠，照建议速度开不比时刻表慢
   void topNotchesMatchTimetableCurve() {
     TagStore train = new TagStore();
     SpawnMotionTags.stamp(train.properties(), config);
@@ -70,7 +75,13 @@ class DriveParamsResolverTest {
     DriveParams params = DriveParamsResolver.resolve(train.properties(), CARS, config, drive);
 
     assertEquals(timetable.accelBps2(), params.accelBps2() * drive.tractionFraction(Notch.P3));
-    assertEquals(timetable.decelBps2(), params.decelBps2() * drive.brakeFraction(Notch.B4));
+    assertEquals(
+        timetable.decelBps2(),
+        params.decelBps2()
+            * drive.brakeFraction(Notch.B4)
+            * config.trainConfigSettings().atoBrakeFraction(),
+        1e-12);
+    assertTrue(params.decelBps2() * drive.brakeFraction(Notch.B4) > timetable.decelBps2());
   }
 
   @Test
@@ -113,7 +124,10 @@ class DriveParamsResolverTest {
 
     SpeedCurve rebuilt = RunCurveModel.Settings.fromConfig(reloaded, 8.0).motion();
     assertEquals(rebuilt.accelBps2(), params.accelBps2());
-    assertEquals(rebuilt.decelBps2(), params.decelBps2());
+    assertEquals(
+        rebuilt.decelBps2(),
+        params.decelBps2() * reloaded.trainConfigSettings().atoBrakeFraction(),
+        1e-12);
   }
 
   @Test

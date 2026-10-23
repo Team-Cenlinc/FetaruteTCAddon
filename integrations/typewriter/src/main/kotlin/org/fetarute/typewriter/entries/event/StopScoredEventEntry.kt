@@ -22,26 +22,25 @@ import org.fetarute.typewriter.entries.action.AssignTripActionEntry
 import java.util.Optional
 import kotlin.reflect.KClass
 
-@Entry("fetarute_stop_scored_event", "When a FetaruteTC driver stops at a station", Colors.YELLOW, "mdi:sign-direction")
+@Entry("fetarute_stop_scored_event", "FTCA 驾驶员每站停车评定时", Colors.YELLOW, "mdi:sign-direction")
 @ContextKeys(StopScoredContextKeys::class)
 /**
- * The `Stop Scored Event` is triggered each time the driver stops at a station (or runs past it)
- * and the stop has been scored.
+ * “每站停车评定”事件：驾驶员每到一站停车（或越站）、这一站评定完成时触发。
  *
- * ## How could this be used?
- * Give a tutorial hint when the player stops short, or count accurate stops for an achievement.
+ * ## 用法示例
+ * 玩家停短时给一条教学提示，或数停准的站来发成就。
  */
 class StopScoredEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only stops of tasks given by this action. Leave empty for any stop, also without a task.")
+    @Help("只要这个动作派出的驾驶任务里的停车；留空则任何停车都算，包括不领任务的驾驶。")
     val assignedBy: Ref<AssignTripActionEntry> = emptyRef(),
-    @Help("Only this station name. Leave blank for any station.")
+    @Help("只要这个站名的车站；留空不限车站。")
     val station: String = "",
-    @Help("Only this stop result. Leave empty for any result.")
+    @Help("只要这个停车结果；留空不限结果。")
     val outcome: Optional<StopOutcome> = Optional.empty(),
-    @Help("Only stops of tasks from these sources. Leave empty for any stop, also without a task.")
+    @Help("只要这些来源的驾驶任务里的停车；留空则任何停车都算，包括不领任务的驾驶。")
     val sources: List<TaskSource> = emptyList(),
 ) : EventEntry
 

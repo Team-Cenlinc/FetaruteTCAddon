@@ -38,11 +38,23 @@ public final class PidsLayoutRegistry {
       List.of(
           "platform-1x3",
           "platform-1x4",
+          "platform-1x3-right",
+          "platform-1x4-right",
           "platform-group-1x3",
           "platform-group-1x4",
           "platform-2x1",
           "station-3x5",
           "status-3x5");
+
+  /**
+   * 由同尺寸站台屏左右对调得出的内置布局（布局 ID → 原布局 ID）：站台号在右，屏幕挂在站台另一侧时站台号靠着站台一边，兼作指示。 不另存文件，原布局改了随之改（见 {@link
+   * PidsLayout#mirrored}）。
+   */
+  public static final Map<String, String> MIRRORED =
+      Map.of("platform-1x3-right", "platform-1x3", "platform-1x4-right", "platform-1x4");
+
+  /** 对调出的布局名：原布局名后加这一段。 */
+  static final String MIRRORED_SUFFIX = "（站台号在右）";
 
   /** 用户布局目录（相对插件数据目录）。 */
   public static final String DIRECTORY = "pids/layouts";
@@ -82,7 +94,12 @@ public final class PidsLayoutRegistry {
   public void reload() {
     Map<String, PidsLayout> loadedBuiltIn = new LinkedHashMap<>();
     for (String id : BUILT_IN) {
-      loadBuiltIn(id).ifPresent(layout -> loadedBuiltIn.put(id, layout));
+      String original = MIRRORED.get(id);
+      Optional<PidsLayout> layout =
+          original == null
+              ? loadBuiltIn(id)
+              : Optional.ofNullable(loadedBuiltIn.get(original)).map(found -> mirror(id, found));
+      layout.ifPresent(found -> loadedBuiltIn.put(id, found));
     }
     Map<String, PidsLayout> merged = new LinkedHashMap<>(loadedBuiltIn);
     int custom = 0;
@@ -97,6 +114,11 @@ public final class PidsLayoutRegistry {
     builtIn = Collections.unmodifiableMap(loadedBuiltIn);
     layouts = Collections.unmodifiableMap(merged);
     logger.info("站台屏布局已加载: 内置 " + loadedBuiltIn.size() + " 个，自定义 " + custom + " 个");
+  }
+
+  /** 对调出的内置布局（见 {@link #MIRRORED}）。 */
+  public static PidsLayout mirror(String id, PidsLayout original) {
+    return original.mirrored(id, original.name() + MIRRORED_SUFFIX);
   }
 
   /** 按 ID 查找布局。 */

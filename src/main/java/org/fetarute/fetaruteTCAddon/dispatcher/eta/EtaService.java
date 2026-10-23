@@ -137,6 +137,26 @@ public final class EtaService {
   /** 运行时真实停车状态（列车名 → 当前 STOP 生命周期）；未接入时视为无扣停。 */
   private volatile java.util.function.Function<String, Optional<RuntimeStopState>> stopStates;
 
+  /** 联挂之后的去向：回程支线交路 → 联挂后接着跑的主干交路；未接入或不联挂时为空。 */
+  private volatile java.util.function.Function<UUID, Optional<ThroughRoute>> throughRoutes =
+      routeId -> Optional.empty();
+
+  /**
+   * 回程支线联挂以后接着跑的主干。
+   *
+   * @param route 主干交路
+   * @param joinIndex 联挂站在主干交路里的下标
+   */
+  public record ThroughRoute(UUID route, int joinIndex) {
+
+    public ThroughRoute {
+      Objects.requireNonNull(route, "route");
+    }
+  }
+
+  /** 在运营终点分行后留下、不再载客的那一段停在本站（见 {@link DivisionRemainders}）；未接入时没有。 */
+  private volatile DivisionRemainders divisionRemainders = (train, route, index) -> false;
+
   /** 时刻表计划发车（列车名, 停靠序号 → 计划发车时刻）；未接入或未按表运行时为空。 */
   private volatile java.util.function.BiFunction<String, Integer, Optional<Instant>>
       plannedDepartures;
@@ -219,6 +239,38 @@ public final class EtaService {
   public void attachRuntimeStopStates(
       java.util.function.Function<String, Optional<RuntimeStopState>> stopStates) {
     this.stopStates = stopStates;
+  }
+
+  /**
+   * 接入联挂之后的去向：回程支线的车在联挂站之前，站牌主目的地写主干的运营终点（乘客留在车上就到那里）；联挂站上它仍是终到。
+   *
+   * @param through 回程支线交路 → 联挂后接着跑的主干交路与联挂站在主干里的下标；传 null 表示断开
+   */
+  public void attachThroughRoutes(
+      java.util.function.Function<UUID, Optional<ThroughRoute>> through) {
+    this.throughRoutes = through == null ? routeId -> Optional.empty() : through;
+  }
+
+  /** 分行站就是运营终点、解下的一段接着载客时，拆开以后留下的一段在这里终到、不再载客。站台上同时停着两段，站牌只列解下的一段（开往支线），留下的一段停着的时候不另列“本站终到”。 */
+  @FunctionalInterface
+  public interface DivisionRemainders {
+
+    /**
+     * @param trainName 列车名
+     * @param routeId 列车此刻的交路（{@code 运营商:线路:交路}）
+     * @param index 列车此刻的路径点下标
+     * @return 这辆车是在这里分行后留下、不再载客的一段
+     */
+    boolean remainsAt(String trainName, String routeId, int index);
+  }
+
+  /**
+   * 接入分行后留下、不再载客的那一段（见 {@link DivisionRemainders}）。
+   *
+   * @param remainders 传 null 表示断开
+   */
+  public void attachDivisionRemainders(DivisionRemainders remainders) {
+    this.divisionRemainders = remainders == null ? (train, route, index) -> false : remainders;
   }
 
   /**
@@ -1170,19 +1222,25 @@ public final class EtaService {
       }
       RouteDefinition route = routeOpt.get();
       RouteStopPlan plan = stopPlan(trainName, route);
+      if (layoverMidRoute(trainName, snap, plan)) {
+        // 交路中途就在待命（解编解下、照搬了主干进度的车）：按它的下一趟由待命那一段列出，不按照搬来的进度列成主干的车
+        continue;
+      }
       EtaTarget stationTarget = new EtaTarget.Station(stationId);
-      boardRowAtStation(
-              trainName,
-              snap,
-              route,
-              plan,
-              stationTarget,
-              lineId,
-              now,
-              terminalCache,
-              terminalContext,
-              standing)
-          .ifPresent(rows::add);
+      if (!divisionRemainders.remainsAt(trainName, snap.routeId().value(), snap.routeIndex())) {
+        boardRowAtStation(
+                trainName,
+                snap,
+                route,
+                plan,
+                stationTarget,
+                lineId,
+                now,
+                terminalCache,
+                terminalContext,
+                standing)
+            .ifPresent(rows::add);
+      }
       Optional<BoardStop> stopOpt =
           resolveTargetSelection(route, plan, snap.routeIndex(), stationTarget)
               .flatMap(target -> runningBoardStop(trainName, route, snap, plan, target, lineId));
@@ -1401,7 +1459,8 @@ public final class EtaService {
                 delay,
                 Optional.empty(),
                 terminalCache,
-                terminalContext)));
+                terminalContext,
+                ticket.serviceTripId())));
   }
 
   /**
@@ -1694,7 +1753,8 @@ public final class EtaService {
                 deviationSeconds(Optional.of(next.plannedDeparture()), departAt),
                 departureLoad(trainName, route, arrival.isPresent()),
                 terminalCache,
-                terminalContext)));
+                terminalContext,
+                Optional.of(next.serviceTripId()))));
   }
 
   /**
@@ -1741,6 +1801,14 @@ public final class EtaService {
   /** 运行中列车眼下的载客。 */
   private Optional<TrainLoad> loadOf(String trainName) {
     return snapshotStore.getSnapshot(trainName).flatMap(TrainRuntimeSnapshot::load);
+  }
+
+  /** 车登记在待命池里、进度却还没到交路最后一个节点。 */
+  private boolean layoverMidRoute(String trainName, TrainRuntimeSnapshot snap, RouteStopPlan plan) {
+    LayoverRegistry registry = this.layoverRegistry;
+    return registry != null
+        && snap.routeIndex() < plan.size() - 1
+        && registry.get(trainName).isPresent();
   }
 
   /**
@@ -1962,6 +2030,33 @@ public final class EtaService {
       Optional<TrainLoad> load,
       Map<UUID, TerminalInfo> terminalCache,
       TerminalResolveContext terminalContext) {
+    return boardRow(
+        stop,
+        result,
+        phase,
+        trainName,
+        delay,
+        load,
+        terminalCache,
+        terminalContext,
+        Optional.empty());
+  }
+
+  /**
+   * @param serviceTripId 票据与预测行的车次标识（{@link
+   *     org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket#serviceTripId}），按下一趟列出的车（折返站上的来车、终点待命的车）为下一趟的；
+   *     其余运行中列车为空
+   */
+  private BoardResult.BoardRow boardRow(
+      BoardStop stop,
+      EtaResult result,
+      BoardPhase phase,
+      Optional<String> trainName,
+      OptionalLong delay,
+      Optional<TrainLoad> load,
+      Map<UUID, TerminalInfo> terminalCache,
+      TerminalResolveContext terminalContext,
+      Optional<String> serviceTripId) {
     RouteDefinition route = stop.route();
     TerminalInfo terminal =
         resolveTerminalInfo(route, stop.routeUuid(), terminalCache, terminalContext);
@@ -1970,6 +2065,28 @@ public final class EtaService {
         resolveRowEndOperation(route, stop.routeUuid(), stop.target(), terminal, terminalContext);
     DestinationInfo destInfo = resolveBoardDestination(route, endOperation);
     int index = stop.index();
+    OptionalInt ownEnd = RouteTerminals.endOfOperationIndex(routeDefinitions.listStops(route.id()));
+    Optional<BoardResult.Joining> joining = Optional.empty();
+    if (ownEnd.isPresent() && index < ownEnd.getAsInt()) {
+      // 联挂站之前：乘客留在车上，挂上主干后到主干的终点
+      Optional<ThroughRoute> through = throughRoutes.apply(stop.routeUuid());
+      Optional<RouteDefinition> trunk =
+          through.map(ThroughRoute::route).flatMap(routeDefinitions::findById);
+      if (trunk.isPresent()) {
+        DestinationInfo trunkEnd = resolveEndOperation(trunk.get(), terminalContext);
+        if (!trunkEnd.isBlank()) {
+          destInfo = resolveBoardDestination(trunk.get(), trunkEnd);
+          joining =
+              Optional.of(
+                  new BoardResult.Joining(
+                      ownEnd.getAsInt(),
+                      endOperation.label(),
+                      endOperation.destinationId(),
+                      Optional.of(trunk.get().id().value()),
+                      through.get().joinIndex()));
+        }
+      }
+    }
     BoardPlatform platform = boardPlatform(stop);
     return new BoardResult.BoardRow(
         stop.lineName(),
@@ -1987,15 +2104,16 @@ public final class EtaService {
         phase,
         index,
         !stop.plan().stopsAt(index),
-        RouteTerminals.endOfOperationIndex(routeDefinitions.listStops(route.id()))
-            .equals(OptionalInt.of(index)),
+        ownEnd.equals(OptionalInt.of(index)),
         endOperation.destinationId().filter(RouteTerminals.OUT_OF_SERVICE_ID::equals).isPresent(),
         trainName,
         delay,
         platform.pending(),
         platform.candidates(),
         platform.planned(),
-        load);
+        load,
+        joining,
+        serviceTripId);
   }
 
   /**
@@ -2900,8 +3018,7 @@ public final class EtaService {
           planned.isPresent()
               ? planned.get()
               : spawnTrainConfigs.resolve(routeUuid, config.trainConfigSettings(), now);
-      settings =
-          settings.withMotion(new SpeedCurve(trainConfig.accelBps2(), trainConfig.decelBps2()));
+      settings = settings.withTrain(trainConfig.accelBps2(), trainConfig.decelBps2());
       maxSpeed = trainConfig.maxSpeedBps();
     }
     return new TravelTimeModel(
@@ -2937,7 +3054,7 @@ public final class EtaService {
     ConfigManager.ConfigView config = currentConfig();
     if (config != null && !TrainRuntimeSnapshot.Motion.NONE.equals(snap.motion())) {
       TrainConfig train = snap.motion().resolve(config.trainConfigSettings());
-      settings = settings.withMotion(new SpeedCurve(train.accelBps2(), train.decelBps2()));
+      settings = settings.withTrain(train.accelBps2(), train.decelBps2());
     }
     return new TravelTimeModel(
         new RunCurveModel(

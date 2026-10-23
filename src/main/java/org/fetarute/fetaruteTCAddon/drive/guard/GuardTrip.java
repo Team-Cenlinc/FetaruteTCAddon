@@ -20,11 +20,16 @@ public final class GuardTrip {
   private final Instant startedAt;
   private final List<Worked> stops = new ArrayList<>();
   private double blocks;
+  private double crewBlocks;
   private boolean examined;
   private boolean practiced;
 
-  /** 做过作业的一站：作业记录到结算时才折成成绩（出站监视在离站后还要采样一会儿）。 */
-  private record Worked(String station, GuardStopWork work) {}
+  /**
+   * 做过作业的一站：作业记录到结算时才折成成绩（出站监视在离站后还要采样一会儿）。
+   *
+   * @param crew 驾驶员人工驾驶时做的（同车加成）
+   */
+  private record Worked(String station, GuardStopWork work, boolean crew) {}
 
   /**
    * @param key 车次；不按时刻表运行时为 {@code null}
@@ -49,9 +54,24 @@ public final class GuardTrip {
     return startedAt;
   }
 
-  /** 记一站作业。 */
-  public void addStop(String station, GuardStopWork work) {
-    stops.add(new Worked(station, Objects.requireNonNull(work, "work")));
+  /**
+   * 记一站作业。
+   *
+   * @param crew 驾驶员人工驾驶时做的（同车加成）
+   */
+  public void addStop(String station, GuardStopWork work, boolean crew) {
+    stops.add(new Worked(station, Objects.requireNonNull(work, "work"), crew));
+  }
+
+  /** 驾驶员人工驾驶时做的站数（同车加成）。 */
+  public int crewStops() {
+    int count = 0;
+    for (Worked stop : stops) {
+      if (stop.crew()) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /** 这一趟到此刻的成绩。 */
@@ -68,11 +88,23 @@ public final class GuardTrip {
     return blocks;
   }
 
-  /** 列车又走了一段（车掌在车上时）。 */
-  public void addBlocks(double moved) {
+  /**
+   * 列车又走了一段（车掌在车上时）。
+   *
+   * @param crew 驾驶员正在人工驾驶（同车加成）
+   */
+  public void addBlocks(double moved, boolean crew) {
     if (Double.isFinite(moved) && moved > 0.0) {
       blocks += moved;
+      if (crew) {
+        crewBlocks += moved;
+      }
     }
+  }
+
+  /** 其中驾驶员人工驾驶时走过的距离（格，同车加成）。 */
+  public double crewBlocks() {
+    return crewBlocks;
   }
 
   /** 这一趟有车掌考试中做的站：不发奖励。 */
@@ -113,8 +145,28 @@ public final class GuardTrip {
       case COMMAND, OFFLINE, DEATH, GAME_MODE -> DriverTask.State.ABANDONED;
       case TRAIN_GONE, DISABLED, ADMIN, EXAM -> DriverTask.State.INTERRUPTED;
       case TIMEOUTS, LEFT_BEHIND, CAB_CHANGE -> DriverTask.State.FAILED;
-      case HANDOVER -> DriverTask.State.COMPLETED;
+      case HANDOVER, SPLIT_END, SPLIT_SWITCH, COUPLING -> DriverTask.State.COMPLETED;
+      case SPLIT_TIMEOUT -> DriverTask.State.INTERRUPTED;
     };
+  }
+
+  /**
+   * 车掌任务的终态：分行、联挂在中途结束值乘时，只有没设交班站、不是考试或练习派的任务算开完（与驾驶员中途结算同一口径），其余按中断了结；别的原因同 {@link #stateFor}。
+   *
+   * @param handoverStopSequence 任务的交班站停靠序号；没有时为负
+   * @param source 任务来源
+   */
+  public static DriverTask.State taskStateFor(
+      GuardSession.EndReason reason, int handoverStopSequence, String source) {
+    boolean midTrip =
+        reason == GuardSession.EndReason.SPLIT_END
+            || reason == GuardSession.EndReason.SPLIT_SWITCH
+            || reason == GuardSession.EndReason.COUPLING;
+    boolean interval =
+        handoverStopSequence >= 0
+            || DriverTask.SOURCE_EXAM.equals(source)
+            || DriverTask.SOURCE_TRAINING.equals(source);
+    return midTrip && interval ? DriverTask.State.INTERRUPTED : stateFor(reason);
   }
 
   /** 这个终态给不给奖励：开完一趟、中途离开、被撤下的按做过的站给；未完成的不给。 */

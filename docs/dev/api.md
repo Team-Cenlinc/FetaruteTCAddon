@@ -66,7 +66,7 @@ if (!FetaruteApi.isCompatible(this, "1.0.0")) {
 
 ## API 模块
 
-FetaruteApi 提供十个子模块、一个数据版本号 `dataRevision()`（1.6.0，见“车站组与停靠线路”一节），另有一组 Bukkit 事件（见“事件”一节）：
+FetaruteApi 提供十二个子模块、一个数据版本号 `dataRevision()`（1.6.0，见“车站组与停靠线路”一节），另有一组 Bukkit 事件（见“事件”一节）：
 
 | 模块 | 方法 | 功能 |
 |------|------|------|
@@ -80,6 +80,7 @@ FetaruteApi 提供十个子模块、一个数据版本号 `dataRevision()`（1.6
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表（1.9.0 站牌行结构化） |
 | `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消；1.11.0 车型） |
 | `drive()` | `DriveApi` | 驾驶任务：派任务、查询任务与驾驶状态、成绩记录（1.10.0；1.12.0 接班站与交班站改称 `takeoverStation`/`handoverStation`、停车结果改为 `StopOutcome`，旧名 `board`/`alight`/`StopWindow` 标为弃用、照常可用；1.13.0 `TaskRequest.rewards(false)` 不发驾驶奖励） |
+| `call()` | `CallApi` | 叫车（1.14.0）：车站上能叫车的方向与此刻能不能叫、叫车单；叫车功能未加载时为占位实现（`enabled()` 为 false） |
 | `guard()` | `GuardApi` | 车掌（1.14.0）：派车掌任务（`TaskRequest` 写法同驾驶任务，可设交班站、不发奖励）、查询任务与值乘、按车名找车掌、车掌记录与累计成绩；车掌功能未加载时为占位实现（`enabled()` 为 false） |
 
 ---
@@ -682,6 +683,8 @@ for (EtaApi.BoardRow row : board.rows()) {
 | `platformPending` / `platformCandidates` | 站台待定：本站是动态站台（DYNAMIC）停靠，列车还没有选台，时刻表也没有计划站台；此时 `platform` 为 `-`，候选为图上存在的股道号（升序，候选未知时为空）。只有一条候选时站台已经确定，不算待定 |
 | `cars` / `vacantSeats()` | 运行中列车各节车的座位与在座乘客（`EtaApi.CarLoad`，车头在前）与全车空位数；票据、预测与读不到车辆模型时为空。座位数取车辆模型里的座位个数，在座取坐在这节车上的玩家 |
 | `platformPlanned` | `platform` 是计划站台：时刻表排定的股道，或没有时刻表计划时列车在下一个停车站上先定的暂定股道。列车还没有选台，进站前选台时这条股道被占会改停别的站台，届时发 `TrainPlatformAssignedEvent`（原因 `CHANGED_FROM_PLAN`） |
+| `division` | 运行中的列车在本站或前方某站分行（1.14.0，`EtaApi.Division`）：交路写了解编 `DECP`，按表运行时表上这一班要拆、按现场编组切得开。`stopSequence` 是分行站的停靠序号（与本行相等时就在本站分行；`ahead(n)` 判在第 n 站之后），`stationId`/`station` 是分行站，`parts` 是两段（`EtaApi.DivisionPart`，车头在前）：节数、是否在分行站解下另走、分行后开往的车站（`destinationId`/`destination`；分行后不载客时为空，`inService()` 为 false）、分行后还停几个车站（`stops`）、分行后跑的交路与分行站在那条交路里的停靠序号（`routeId`/`fromSequence`，停站屏据此接着列分行之后的站）。只预测下一个分行站；这一站拆过以后就没有了。还没出车的一班（票据与预测行）按表运行时按表上那一班的出车编组切，不按表时为空。**主目的地**：`destination`/`destinationId` 写开得更远的一段（分行后停站多的一段；一样多时取留下的一段，即本交路的终点）的去向，另一段由第三方屏自己写进备注。分行站就是本交路的运营终点、解下的一段接着载客时，这一行 `terminating` 为 false（`endOperation` 仍是本交路自己的），那几节车接着跑的子交路首班不再另列一行。**拆开以后**：两段都还停在分行站时，解下、接着载客的那一列车那一行带 `divided` 为 true 的分行（`stopSequence` 是这一行的停靠序号，`parts` 里 `detached` 的一段就是这一列车），第三方屏可据此画“已分行、另一段不载客”的车厢标识；留下、不再载客的一段停着时不另列 |
+| `joining` | 列车联挂（1.14.0，`EtaApi.Joining`）。一是**前方站联挂**：交路是写了联挂 `COPL` 的主干的回程支线（只挂上这一条主干），列车在那里挂上主干、乘客留在车上继续前往主目的地。这时 `destination`/`destinationId` 是联挂后主干的运营终点，`endOperation` 仍是本交路自己的（联挂站）；`continuesOnRouteId`/`continuesFromSequence` 是联挂后接着跑的主干与联挂站在主干里的停靠序号（停站屏据此接着列联挂之后的站）。回程支线车到了联挂站按终到（`terminating` 为 true），不再带联挂。二是**本站联挂**：运行中的主干在本站挂上回程支线车，`stopSequence` 等于本行的停靠序号（`at(n)` 判在第 n 站联挂），挂上以后不再带。`stopSequence` 是联挂站的停靠序号，`stationId`/`station` 是联挂站；另带 `ownCars`（本列车几节）、`joiningCars`（另一列车几节）与 `joiningStanding`（另一列车已停在联挂站），读不到时节数为 0。运行中的车按现场（主干只在认得出要挂上的回程支线车时才写本站联挂）；还没出车的一班（票据与预测行）按表运行时按表上那一班写，节数由主干交路的组合编组与两边车底的编组推出 |
 
 **站台什么时候确定**：运行中的列车在到达本站的前一个节点（多为站咽喉）时选台，站台不够时更晚；停在站内的列车按它实际停的股道。按表运行的线路，编表时给动态站台排了计划股道（`/fta timetable build` 之后），选台前站牌就写计划站台（`platformPlanned`），选台时计划股道空闲就停它。
 没有时刻表计划的车（间隔发车，或旧表），调度在列车驶向下一个停车站时先定一条暂定股道（同样标 `platformPlanned`），选台时空闲就兑现；
@@ -822,6 +825,30 @@ for (TimetableApi.Trip trip : detail.trips()) {
 
 ---
 
+## CallApi - 叫车（1.14.0）
+
+玩家在站台屏或 `/fta call` 叫车；本 API 只查询，不代玩家叫车。管理员加开的车（`/fta depot spawn … --extra`）不是叫车，不在 `CallApi` 与叫车事件里。
+
+```java
+CallApi calls = api.call();
+if (calls.enabled()) {
+    // 主线程：车站上能叫车的方向（只列开放叫车的线路），不看个人冷却
+    for (CallApi.Direction d : calls.directionsAt("SURC", "PPK")) {
+        // d.availability()：AVAILABLE / NO_SOURCE / ALREADY_CALLED / NEXT_TRAIN_SOON / LINE_LIMIT
+        // d.minutes()：能叫时为叫车后约几分钟到站；已有叫来的车或下一班很快就到时为那辆车几分钟后到
+    }
+    // 任意线程：叫车单
+    calls.callOf(callId).ifPresent(call -> {
+        // call.state()：PENDING（还没派出）/ DISPATCHED（叫来的车在路上或跑完全程中）
+        // call.trainName()、call.playerId()（已派出的叫车重启后查不到叫车的玩家）
+    });
+    List<CallApi.CallView> mine = calls.callsOf(playerId);
+}
+```
+
+- `directionsAt` 只能在主线程调用（要排车源），否则抛出 `IllegalStateException`；与叫车对话框同一口径。
+- `callOf` 查还没派出的叫车，或已派出、叫来的车还在的叫车；`callsOf` 是玩家还没派出的叫车，加上本次运行中派出、叫来的车还在的。
+
 ## 事件（1.4.0）
 
 以下均为同步 Bukkit 事件，在事实发生后的**下一个 tick** 由主线程统一发出：调度路径里只入队，不直接调用外部代码，
@@ -877,6 +904,18 @@ public class BoardListener implements Listener {
 | `GuardTripScoredEvent` | 做过作业的一趟结算（换车次或值乘结束），只发按时刻表运行的车次；含终态与成绩 |
 | `GuardTaskFinishedEvent` | 车掌任务结束（完成、放弃、作废、未完成、中断），每个任务一次 |
 | `GuardDutyEndedEvent` | 值乘结束，含原因（如 `COMMAND`、`HANDOVER`、`TIMEOUTS`） |
+
+### 叫车事件（1.14.0）
+
+叫车事件在主线程发出、都只读；叫车与没派出就结束两种当场发出，派出与到站发生在调度主路径上，下一拍再发。管理员加开的车不发。
+叫车的玩家可能已下线，已派出的叫车在重启后查不到叫车的玩家，所以 `getPlayerId()` 可能为空。抽象基类 `TrainCallEvent` 不能直接监听。
+
+| 事件 | 时机 |
+|------|------|
+| `TrainCallPlacedEvent` | 玩家叫了一趟车：叫车票已出、车源已排好；含方向、线路、交路与估计几分钟到站 |
+| `TrainCallDispatchedEvent` | 叫来的车派出（车库出车、区间生成或首站待命车接走）；折返车开出时不发，等它开进终点被这一单接走才发 |
+| `TrainCallArrivedEvent` | 叫来的车到达叫车的车站（进度推进到本站），每张叫车单只发一次；首站待命车、折返车在叫车的车站接走时，派出时已停在这一站，跟着派出事件发（`getNodeId()` 为交路这一站的写法） |
+| `TrainCallEndedEvent` | 没派出就结束：玩家取消（`CANCELLED`）、等太久撤票（`TIMED_OUT`）、排不出车作废（`FAILED`） |
 
 ---
 
@@ -1027,7 +1066,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
-| 1.14.0 | 新增 `FetaruteApi#guard()` 与 `GuardApi`（车掌任务、值乘、记录）及车掌事件（`GuardTaskClaimEvent`、`GuardDutyStartEvent`、`GuardStopWorkedEvent`、`GuardDepartureSignalEvent`、`GuardEmergencyStopEvent`、`GuardIncidentReportEvent`、`GuardTripScoredEvent`、`GuardTaskFinishedEvent`、`GuardDutyEndedEvent`）。`DriveApi#records` 照旧返回该玩家的全部记录，车掌的记录 `mode` 为 `GUARD` |
+| 1.14.0 | 新增 `FetaruteApi#guard()` 与 `GuardApi`（车掌任务、值乘、记录）及车掌事件（`GuardTaskClaimEvent`、`GuardDutyStartEvent`、`GuardStopWorkedEvent`、`GuardDepartureSignalEvent`、`GuardEmergencyStopEvent`、`GuardIncidentReportEvent`、`GuardTripScoredEvent`、`GuardTaskFinishedEvent`、`GuardDutyEndedEvent`）。`DriveApi#records` 照旧返回该玩家的全部记录，车掌的记录 `mode` 为 `GUARD`。新增 `FetaruteApi#call()` 与 `CallApi`（车站上能叫车的方向、叫车单）及叫车事件（`TrainCallPlacedEvent`、`TrainCallDispatchedEvent`、`TrainCallArrivedEvent`、`TrainCallEndedEvent`）。`TimetableApi.Duty` 加 `splitFromTripCode`（由解编开始的交路：从哪一班的列车上解下）与 `joinsTripCode`（以联挂结束的交路：并入哪一班的列车），旧构造器保留。`EtaApi.BoardRow` 加 `division`（运行中列车在本站或前方分行，或刚在本站拆开；新记录 `EtaApi.Division`、`EtaApi.DivisionPart`）与 `joining`（回程支线的车在前方联挂、`destination` 为联挂后主干的终点，或主干在本站联挂；新记录 `EtaApi.Joining`），保留 1.9.0 起的全参构造器（不分行、不联挂）。会分行的列车 `destination` 写开得更远的一段 |
 | 1.9.0 | 站牌行结构化。**记录新增字段**：`EtaApi.BoardRow` 增加 `etaEpochMillis`（附 `eta()`）、`phase`（新枚举 `EtaApi.BoardPhase`）、`stopSequence`、`passing`、`terminating`、`outOfService`、`trainName`、`delaySeconds`、`platformPending`、`platformCandidates`；保留 1.8.0 的全参构造器作为次级构造器（时刻为 0、阶段为 `EN_ROUTE`、序号为 -1、`outOfService` 按主目的地 ID 是否为 `OUT_OF_SERVICE` 推断），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量；`Optional` 分量传 `null` 时规整为空。`EtaApi.BoardRow` 另增 `platformPlanned` 与 `cars`（新记录 `EtaApi.CarLoad`，附 `vacantSeats()`）；`TimetableApi.Departure` 增加 `plannedNodeId`（动态站台的计划股道），保留 1.8.0 与 1.7.0 的构造器。`RouteApi.RouteDetail` 增加 `via`（显式配置的经由站码，未配置为空列表），保留 1.8.0 的五参构造器。**新方法**：`TimetableApi#cancellations(from, to)`（按计划始发时刻查已取消车次，新记录 `TimetableApi.CancelledTrip`）、
 `TrainApi#listAllActiveTrains(boolean includeEta)`（为 false 时不算 ETA，接口带默认实现）。**新事件**：`TrainPlatformAssignedEvent`（站台定下来或变了）。**行为变更**：`getBoard` 列出停在本站的列车（`AT_STATION`）；时刻表预测排除已取消的车次；动态站台尚未选台时 `platform` 为计划站台或 `-`（此前为占位股道）；折返站上已知下一趟的来车按下一趟列出 |
 | 1.8.0 | 车次取消：`TimetableApi.Departure` 增加 `cancelled`（保留 1.7.0 构造器，取消为 false），新增 `TimetableTripCancelledEvent` |

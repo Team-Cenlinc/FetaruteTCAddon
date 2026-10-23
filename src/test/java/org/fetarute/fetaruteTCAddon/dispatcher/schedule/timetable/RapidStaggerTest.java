@@ -188,6 +188,161 @@ class RapidStaggerTest {
     assertEquals(List.of(), evaluator.dwells, "已经完全错开，不试加停");
     assertEquals(Map.of("G", 30), search.improved().orElseThrow().shift());
     assertEquals(7, search.tried());
+    assertFalse(search.timedOut());
+  }
+
+  /**
+   * 到了时间上限就不再编下一批，停在已编过的候选里按同样的规则挑：每编一批之前问一次，串行一批一个。
+   *
+   * <p>夹具同上一例：第 3 次问之后到点，只编了 10、20 两个位置，都不比原表好，保持原表。
+   */
+  @Test
+  void theSearchStopsAtTheTimeLimitAndPicksAmongWhatWasBuilt() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> shift.get("G") == 30 || shift.get("G") == 40 ? 0L : 100L);
+    int[] asked = {0};
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 100),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator,
+            BuildPool.serial(),
+            () -> ++asked[0] > 2);
+
+    assertTrue(search.timedOut());
+    assertEquals(2, search.tried());
+    assertEquals(List.of(10, 20), evaluator.shifts);
+    assertTrue(search.improved().isEmpty(), search::toString);
+  }
+
+  /** 到点之前已经编到更好的就选它：错开的窗口刚进去就到点，选已编过的那一个，不再细试、不试加停。 */
+  @Test
+  void aTimeLimitKeepsTheBestSoFar() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> shift.get("G") == 30 || shift.get("G") == 40 ? 0L : 100L);
+    int[] asked = {0};
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 100),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator,
+            BuildPool.serial(),
+            () -> ++asked[0] > 3);
+
+    assertTrue(search.timedOut());
+    assertEquals(3, search.tried());
+    assertEquals(List.of(10, 20, 30), evaluator.shifts);
+    assertEquals(Map.of("G", 30), search.improved().orElseThrow().shift());
+    assertEquals(List.of(), evaluator.dwells);
+  }
+
+  /** 加长折返阶段里到点也一样：编过的那一档照常参与挑选，不再往长试、不平移。 */
+  @Test
+  void aTimeLimitInTheTurnbackStageStopsThere() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> 500L)
+            .dwelling((shift, dwell) -> dwell.turnback() && dwell.seconds() >= 150 ? 0L : 80L);
+    int[] asked = {0};
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 40),
+            base(100L),
+            measure -> List.of(turnbackPoint(120)),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator,
+            BuildPool.serial(),
+            () -> ++asked[0] > 1);
+
+    assertTrue(search.timedOut());
+    assertEquals(1, search.tried());
+    assertEquals(List.of(120), evaluator.dwells.stream().map(RapidStagger.Dwell::seconds).toList());
+    assertTrue(evaluator.history.isEmpty(), evaluator.history::toString);
+    assertEquals(120, search.improved().orElseThrow().dwell().orElseThrow().seconds());
+  }
+
+  /** 一直不到点：与不限时的搜索逐个候选相同，也不算超时。 */
+  @Test
+  void aTimeLimitThatIsNeverReachedChangesNothing() {
+    FakeEvaluator unlimited =
+        new FakeEvaluator(shift -> shift.get("G") == 20 ? 30L : 60L)
+            .dwelling(
+                (shift, dwell) ->
+                    shift.getOrDefault("G", 0) == 20 && dwell.seconds() == 30 ? 0L : 40L);
+    FakeEvaluator limited =
+        new FakeEvaluator(shift -> shift.get("G") == 20 ? 30L : 60L)
+            .dwelling(
+                (shift, dwell) ->
+                    shift.getOrDefault("G", 0) == 20 && dwell.seconds() == 30 ? 0L : 40L);
+
+    RapidStagger.Search before =
+        RapidStagger.search(
+            Map.of("G", 40),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            unlimited,
+            BuildPool.serial());
+    RapidStagger.Search after =
+        RapidStagger.search(
+            Map.of("G", 40),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            limited,
+            BuildPool.serial(),
+            () -> false);
+
+    assertEquals(before, after);
+    assertEquals(unlimited.history, limited.history);
+    assertEquals(unlimited.dwells, limited.dwells);
+    assertFalse(after.timedOut());
+  }
+
+  /** 超时的说明：开头写明错峰超时与上限，后面照常；没超时（0）与不带上限的写法相同。 */
+  @Test
+  void theReportSaysTheSearchTimedOut() {
+    String line = RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10);
+
+    assertTrue(line.startsWith("快车错峰：错峰超时（约 10 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑），试了 4 个位置"), line);
+    assertEquals(1, line.split("4 个位置", -1).length - 1, "编过几个只写一次：" + line);
+    assertTrue(line.endsWith("保持原表（被卡 150s），用时 600s"), line);
+    String turnbackOnly =
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 0, 600_000L, true, 10);
+    assertTrue(turnbackOnly.contains("到点时一档也还没编"), turnbackOnly);
+    assertFalse(turnbackOnly.contains("没有可加长的原地折返端"), "超时不是没有可试的：" + turnbackOnly);
+    assertEquals(
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false),
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 0));
+  }
+
+  /** 超时时另写到点未重编的候选数（它们也算在"试了 N 个位置"里）；没有就不写，没超时也不写。 */
+  @Test
+  void theTimeoutReportCountsCandidatesNotRebuilt() {
+    String line =
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10, 2);
+
+    assertTrue(
+        line.startsWith(
+            "快车错峰：错峰超时（约 10 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑；其中 2 个按原表相位排出来不可用、到点未重编），试了 4 个位置"),
+        line);
+    assertEquals(
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10),
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10, 0));
+    assertEquals(
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 0),
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 0, 2));
   }
 
   /**
@@ -615,6 +770,225 @@ class RapidStaggerTest {
   }
 
   /**
+   * 成批并行编、按原顺序消费：各场景挑出的候选与"试了几个位置"都与串行一模一样，提前多编的直接丢掉。
+   *
+   * <p>场景取上面各例（早停窗口、细试、组间先后、加长折返到 0 即停、加停、只试加长折返），批大小取 2、3、4、8： 窗口的起止落在批的中间或边界上都要对。
+   */
+  @Test
+  void aParallelSearchPicksExactlyWhatTheSerialOneDoes() {
+    record Scenario(
+        Map<String, Integer> periods,
+        RapidStagger.Candidate base,
+        java.util.function.Function<RapidStagger.Measure, List<RapidStagger.Dwell>> turnbacks,
+        java.util.function.Function<RapidStagger.Measure, List<RapidStagger.Dwell>> dwellPoints,
+        boolean turnbackOnly,
+        java.util.function.Supplier<FakeEvaluator> evaluator) {}
+    List<Scenario> scenarios =
+        List.of(
+            new Scenario(
+                Map.of("G", 100),
+                base(100L),
+                measure -> List.of(),
+                measure -> List.of(dwellPoint()),
+                false,
+                () ->
+                    new FakeEvaluator(
+                        shift -> shift.get("G") == 30 || shift.get("G") == 40 ? 0L : 100L)),
+            new Scenario(
+                Map.of("G", 100),
+                base(100L, 110L),
+                measure -> List.of(),
+                measure -> List.of(dwellPoint()),
+                false,
+                () ->
+                    new FakeEvaluator(
+                            shift -> shift.get("G") == 30 || shift.get("G") == 40 ? 0L : 100L)
+                        .reporting(
+                            shift -> shift.get("G") == 40 ? 5L : shift.get("G") == 30 ? 8L : 106L)),
+            new Scenario(
+                Map.of("G", 40),
+                base(100L),
+                measure -> List.of(),
+                measure -> List.of(dwellPoint()),
+                false,
+                () ->
+                    new FakeEvaluator(shift -> shift.get("G") == 20 ? 30L : 60L)
+                        .dwelling(
+                            (shift, dwell) ->
+                                shift.getOrDefault("G", 0) == 20 && dwell.seconds() == 30
+                                    ? 0L
+                                    : 40L)),
+            new Scenario(
+                Map.of("G", 40),
+                base(100L),
+                measure -> List.of(),
+                measure -> List.of(dwellPoint()),
+                false,
+                () ->
+                    new FakeEvaluator(shift -> 500L)
+                        .dwelling(
+                            (shift, dwell) ->
+                                shift.isEmpty() && dwell.seconds() == 15 ? 0L : 400L)),
+            new Scenario(
+                Map.of("A", 30, "B", 30),
+                base(100L),
+                measure -> List.of(),
+                measure -> List.of(),
+                false,
+                () -> new FakeEvaluator(shift -> shift.getOrDefault("A", 0) == 20 ? 0L : 50L)),
+            new Scenario(
+                Map.of("A", 30, "B", 30),
+                base(100L),
+                measure -> List.of(),
+                measure -> List.of(),
+                false,
+                () ->
+                    new FakeEvaluator(
+                        shift ->
+                            (shift.getOrDefault("A", 0) == 20 ? 0L : 50L)
+                                + (shift.getOrDefault("B", 0) == 10 ? 0L : 50L))),
+            new Scenario(
+                Map.of("G", 40),
+                base(100L),
+                measure -> List.of(),
+                measure -> List.of(),
+                false,
+                () -> new FakeEvaluator(shift -> shift.get("G") == 20 ? -1L : 100L)),
+            new Scenario(
+                Map.of("G", 40),
+                base(100L),
+                measure -> List.of(turnbackPoint(120)),
+                measure -> List.of(dwellPoint()),
+                false,
+                () ->
+                    new FakeEvaluator(shift -> 500L)
+                        .dwelling(
+                            (shift, dwell) ->
+                                dwell.turnback() && dwell.seconds() >= 150 ? 0L : 80L)),
+            new Scenario(
+                Map.of("G", 40),
+                base(100L),
+                measure -> List.of(turnbackPoint(120)),
+                measure -> List.of(dwellPoint()),
+                false,
+                () ->
+                    new FakeEvaluator(shift -> 500L)
+                        .detailing(
+                            (shift, dwell) ->
+                                switch (dwell.seconds()) {
+                                  case 120 -> new long[] {80L, 0L, 0L};
+                                  case 150 -> new long[] {0L, 200L, 500L};
+                                  default -> new long[] {0L, 0L, 0L};
+                                })),
+            new Scenario(
+                Map.of("G", 40),
+                base(100L),
+                measure -> List.of(turnbackPoint(120)),
+                measure -> List.of(dwellPoint()),
+                false,
+                () ->
+                    new FakeEvaluator(shift -> shift.get("G") == 20 ? 0L : 90L)
+                        .dwelling((shift, dwell) -> 60L)),
+            new Scenario(
+                Map.of("G", 40),
+                base(100L),
+                measure -> List.of(turnbackPoint(120)),
+                measure -> List.of(dwellPoint()),
+                true,
+                () ->
+                    new FakeEvaluator(shift -> 0L)
+                        .dwelling((shift, dwell) -> dwell.turnback() ? 50L : 0L)),
+            new Scenario(
+                Map.of("G", 200),
+                base(100L),
+                measure -> List.of(turnbackPoint(30), turnbackPoint(60)),
+                measure -> List.of(dwellPoint()),
+                false,
+                () ->
+                    new FakeEvaluator(shift -> (shift.get("G") * 37L) % 90L + 10L)
+                        .dwelling(
+                            (shift, dwell) ->
+                                (dwell.seconds() * 13L + shift.getOrDefault("G", 0)) % 70L + 5L)));
+    for (int threads : new int[] {2, 3, 4, 8}) {
+      try (BuildPool pool = BuildPool.open(threads)) {
+        for (int i = 0; i < scenarios.size(); i++) {
+          Scenario scenario = scenarios.get(i);
+          RapidStagger.Search serial =
+              RapidStagger.search(
+                  scenario.periods(),
+                  scenario.base(),
+                  scenario.turnbacks(),
+                  scenario.dwellPoints(),
+                  scenario.turnbackOnly(),
+                  scenario.evaluator().get());
+          RapidStagger.Search parallel =
+              RapidStagger.search(
+                  scenario.periods(),
+                  scenario.base(),
+                  scenario.turnbacks(),
+                  scenario.dwellPoints(),
+                  scenario.turnbackOnly(),
+                  scenario.evaluator().get(),
+                  pool);
+          assertEquals(serial, parallel, "场景 " + i + "，" + threads + " 线程");
+        }
+      }
+    }
+  }
+
+  /** 并行时编候选抛的异常留在它自己的位置：串行轮不到的候选（早停之后）抛错不影响结果，轮得到的照样抛出。 */
+  @Test
+  void aFailureBeyondTheEarlyStopIsDiscarded() {
+    java.util.function.Supplier<FakeEvaluator> evaluator =
+        () ->
+            new FakeEvaluator(
+                shift -> {
+                  int offset = shift.get("G");
+                  if (offset >= 60) {
+                    throw new IllegalStateException("早停之后才编得到的候选");
+                  }
+                  return offset == 30 || offset == 40 ? 0L : 100L;
+                });
+    RapidStagger.Search serial =
+        RapidStagger.search(
+            Map.of("G", 100),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(),
+            false,
+            evaluator.get());
+    try (BuildPool pool = BuildPool.open(8)) {
+      assertEquals(
+          serial,
+          RapidStagger.search(
+              Map.of("G", 100),
+              base(100L),
+              measure -> List.of(),
+              measure -> List.of(),
+              false,
+              evaluator.get(),
+              pool));
+      org.junit.jupiter.api.Assertions.assertThrows(
+          IllegalStateException.class,
+          () ->
+              RapidStagger.search(
+                  Map.of("G", 100),
+                  base(100L),
+                  measure -> List.of(),
+                  measure -> List.of(),
+                  false,
+                  new FakeEvaluator(
+                      shift -> {
+                        if (shift.get("G") == 20) {
+                          throw new IllegalStateException("轮得到的候选");
+                        }
+                        return 100L;
+                      }),
+                  pool));
+    }
+  }
+
+  /**
    * 加长点：被拖住的快车班次接的是在它起点终到的反方向快车时，就在那条快车上加长折返；秒数取这条快车各班被拖住的最大值，取整到 10 秒。
    *
    * <p>RAPID_N 从 NTA 出发，N1、N2 接 RAPID_O 终到 NTA（另一股道、停靠没带站点 code，按站台组认同一站）的车，于是加在 RAPID_O 的终到停靠；
@@ -932,9 +1306,13 @@ class RapidStaggerTest {
         dwellDetail;
     private java.util.function.Function<Map<String, Integer>, long[]> shiftDetail;
     private java.util.function.ToLongFunction<Map<String, Integer>> reportedByShift;
-    private final List<Integer> shifts = new java.util.ArrayList<>();
-    private final List<Map<String, Integer>> history = new java.util.ArrayList<>();
-    private final List<RapidStagger.Dwell> dwells = new java.util.ArrayList<>();
+    // 并行搜索时会被池内线程并发调用。
+    private final List<Integer> shifts =
+        java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    private final List<Map<String, Integer>> history =
+        java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+    private final List<RapidStagger.Dwell> dwells =
+        java.util.Collections.synchronizedList(new java.util.ArrayList<>());
 
     FakeEvaluator(java.util.function.ToLongFunction<Map<String, Integer>> caughtByShift) {
       this.caughtByShift = caughtByShift;

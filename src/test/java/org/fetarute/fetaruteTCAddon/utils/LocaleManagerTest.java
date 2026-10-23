@@ -8,6 +8,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
@@ -61,6 +62,27 @@ public final class LocaleManagerTest {
       assertFalse(superseded.getStringList(key).isEmpty(), key);
       assertFalse(superseded.getStringList(key).contains(bundled.getString(key)), key);
     }
+  }
+
+  /** 出入库随运营交路出票这一设置只有一个叫法，与出车计划里显示的“按运营交路调度”一致。 */
+  @Test
+  void dispatchByOperationUsesOneTerm() throws Exception {
+    YamlConfiguration bundled = bundled("lang/zh_CN.yml");
+    String term = bundled.getString("command.spawn.dispatch-by-operation");
+
+    assertEquals("按运营交路调度", term);
+    for (String key :
+        List.of(
+            "command.route.info.dispatch-by-operation",
+            "command.route.validate.dispatch-by-operation-type",
+            "command.route.set.batch-skipped-operation")) {
+      assertTrue(bundled.getString(key, "").contains(term), key);
+    }
+    bundled
+        .getValues(true)
+        .forEach(
+            (key, value) ->
+                assertFalse(value instanceof String text && text.contains("随运营交路"), key));
   }
 
   private static YamlConfiguration bundled(String path) throws Exception {

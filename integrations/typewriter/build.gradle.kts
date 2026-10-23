@@ -24,15 +24,13 @@ typewriter {
 
     extension {
         name = "FetaruteTCAddon"
-        shortDescription = "Give players FetaruteTC driving tasks and guard duties from Typewriter."
+        shortDescription = "用 Typewriter 给玩家派 FTCA 驾驶任务与车掌任务。"
         description = """
-            |The FetaruteTC extension connects Typewriter to the FetaruteTCAddon dispatcher.
-            |Give players a scheduled trip to drive (from a station, optionally only up to a given station),
-            |react when they take over, stop at a station or finish the task, and read their driving state,
-            |last score and completed task count as facts for quests and dialogue criteria.
-            |Give players the guard duty of a scheduled trip the same way, react to their station work,
-            |starting signals, incident reports and trip scores, and read their guard state and records as facts.
-            |Needs FetaruteTCAddon 1.14.0 or newer.
+            |FetaruteTC 扩展把 Typewriter 接到 FetaruteTCAddon 调度系统上。
+            |给玩家派一趟表定车次去驾驶（从某站接班，可以只开到某个交班站），在玩家接班、每站停车、任务结束时触发剧情，
+            |并把玩家是否在驾驶、任务进行到哪一步、驾驶记录作为事实，用于剧情目标与对话条件。
+            |车掌任务同样可以派发，可以跟进每站作业、发车信号、异常报告与每趟成绩，并读取值乘状态与车掌记录。
+            |需要 FetaruteTCAddon 1.14.0 或更新版本。
         """.trimMargin()
         engineVersion = property("typewriterEngineVersion") as String
         channel = com.typewritermc.moduleplugin.ReleaseChannel.BETA

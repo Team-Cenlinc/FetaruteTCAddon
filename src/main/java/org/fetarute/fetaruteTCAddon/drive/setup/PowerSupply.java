@@ -1,12 +1,15 @@
 package org.fetarute.fetaruteTCAddon.drive.setup;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
 /**
  * 列车的受电（动力来源）方式，决定启动流程里“受电”一步做什么、播放哪个模型动画。
  *
- * <p>由列车标签 {@code FTA_TRAIN_POWER} 指定，缺省取 {@code drive.yml} 的 {@code default-power}。
+ * <p>由列车标签 {@code FTA_TRAIN_POWER} 指定，缺省取 {@code drive.yml} 的 {@code default-power}。标签可写多个（多模车， 如
+ * {@code ptg6,diesel}），第一个是默认模式，当前用哪个另记在 {@code FTA_TRAIN_POWER_ACTIVE}（见 {@link TrainPower}）。
  */
 public enum PowerSupply {
   /** 受电弓，升到 5 米接触网高度（模型动画 {@code ptg5}）。 */
@@ -48,6 +51,41 @@ public enum PowerSupply {
   /** 是否为电力牵引（有主断路器）。 */
   public boolean electric() {
     return electric;
+  }
+
+  /** 是否只用车上的动力或储能（不靠接触网、第三轨）：开进哪种供电区段都能走。 */
+  public boolean selfPowered() {
+    return this == DIESEL || this == SUPERCAP;
+  }
+
+  /**
+   * 解析多模车的受电方式列表：逗号、加号、斜杠或空白分隔，按写的顺序去重。
+   *
+   * @return 受电方式列表；空白或有一项认不出时为空
+   */
+  public static Optional<List<PowerSupply>> parseList(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return Optional.empty();
+    }
+    List<PowerSupply> out = new ArrayList<>();
+    for (String part : raw.trim().split("[,+/\\s]+")) {
+      if (part.isBlank()) {
+        continue;
+      }
+      Optional<PowerSupply> supply = parse(part);
+      if (supply.isEmpty()) {
+        return Optional.empty();
+      }
+      if (!out.contains(supply.get())) {
+        out.add(supply.get());
+      }
+    }
+    return out.isEmpty() ? Optional.empty() : Optional.of(List.copyOf(out));
+  }
+
+  /** 列表写成标签的写法（逗号分隔）。 */
+  public static String format(List<PowerSupply> supplies) {
+    return String.join(",", supplies.stream().map(PowerSupply::key).toList());
   }
 
   /**

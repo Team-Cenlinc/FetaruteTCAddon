@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.RemarkPart;
  *
  * <ol>
  *   <li>末班车：快照标出的当天从本站开往这个终点的最后一班，红色标签
+ *   <li>分行：运行中的列车在本站或前方某站拆成两列，写解下另走的那一段（“后 4 节往 X”，分行后不载客时“后 2 节至 X 止”）， 钢蓝标签；本站分行时标签为“本站分行”
  *   <li>直通：本站之后、终点之前第一次换线（CHANGE），写换入线路的名称（放不下改写线路代码），标签用该线路的颜色
  *   <li>经由：本站之后、终点之前停车的站，琥珀色标签。交路配置了经由站就只写配置的、还没经过的站，配置的站都已经过就不写；
  *       没有配置时推一个：换乘线路最多的站，一样多时站台多的，再一样时直通站优先，最后取离本站近的。 只停一条线、站台不到 {@value #BIG_STATION_PLATFORMS}
@@ -58,6 +59,18 @@ final class PidsRemarks {
       parts.add(
           new RemarkPart(vocabulary.lastTrainTag(), theme.red(), List.of(), Optional.empty()));
     }
+    row.dividing().flatMap(division -> division(row, division, theme)).ifPresent(parts::add);
+    // 联挂：乘客留在车上，在联挂站挂上主干后开往主目的地
+    row.joiningAhead()
+        .filter(joining -> !joining.stationId().isBlank())
+        .map(
+            joining ->
+                new RemarkPart(
+                    vocabulary.joinTag(),
+                    theme.info(),
+                    List.of(stationName(joining.stationId())),
+                    Optional.empty()))
+        .ifPresent(parts::add);
     trip(row)
         .ifPresent(
             trip -> {
@@ -86,6 +99,34 @@ final class PidsRemarks {
   }
 
   /**
+   * 分行：去向不是这一行主目的地的那一段去哪里。通常是解下另走的一段（留下的一段的终点就是这一行的终点）；在运营终点分行、解下的一段接着载客时，
+   * 这一行的主目的地写的是解下那一段的去向，说的就是留下、本站止的一段。
+   */
+  private Optional<RemarkPart> division(PidsRow row, PidsRow.Division division, PidsTheme theme) {
+    Optional<PidsRow.Division.Part> detached = division.detachedPart();
+    Optional<PidsRow.Division.Part> other =
+        detached
+            .filter(
+                part ->
+                    part.destinationId().isEmpty()
+                        || !part.destinationId().equals(row.destinationId()))
+            .or(() -> division.parts().stream().filter(part -> !part.detached()).findFirst());
+    if (detached.isEmpty() || other.isEmpty()) {
+      return Optional.empty();
+    }
+    boolean here = row.dividesHere();
+    String text =
+        vocabulary.divisionRemark(
+            division.parts().indexOf(other.get()) == 0,
+            other.get().cars(),
+            other.get().destinationId().map(this::stationName),
+            here ? Optional.empty() : Optional.of(stationName(division.stationId())));
+    return Optional.of(
+        new RemarkPart(
+            vocabulary.divisionTag(here), theme.info(), List.of(text), Optional.empty()));
+  }
+
+  /**
    * 列车从本站往后的停靠点。
    *
    * @param stops 交路全部停靠点（与停靠序号同下标）
@@ -105,6 +146,80 @@ final class PidsRemarks {
     int here = row.stopSequence();
     int end = lastStop(stops);
     return here >= 0 && here < end ? Optional.of(new Trip(stops, here, end)) : Optional.empty();
+  }
+
+  /**
+   * 乘客留在车上能到的停靠点：分行时到分行站为止接着列开往终点那一段跑的交路（留下的一段开往终点时就是本交路），回程支线联挂时到联挂站为止接着列主干。
+   * 接着跑的交路查不到时照本交路。分行站、联挂站的下标不变（前面一截就是本交路）。
+   */
+  Optional<Trip> journey(PidsRow row) {
+    Optional<Trip> own = trip(row);
+    Optional<Continuation> continuation =
+        row.dividing()
+            .flatMap(
+                division ->
+                    onward(row, division)
+                        .filter(PidsRow.Division.Part::detached)
+                        .flatMap(
+                            part ->
+                                part.routeId()
+                                    .map(
+                                        route ->
+                                            new Continuation(
+                                                division.stopSequence(),
+                                                route,
+                                                part.fromSequence()))))
+            .or(
+                () ->
+                    row.joiningAhead()
+                        .flatMap(
+                            joining ->
+                                joining
+                                    .continuesOn()
+                                    .map(
+                                        route ->
+                                            new Continuation(
+                                                joining.stopSequence(),
+                                                route,
+                                                joining.continuesFrom()))));
+    if (continuation.isEmpty()) {
+      return own;
+    }
+    // 在本交路终点分行时本交路已没有之后的站，照样接着列
+    Continuation found = continuation.get();
+    List<RouteStop> stops = directory.stops(row.routeId());
+    List<RouteStop> next = directory.stops(found.route());
+    int here = row.stopSequence();
+    if (here < 0
+        || found.at() < here
+        || found.at() >= stops.size()
+        || found.from() < 0
+        || found.from() >= next.size()) {
+      return own;
+    }
+    List<RouteStop> joined = new ArrayList<>(stops.subList(0, found.at() + 1));
+    joined.addAll(next.subList(found.from() + 1, next.size()));
+    int end = lastStop(joined);
+    return here < end ? Optional.of(new Trip(joined, here, end)) : own;
+  }
+
+  /** 接着跑的交路：在本交路下标 {@code at} 处换到 {@code route} 的下标 {@code from}。 */
+  private record Continuation(int at, String route, int from) {}
+
+  /** 分行以后开往这一行终点的一段：去向与行的终点相同、接着载客的那一段；对不上时为空。 */
+  static Optional<PidsRow.Division.Part> onward(PidsRow row, PidsRow.Division division) {
+    if (row.destinationId().isEmpty()) {
+      return Optional.empty();
+    }
+    String destination = normalize(row.destinationId().get());
+    return division.parts().stream()
+        .filter(
+            part ->
+                part.destinationId()
+                    .map(PidsRemarks::normalize)
+                    .filter(destination::equals)
+                    .isPresent())
+        .findFirst();
   }
 
   /** 运营终点（最后一个停车的车站；其后的车库、折返线不算）的下标；没有时为 -1。 */

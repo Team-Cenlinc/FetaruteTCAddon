@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import java.util.logging.Level;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
@@ -55,7 +56,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRegistryRailGraphBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
@@ -81,6 +81,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserverHub;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopCurveAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
@@ -103,6 +104,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignRemoveListener;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignChangeListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.TrainSignBypassListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
@@ -127,6 +129,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseService;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
+import org.fetarute.fetaruteTCAddon.integration.traincarts.TransferFunctionInputPlayerNearby;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -144,7 +147,7 @@ import org.incendo.cloud.exception.InvalidSyntaxException;
 public final class FetaruteTCAddon extends JavaPlugin {
 
   private final CloudSimpleHandler cloudHandler = new CloudSimpleHandler();
-  private ConfigManager configManager;
+  private volatile ConfigManager configManager;
   private LocaleManager localeManager;
   private StorageManager storageManager;
   private CommandManager<CommandSender> commandManager;
@@ -152,6 +155,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SignNodeRegistry signNodeRegistry;
   private RailGraphService railGraphService;
   private GraphStaleNotifier graphStaleNotifier;
+  private SignNodeStorageSynchronizer signNodeStorageSync = SignNodeStorageSynchronizer.noop();
   private final PortalLinkRegistry portalLinks = new PortalLinkRegistry();
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
@@ -173,7 +177,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private final java.util.concurrent.atomic.AtomicLong routeNodeUsageVersion =
       new java.util.concurrent.atomic.AtomicLong();
 
-  private StationDirectory stationDirectory;
+  private volatile StationDirectory stationDirectory;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
   private DwellRegistry dwellRegistry;
@@ -183,10 +187,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus apiEventAlertBus;
   private org.bukkit.scheduler.BukkitTask apiEventTask;
   private RuntimeDispatchService runtimeDispatchService;
+  private volatile org.fetarute.fetaruteTCAddon.coupler.CouplerService couplerService;
+
+  /** 只读 HTTP 接口（{@code web-api:}）。 */
+  private org.fetarute.fetaruteTCAddon.web.WebApiServer webApiServer;
+
+  private org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher powerModeSwitcher;
   private RuntimeDispatchDiagnosticGate runtimeDispatchDiagnosticGate;
   private boolean runtimeDispatchRecoveryComplete;
   private ReclaimManager reclaimManager;
-  private org.fetarute.fetaruteTCAddon.call.CallService callService;
+  private volatile org.fetarute.fetaruteTCAddon.call.CallService callService;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
   private org.bukkit.scheduler.BukkitTask runtimeRecoveryTask;
 
@@ -196,10 +206,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private final RecoveryRequestBackoff runtimeRecoveryRequestBackoff =
       new RecoveryRequestBackoff(java.time.Duration.ofSeconds(10), System::nanoTime);
   private org.bukkit.scheduler.BukkitTask healthMonitorTask;
-  private SpawnManager spawnManager;
+  private volatile SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
   private org.bukkit.scheduler.BukkitTask spawnMonitorTask;
-  private org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService
+  private volatile org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService
       timetableService;
   private org.bukkit.scheduler.BukkitTask timetableReloadTask;
   private SpeedSettingStickListener speedSettingStickListener;
@@ -208,15 +218,31 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private EtaService etaService;
   private DisplayService displayService;
   private HudTemplateService hudTemplateService;
-  private org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService consistPlanService;
+  private volatile org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService
+      consistPlanService;
   private org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistDispatchArbiter consistArbiter;
   private HudDefaultTemplateService hudDefaultTemplateService;
   private PidsConfigManager pidsConfigManager;
   private PidsLayoutRegistry pidsLayoutRegistry;
-  private PidsService pidsService;
+  private volatile PidsService pidsService;
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
   private DriveSessionManager driveSessionManager;
   private LicenseService licenseService;
+
+  /**
+   * 登记 TrainCarts 扩展类型。
+   *
+   * <p>TrainCarts 启用时就恢复已加载区块里的列车并读取附件配置，到 {@link #onEnable()} 再登记就晚了：已恢复的模型会把自定义传递函数读成 Unknown。
+   */
+  @Override
+  public void onLoad() {
+    try {
+      TransferFunctionInputPlayerNearby.register();
+    } catch (RuntimeException | LinkageError ex) {
+      // 附加功能：登记失败只是模型里用不了这个输入，不能拖垮插件加载。
+      getLogger().log(Level.WARNING, "TrainCarts 传递函数「附近有玩家」登记失败", ex);
+    }
+  }
 
   @Override
   public void onEnable() {
@@ -227,6 +253,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.configManager = new ConfigManager(this);
     this.configManager.reload();
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
+    org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.configureDwell(
+        configManager.current().couplerSettings().decoupleSeconds(),
+        configManager.current().couplerSettings().coupleSeconds());
     ServerIdentity.configure(getConfig().getString("server-id", ""));
 
     this.loggerManager = new LoggerManager(getLogger());
@@ -293,10 +322,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
       driveSessionManager.shutdown();
       driveSessionManager = null;
     }
+    if (webApiServer != null) {
+      webApiServer.stop();
+      webApiServer = null;
+    }
     stopApiEvents();
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
     beginRuntimeDispatchShutdown();
     unregisterSignActions();
+    org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StationExitPoints.clear();
+    try {
+      TransferFunctionInputPlayerNearby.unregister();
+    } catch (RuntimeException | LinkageError ignored) {
+      // onLoad 登记失败时这里同样不可用，无需重复告警。
+    }
     if (signalEventBus != null) {
       signalEventBus.clear();
       signalEventBus = null;
@@ -321,6 +360,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
       callService.stop();
       callService = null;
     }
+    if (couplerService != null) {
+      couplerService.stop();
+      couplerService = null;
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShuntingRegistry.clear();
     runtimeDispatchRecoveryComplete = false;
     if (timetableReloadTask != null) {
       timetableReloadTask.cancel();
@@ -394,6 +438,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .update();
     this.configManager.reload();
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
+    org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.configureDwell(
+        configManager.current().couplerSettings().decoupleSeconds(),
+        configManager.current().couplerSettings().coupleSeconds());
     ServerIdentity.configure(getConfig().getString("server-id", ""));
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
     refreshSpawnMotionTags(configManager.current());
@@ -408,6 +455,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       pidsLayoutRegistry.reload();
     }
     this.localeManager.reload(configManager.current().locale());
+    applyWebApi();
     if (driveSessionManager != null) {
       driveSessionManager.reload(readDriveConfig());
       if (licenseService != null) {
@@ -617,6 +665,66 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return hudDefaultTemplateService;
   }
 
+  /** 多模车换模（交路备注 POWER）；调度未初始化时为空。 */
+  public Optional<org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher>
+      getPowerModeSwitcher() {
+    return Optional.ofNullable(powerModeSwitcher);
+  }
+
+  /** 多模车换模器：第一次用时建立，之后重载沿用；手动驾驶会话按当前的驾驶管理器查。 */
+  private org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher powerModeSwitcher() {
+    if (powerModeSwitcher != null) {
+      return powerModeSwitcher;
+    }
+    powerModeSwitcher =
+        new org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher(
+            this::getRouteDefinitionCache,
+            () -> {
+              DriveSessionManager drive = driveSessionManager;
+              return drive == null
+                  ? org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG5
+                  : drive.config().defaultPower();
+            },
+            message -> {
+              if (loggerManager != null) {
+                loggerManager.debug(message);
+              }
+            });
+    powerModeSwitcher.setDriverControl(
+        new org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher.DriverControl() {
+          @Override
+          public boolean driven(String trainName) {
+            DriveSessionManager drive = driveSessionManager;
+            return drive != null && drive.drivesTrain(trainName);
+          }
+
+          @Override
+          public boolean driverSwitches(
+              String trainName, org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply sectionMode) {
+            DriveSessionManager drive = driveSessionManager;
+            return drive != null && drive.powerSectionReached(trainName, sectionMode);
+          }
+
+          @Override
+          public void switched(
+              String trainName,
+              org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply from,
+              org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply to) {
+            DriveSessionManager drive = driveSessionManager;
+            if (drive != null) {
+              drive.powerSwitchedByDispatch(trainName, from, to);
+            }
+          }
+        });
+    powerModeSwitcher.setLaterRunner(
+        (ticks, task) -> {
+          if (isEnabled()) {
+            getServer().getScheduler().runTaskLater(this, task, ticks);
+          }
+        });
+    return powerModeSwitcher;
+  }
+
   /** 返回运行时调度服务（若未初始化则为空）。 */
   public Optional<RuntimeDispatchService> getRuntimeDispatchService() {
     return Optional.ofNullable(runtimeDispatchService);
@@ -624,6 +732,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public RailGraphService getRailGraphService() {
     return railGraphService;
+  }
+
+  /** 节点牌子与 rail_nodes 的增量同步：删改库里的节点经它走，图失效的判定与提示照常。 */
+  public SignNodeStorageSynchronizer getSignNodeStorageSync() {
+    return signNodeStorageSync;
   }
 
   /** 返回调度图失效告警器（若未初始化则为 null）。 */
@@ -793,6 +906,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaTripCommand(this).register(commandManager);
     new org.fetarute.fetaruteTCAddon.command.FtaCallCommand(this).register(commandManager);
     new FtaAnnounceCommand(this).register(commandManager);
+    new org.fetarute.fetaruteTCAddon.command.FtaCouplerCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");
@@ -824,11 +938,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
         configManager != null
             ? configManager.current().graphSettings()
             : ConfigManager.GraphSettings.defaults();
-    this.railGraphService =
-        new RailGraphService(
-            new SignRegistryRailGraphBuilder(
-                signNodeRegistry, loggerManager::debug, graphSettings.signAnchorSearchRadius()),
-            loggerManager::debug);
+    this.railGraphService = new RailGraphService(loggerManager::debug);
     railGraphService.configureCrossWorld(graphSettings.crossWorld(), portalLinks);
     this.graphStaleNotifier =
         GraphStaleNotifier.forPlugin(this, railGraphService, localeManager, loggerManager);
@@ -841,6 +951,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             graphStaleNotifier,
             this::findRouteNodeUsage,
             task -> getServer().getScheduler().runTask(this, task));
+    this.signNodeStorageSync = storageSync;
     this.waypointSignAction =
         new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =
@@ -863,8 +974,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
     stopMarkTask = getServer().getScheduler().runTaskTimer(this, marks::tick, 1L, 1L);
     this.stopMarkSignAction = new StopMarkSignAction(stopMarkIndex, localeManager);
     SignAction.register(stopMarkSignAction);
+    // 停站开门期间按牌子写的下车方位直接定乘客的落点
+    getServer()
+        .getPluginManager()
+        .registerEvents(
+            new org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StationExitPoints(), this);
     // 本插件的发车动作随列车保存：区块卸载再加载后按原速度接着加速，不丢动作。
     CurveLaunchAction.registerSerializer(TrainCarts.plugin);
+    StopCurveAction.registerSerializer(TrainCarts.plugin);
     preloadSignNodeRegistryFromStorage();
     getServer()
         .getPluginManager()
@@ -872,6 +989,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             new SignRemoveListener(
                 signNodeRegistry, localeManager, loggerManager::debug, storageSync),
             this);
+    getServer()
+        .getPluginManager()
+        .registerEvents(new SwitcherSignChangeListener(storageSync, loggerManager::debug), this);
     getServer()
         .getPluginManager()
         .registerEvents(
@@ -941,7 +1061,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   private void initRouteDefinitionCache() {
     if (this.routeDefinitionCache == null) {
-      this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
+      this.routeDefinitionCache =
+          new RouteDefinitionCache(loggerManager::debug, loggerManager::warn);
       routeDefinitionCache.addChangeListener(routeNodeUsageVersion::incrementAndGet);
       // 交路改了：叫车缓存的走行时分作废
       routeDefinitionCache.addChangeListener(
@@ -1014,6 +1135,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
   public Optional<org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService>
       getConsistPlanService() {
     return Optional.ofNullable(consistPlanService);
+  }
+
+  /** 车型裁决（出车选车型、复用与回收按方案筛车）；插件未完成初始化时为空。 */
+  public Optional<org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistDispatchArbiter>
+      getConsistArbiter() {
+    return Optional.ofNullable(consistArbiter);
   }
 
   /** 车站目录（车站、车站组、停靠线路的内存索引）；插件未完成初始化时为空。 */
@@ -1134,6 +1261,19 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.stationPresence = new StationPresenceTracker();
     stationStopHub.register("station-presence", stationPresence);
     runtimeDispatchService.stationStops().setObserver(stationStopHub);
+    // 压牌前按停车位置标、联挂站的停法估停车点：调度据此把速度天花板延长到真正的停车点，一段刹车
+    runtimeDispatchService
+        .stationStops()
+        .setStopTail(
+            new org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StationStopTailEstimator(
+                new org.fetarute.fetaruteTCAddon.drive.driver.StationStopPoints(
+                    node ->
+                        getSignNodeRegistry() == null
+                            ? Optional.empty()
+                            : getSignNodeRegistry().findByNodeId(node, null),
+                    this::getStopMarkIndex),
+                this::getCouplerService,
+                org.bukkit.Bukkit::getCurrentTick));
     runtimeDispatchRecoveryComplete = false;
     beginRuntimeDispatchRecovery("plugin-enable");
     runtimeDispatchService.setStartupRecoveryRequestedListener(
@@ -1142,11 +1282,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .getPluginManager()
         .registerEvents(
             // 联挂否决是异常证据，走 WARN 而不是受 debug 开关和观察预算约束的诊断通道；监听器已按列车对限流。
+            // 受管列车车厢或编组消失的现场证据量大，走 debug。
             RuntimeDispatchListener.withDiagnostics(
                 runtimeDispatchService,
                 loggerManager::warn,
-                railGraphService::isOutsideRetainedStaleSnapshot),
+                railGraphService::isOutsideRetainedStaleSnapshot,
+                loggerManager.debugSink()),
             this);
+    initCouplerService();
     initEtaService();
     if (etaService != null) {
       runtimeDispatchService.setEtaService(etaService);
@@ -1293,6 +1436,19 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     if (service == null || runtimeDispatchService != service) {
       return false;
+    }
+    // 交路归属恢复不是授权恢复的一部分，失败不能拖住启动门、更不能触发全局重建：保持待恢复（期间不补缺车交路），由出票轮询重试。
+    if (timetableService != null) {
+      try {
+        timetableService.restoreDutyBindings(java.time.Instant.now());
+      } catch (RuntimeException | LinkageError ex) {
+        getLogger()
+            .warning(
+                "恢复列车的交路归属失败，暂不补缺车交路，出票时重试: "
+                    + ex.getClass().getSimpleName()
+                    + ":"
+                    + String.valueOf(ex.getMessage()));
+      }
     }
     try {
       restartHealthMonitorTask();
@@ -1497,6 +1653,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
             runtimeDispatchService != null ? runtimeDispatchService::getActiveStopState : null,
             loggerManager::debug);
     etaService = new EtaService(trainSnapshotStore, railGraphService, routeDefinitionCache);
+    // 站牌上回程支线的车开往联挂后主干的终点：联挂服务按交路建的索引，任意线程读
+    etaService.attachThroughRoutes(
+        routeId ->
+            getCouplerService()
+                .flatMap(coupler -> coupler.coupling().continuationOf(routeId))
+                .map(found -> new EtaService.ThroughRoute(found.trunkRoute(), found.joinIndex())));
+    // 在运营终点分行后留下、不再载客的一段停着时站牌不另列：解编服务主线程记、任意线程读
+    etaService.attachDivisionRemainders(
+        (train, route, index) ->
+            getCouplerService()
+                .map(coupler -> coupler.decoupling().remainsAt(train, route, index))
+                .orElse(false));
     if (layoverRegistry != null) {
       etaService.attachLayoverRegistry(layoverRegistry);
     }
@@ -1673,6 +1841,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
           new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService(
               java.time.Instant::now, loggerManager::debug);
       timetableService.setWarningLogger(getLogger()::warning);
+      timetableService.setDutyStore(
+          new org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsTimetableDutyStore());
     }
     ConfigManager.TimetableSettings settings = configManager.current().timetableSettings();
     timetableService.applySettings(
@@ -1719,6 +1889,24 @@ public final class FetaruteTCAddon extends JavaPlugin {
           public void onTrainReleased(String trainName, String reason) {
             timetableService.release(trainName, reason);
           }
+        });
+    // 叫来的车到达叫车的车站：转成公开的到站事件（叫车服务可能晚于本方法建立或被重建，每次取当前的那个）。
+    stationStopHub.register(
+        "call",
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver() {
+          @Override
+          public void onStationArrival(
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {
+            org.fetarute.fetaruteTCAddon.call.CallService calls = callService;
+            if (calls != null) {
+              calls.onStationArrival(
+                  event.trainName(), event.routeUuid(), event.stopIndex(), event.nodeId());
+            }
+          }
+
+          @Override
+          public void onStationDeparture(
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
         });
     // 车次取消转成公开事件；事件桥可能晚于本方法建立或被重建，每次取当前的那个。
     timetableService.setCancellationListener(
@@ -1834,6 +2022,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
         activeNames.add(properties.getTrainName());
       }
     }
+    // 已保存的离线编组仍拥有交路，由服务按注入的交路记录一并保留；站台存在状态仍只使用真实在线 group。
     timetableService.retain(activeNames);
     if (stationPresence != null) {
       stationPresence.retain(java.util.Set.copyOf(activeNames));
@@ -1843,6 +2032,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
   /** 返回终点站待命登记（若未初始化则为空）。 */
   public Optional<LayoverRegistry> getLayoverRegistry() {
     return Optional.ofNullable(layoverRegistry);
+  }
+
+  /** 列车交路进度（若未初始化则为空）。 */
+  public Optional<RouteProgressRegistry> getRouteProgressRegistry() {
+    return Optional.ofNullable(routeProgressRegistry);
   }
 
   /** 交路定义缓存（若未初始化则为空）。 */
@@ -1937,6 +2131,24 @@ public final class FetaruteTCAddon extends JavaPlugin {
             ? new org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager(
                 baseSpawnManager, timetableService, loggerManager::debug)
             : baseSpawnManager;
+    if (spawnManager
+        instanceof
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
+        timetabled) {
+      // 解编 GOTO 指向的支线不进发车计划：按交路现拼发车服务，解下的车接的班次照样出票，站牌照样列出。
+      // 站牌也会在只读 HTTP 接口的后台线程走到这里：公司代码先查内存目录，只有主线程才退回查库（存储只有一条连接）
+      RouteDefinitionCache forecastRoutes = routeDefinitionCache;
+      timetabled.setUnplannedServices(
+          routeId ->
+              org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteSpawnServices.forRoute(
+                  baseSpawnManager,
+                  forecastRoutes,
+                  this::companyCodeOf,
+                  routeId,
+                  loggerManager::debug));
+      // 回程支线没车时主干出整列：与编表同一个来源（交路的 spawn_train_pattern，其次首站 CRET 的车库牌子）
+      timetabled.setFullConsists(routeId -> fullConsistOf(forecastRoutes, routeId));
+    }
     TrainCartsDepotSpawner depotSpawner =
         new TrainCartsDepotSpawner(this, signNodeRegistry, loggerManager::debug);
     depotSpawner.setOccupancyManager(occupancyManager);
@@ -1977,6 +2189,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
     simpleAssigner.setCallReservationLive(
         callId -> getCallService().map(calls -> calls.reservationLive(callId)).orElse(true));
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
+    // 多模车：出车、接续时按交路起点换模并升弓，到达或经过交路节点时按交路备注 POWER 换模
+    org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher power = powerModeSwitcher();
+    // 解编 DECP：与换模并在同一个交路节点监听上，多停的秒数相加
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteNodeListener powerNodes =
+        power::onRouteNode;
+    runtimeDispatchService.setRouteNodeListener(
+        powerNodes.andThen(this::decoupleOnRouteNode).andThen(this::coupleOnRouteNode));
+    simpleAssigner.addDispatchObserver(power::onDispatched);
+    simpleAssigner.addDispatchObserver(
+        (ticket, trainName) ->
+            getCouplerService()
+                .ifPresent(coupler -> coupler.decoupling().onDispatched(ticket, trainName)));
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
     simpleAssigner.setLayoverReuseGate(
@@ -1984,6 +2208,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 镜像闸：按表发出的回库票只能带走交路已经跑完的车。
     simpleAssigner.setReturnReuseGate(
         timetableService == null ? null : timetableService::allowsReturn);
+    // 同股道列车对：朝对方开的那一方不接票；按表运行时下面会与时刻表的过滤合成一个。
+    simpleAssigner.setLayoverCandidateFilter(this::couplerAllowsLayoverDispatch);
     // 票据认识 duty：续班只接本交路的车、到期作废、派发后把车绑到交路上。
     if (spawnManager
         instanceof
@@ -1993,9 +2219,39 @@ public final class FetaruteTCAddon extends JavaPlugin {
       simpleAssigner.setLayoverCandidateFilter(
           (ticket, trainName) ->
               scheduled.acceptsCandidate(ticket, trainName)
-                  && driverPickupAllowsDispatch(scheduled, ticket, trainName));
+                  && driverPickupAllowsDispatch(scheduled, ticket, trainName)
+                  && couplerAllowsLayoverDispatch(ticket, trainName));
       simpleAssigner.setDepotSpawnHold(
           (ticket, trainName) -> driverPickupHoldsDepotSpawn(scheduled, ticket, trainName));
+      // 出库去联挂：回程支线车已经停在联挂站时只有它不挡出库，出车后扣在车库股道上等进站
+      simpleAssigner.setDepotTrunkHook(
+          new org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .schedule
+              .spawn
+              .SimpleTicketAssigner
+              .DepotTrunkHook() {
+            @Override
+            public void admit(
+                org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket,
+                String trainName) {
+              scheduled
+                  .ticketIntentOf(ticket)
+                  .ifPresent(
+                      intent ->
+                          getCouplerService()
+                              .ifPresent(
+                                  coupler ->
+                                      coupler.coupling().admitDepotTrunk(trainName, intent)));
+            }
+
+            @Override
+            public void spawned(String trainName) {
+              getCouplerService()
+                  .ifPresent(coupler -> coupler.coupling().holdDepotTrunk(trainName));
+            }
+          });
       simpleAssigner.setTicketExpiry(scheduled::expiryOf);
       simpleAssigner.setDispatchListener(scheduled::onDispatched);
       // 提前出车在车库等候：交路意图写进列车标签，重启后据此绑回交路，到点不会再出一辆。
@@ -2093,9 +2349,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
             ? null
             : (trainName, location) ->
                 location != null && returns.awaitsOwnReturnAt(trainName, location.value()));
-    // 开进终点等着接叫车的折返车：回收不碰
+    // 开进终点等着接叫车的折返车、正在调车的车：回收不碰
     reclaimManager.setHeldForCall(
-        trainName -> getCallService().map(calls -> calls.heldForCall(trainName)).orElse(false));
+        trainName ->
+            org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShuntingRegistry.isShunting(
+                    trainName)
+                || getCallService().map(calls -> calls.heldForCall(trainName)).orElse(false)
+                // 解编解下、等着被指定的票或子交路接走的车，或值乘的人正选继续哪一段；联挂时在站台等对方或正在进站的车
+                || getCouplerService()
+                    .map(
+                        coupler ->
+                            coupler.decoupling().holds(trainName)
+                                || coupler.decoupling().crewHolding(trainName).isPresent()
+                                || coupler.coupling().holds(trainName))
+                    .orElse(false));
     // 叫来的车没有交路：先走与叫车交路同一交路组的回库交路，从哪个车库来就回哪个车库。
     reclaimManager.setPreferredReturnRoute(
         trainName ->
@@ -2126,6 +2393,197 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (runtimeDispatchRecoveryComplete) {
       this.reclaimManager.start();
     }
+  }
+
+  /** 拆挂服务：同一实例跨重载保留（同股道列车对在内存里，另写在列车标签上，重启后按标签找回）。 */
+  private void initCouplerService() {
+    if (couplerService == null) {
+      couplerService = new org.fetarute.fetaruteTCAddon.coupler.CouplerService(this);
+    }
+    couplerService.start();
+    if (runtimeDispatchService != null) {
+      // 联挂：主干先到等回程支线车、对方正开进来时停站扣留；后到的车选对方停着的股道
+      org.fetarute.fetaruteTCAddon.coupler.CoupleService coupling = couplerService.coupling();
+      org.fetarute.fetaruteTCAddon.coupler.DecoupleService decoupling = couplerService.decoupling();
+      // 车上的驾驶员与车掌：拆之前在这一站结算，拆开后选继续哪一段（驾驶模块会重载，每次再取）
+      decoupling.setCrew(
+          org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.all(
+              List.of(
+                  () ->
+                      driveSessionManager == null
+                          ? org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.NONE
+                          : driveSessionManager.decoupleCrew(),
+                  () ->
+                      driveSessionManager == null
+                          ? org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.NONE
+                          : driveSessionManager
+                              .guards()
+                              .map(
+                                  org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager
+                                      ::decoupleCrew)
+                              .orElse(org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.NONE))));
+      // 联挂进站由调度控车：车上的驾驶员先让出控制，挂上后交还；作废一方上的值乘先结束
+      coupling.setCrew(
+          org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.all(
+              List.of(
+                  () ->
+                      driveSessionManager == null
+                          ? org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.NONE
+                          : driveSessionManager.coupleCrew(),
+                  () ->
+                      driveSessionManager == null
+                          ? org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.NONE
+                          : driveSessionManager
+                              .guards()
+                              .map(
+                                  org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager
+                                      ::coupleCrew)
+                              .orElse(org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.NONE))));
+      // 解编后值乘的人选继续哪一段时，留下的一段也扣在站里
+      runtimeDispatchService
+          .stationStops()
+          .setCouplingHold(
+              name -> {
+                Optional<java.time.Instant> crew = decoupling.crewHolding(name);
+                Optional<java.time.Instant> partner = coupling.couplingHold(name);
+                // 两种都扣着时扣到较晚的那个
+                return crew.isPresent() && partner.isPresent()
+                    ? Optional.of(crew.get().isAfter(partner.get()) ? crew.get() : partner.get())
+                    : crew.or(() -> partner);
+              });
+      runtimeDispatchService.stationStops().setCouplingPartners(coupling.partners());
+    }
+  }
+
+  /** 拆挂服务（未初始化时为空）。 */
+  public Optional<org.fetarute.fetaruteTCAddon.coupler.CouplerService> getCouplerService() {
+    return Optional.ofNullable(couplerService);
+  }
+
+  /**
+   * 写了联挂的主干交路联挂之后的整列编组，与编表同一个来源：交路的 {@code spawn_train_pattern}，其次首站 CRET 指向的车库牌子（只读已加载的区块）。
+   * 不是组合写法（{@code A+B}）时为空。
+   */
+  private Optional<String> fullConsistOf(RouteDefinitionCache routes, java.util.UUID routeId) {
+    Optional<String> declared =
+        routes
+            .findRecord(routeId)
+            .flatMap(
+                record ->
+                    org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern
+                        .fromRoute(record.route()));
+    Optional<String> pattern =
+        declared.isPresent() || signNodeRegistry == null
+            ? declared
+            : routes
+                .findById(routeId)
+                .flatMap(
+                    definition ->
+                        org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser
+                            .findDirectiveTarget(routes.listStops(definition.id()), "CRET"))
+                .flatMap(
+                    depot ->
+                        org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .schedule
+                            .spawn
+                            .DepotSpawnPattern
+                            .readLoaded(signNodeRegistry, NodeId.of(depot))
+                            .pattern());
+    return pattern
+        .flatMap(org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey::tidy)
+        .filter(org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern::isComposite);
+  }
+
+  /** 公司代码：先查车站目录（内存）；查不到时只在主线程查库，后台线程不碰存储。 */
+  private Optional<String> companyCodeOf(java.util.UUID companyId) {
+    Optional<String> code =
+        getStationDirectory()
+            .flatMap(directory -> directory.snapshot().company(companyId))
+            .map(org.fetarute.fetaruteTCAddon.company.model.Company::code);
+    if (code.isPresent()
+        || !org.bukkit.Bukkit.isPrimaryThread()
+        || storageManager == null
+        || !storageManager.isReady()) {
+      return code;
+    }
+    return storageManager
+        .provider()
+        .flatMap(provider -> provider.companies().findById(companyId))
+        .map(org.fetarute.fetaruteTCAddon.company.model.Company::code);
+  }
+
+  /** 站牌票据与预测行（按车次标识）在表上那一班的分行预测；不按表运行、拆挂服务没起来时为空。 */
+  private Optional<org.fetarute.fetaruteTCAddon.coupler.DivisionForecast> plannedDivisionOf(
+      String serviceTripId) {
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService timetables =
+        timetableService;
+    if (timetables == null
+        || !(spawnManager
+            instanceof
+            org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
+            timetabled)) {
+      return Optional.empty();
+    }
+    return timetabled
+        .intentOfServiceTrip(serviceTripId)
+        .flatMap(timetables::plannedTripOf)
+        .flatMap(
+            planned ->
+                getCouplerService()
+                    .flatMap(coupler -> coupler.decoupling().plannedForecast(planned)));
+  }
+
+  /** 站牌票据与预测行（按车次标识）在表上那一班的联挂预测；不按表运行、拆挂服务没起来时为空。 */
+  private Optional<org.fetarute.fetaruteTCAddon.coupler.JoinForecast> plannedJoinOf(
+      String serviceTripId) {
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService timetables =
+        timetableService;
+    if (timetables == null
+        || !(spawnManager
+            instanceof
+            org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
+            timetabled)) {
+      return Optional.empty();
+    }
+    return timetabled
+        .intentOfServiceTrip(serviceTripId)
+        .flatMap(timetables::plannedJoinOf)
+        .flatMap(
+            planned ->
+                getCouplerService()
+                    .flatMap(coupler -> coupler.coupling().plannedJoinForecast(planned)));
+  }
+
+  /** 解编 DECP 的到站回调（拆挂服务没起来时什么也不做）。 */
+  private int decoupleOnRouteNode(
+      String trainName,
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties,
+      org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId route,
+      int index,
+      boolean dwelling) {
+    return couplerService == null
+        ? 0
+        : couplerService.decoupling().onRouteNode(trainName, properties, route, index, dwelling);
+  }
+
+  /** 联挂 COPL 的到站回调（拆挂服务没起来时什么也不做）。 */
+  private int coupleOnRouteNode(
+      String trainName,
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties,
+      org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId route,
+      int index,
+      boolean dwelling) {
+    return couplerService == null
+        ? 0
+        : couplerService.coupling().onRouteNode(trainName, properties, route, index, dwelling);
+  }
+
+  /** 同股道列车对里交路第一段朝对方开的待命车不接票（见 {@code CouplerService#allowsLayoverDispatch}）。 */
+  private boolean couplerAllowsLayoverDispatch(
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket, String trainName) {
+    return couplerService == null || couplerService.allowsLayoverDispatch(ticket, trainName);
   }
 
   /** 叫车服务：同一实例跨重载保留（叫车记录在内存里，重载不丢）；周期扫描与回收同一个启动门，现场占用重建完成后才开始。 */
@@ -2261,6 +2719,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       stopMarkTask = null;
     }
     CurveLaunchAction.unregisterSerializer(TrainCarts.plugin);
+    StopCurveAction.unregisterSerializer(TrainCarts.plugin);
     if (signNodeRegistry != null) {
       signNodeRegistry.clear();
     }
@@ -2320,7 +2779,24 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     org.fetarute.fetaruteTCAddon.api.eta.EtaApi etaApi =
         etaService != null
-            ? new org.fetarute.fetaruteTCAddon.api.internal.EtaApiImpl(etaService)
+            ? new org.fetarute.fetaruteTCAddon.api.internal.EtaApiImpl(
+                etaService,
+                // 站牌行带上分行：解编服务每秒预测一次，任意线程读；刚在本站拆开的解下车先带拆开以后的车厢标识
+                name ->
+                    getCouplerService()
+                        .flatMap(
+                            coupler ->
+                                coupler
+                                    .decoupling()
+                                    .dividedHere(name)
+                                    .or(() -> coupler.decoupling().forecast(name))),
+                // 还没出车的一班按表上拆不拆提前写分行
+                this::plannedDivisionOf,
+                // 联挂页的节数：联挂服务每秒预测一次
+                name ->
+                    getCouplerService().flatMap(coupler -> coupler.coupling().joinForecast(name)),
+                // 还没出车的一班按表上联挂提前写联挂页与“本站联挂”
+                this::plannedJoinOf)
             : null;
     org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi timetableApi =
         new org.fetarute.fetaruteTCAddon.api.internal.TimetableApiImpl(
@@ -2343,9 +2819,26 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new org.fetarute.fetaruteTCAddon.api.internal.DriveApiImpl(this));
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.installGuard(
         new org.fetarute.fetaruteTCAddon.api.internal.GuardApiImpl(this));
+    org.fetarute.fetaruteTCAddon.api.FetaruteApi.installCall(
+        new org.fetarute.fetaruteTCAddon.api.internal.CallApiImpl(this));
     startApiEvents();
     getLogger()
         .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");
+    applyWebApi();
+  }
+
+  /** 按配置启停只读 HTTP 接口（启用与重载时调用）。 */
+  private void applyWebApi() {
+    if (webApiServer == null) {
+      webApiServer =
+          new org.fetarute.fetaruteTCAddon.web.WebApiServer(
+              getLogger()::info,
+              getLogger()::warning,
+              () -> getStationDirectory().map(StationDirectory::snapshot),
+              (operator, line) ->
+                  getPidsService().flatMap(pids -> pids.lineStatus(operator, line)));
+    }
+    webApiServer.apply(configManager.current().webApiSettings());
   }
 
   /**

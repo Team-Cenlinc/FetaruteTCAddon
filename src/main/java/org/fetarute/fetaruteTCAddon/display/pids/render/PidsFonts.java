@@ -4,6 +4,7 @@ import java.awt.Font;
 import java.awt.FontFormatException;
 import java.awt.font.FontRenderContext;
 import java.awt.font.LineMetrics;
+import java.awt.geom.Rectangle2D;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -145,6 +146,18 @@ public final class PidsFonts {
     return (int) Math.ceil(font.getStringBounds(text, context).getWidth() - 1e-6);
   }
 
+  /** 文字右侧的留白（像素）：步进宽度减去墨迹右缘。中文字形右边自带留白、英文末字母留白少，按步进宽度右对齐时两行的墨迹差一两个像素； 右对齐时加上它就按墨迹对齐。 */
+  public int trailing(Font font, String text) {
+    if (text == null || text.isBlank()) {
+      return 0;
+    }
+    Rectangle2D ink = font.createGlyphVector(context, text).getVisualBounds();
+    if (ink.isEmpty()) {
+      return 0;
+    }
+    return Math.max(0, width(font, text) - (int) Math.ceil(ink.getMaxX() - 1e-6));
+  }
+
   /** 基线到文本框顶边的距离：文本框高为字号，内容区（上伸部加下伸部）居中其中。 */
   public int baseline(Font font) {
     LineMetrics metrics = font.getLineMetrics("国", context);
@@ -170,13 +183,22 @@ public final class PidsFonts {
     }
     int cut = text.lastIndexOf(' ');
     while (cut > 0) {
-      String candidate = text.substring(0, cut).stripTrailing() + ELLIPSIS;
+      String candidate = withoutTrailingJoiner(text.substring(0, cut)) + ELLIPSIS;
       if (width(font, candidate) <= maxWidth) {
         return candidate;
       }
       cut = text.lastIndexOf(' ', cut - 1);
     }
     return ellipsize(font, text, maxWidth);
+  }
+
+  /** 去掉句尾悬空的连接符（“Neo Fueya -” 截成 “Neo Fueya”），不让省略号前挂着一个连字符或间隔号。 */
+  private static String withoutTrailingJoiner(String text) {
+    String out = text.stripTrailing();
+    while (!out.isEmpty() && "-–—·/,".indexOf(out.charAt(out.length() - 1)) >= 0) {
+      out = out.substring(0, out.length() - 1).stripTrailing();
+    }
+    return out;
   }
 
   private Font load(String path) {

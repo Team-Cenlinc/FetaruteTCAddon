@@ -1043,7 +1043,7 @@ final class RailNodeIncrementalSyncTest {
     org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph graph =
         new org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph(
             byId, java.util.Map.of(), java.util.Set.of());
-    RailGraphService service = new RailGraphService(ignored -> graph);
+    RailGraphService service = new RailGraphService();
     service.putSnapshot(world, graph, Instant.EPOCH);
     return service;
   }

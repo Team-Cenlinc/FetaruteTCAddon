@@ -403,8 +403,8 @@ class TimetableApiImplTest {
   /**
    * DYNAMIC 停靠被分到非 fromTrack 的股道：预计偏差按实际股道算。
    *
-   * <p>真实 ETA 服务 + 调度图。AAA→BBB:1（占位股道）40 格，AAA→BBB:2 200 格；列车被分到 2 道。 默认速度 6 格/秒、无初速变化：1 道约 6 秒，2
-   * 道约 33 秒。修复前拿占位股道去算，差出 27 秒。
+   * <p>真实 ETA 服务 + 调度图。AAA→BBB:1（占位股道）40 格，AAA→BBB:2 200 格；列车被分到 2 道。 默认速度 6 格/秒、从静止起步、到站刹停： 2 道约
+   * 37 秒。修复前拿占位股道去算，差出约 27 秒。
    */
   @Test
   void dynamicStopProjectsDelayToAllocatedPlatform() {
@@ -493,14 +493,14 @@ class TimetableApiImplTest {
     assertEquals(Optional.of(1), assignment.nextStopSequence());
     assertEquals(Optional.of(b2.value()), assignment.nextStopNodeId(), "已选台：报实际股道");
     assertEquals(Optional.of("BBB"), assignment.nextStationCode());
-    // 计划 08:01:00 到 BBB；预计 = 查询时刻 + 33 秒（2 道），不是 + 6 秒（占位的 1 道）。
+    // 计划 08:01:00 到 BBB；预计 = 查询时刻 + 37 秒（2 道），不是占位的 1 道。
     long planned = Instant.parse("2026-03-02T08:01:00Z").toEpochMilli();
-    long low = Math.floorDiv(before.toEpochMilli() + 33_000L - planned, 1000L);
-    long high = Math.floorDiv(after.toEpochMilli() + 33_000L - planned, 1000L);
+    long low = Math.floorDiv(before.toEpochMilli() + 37_000L - planned, 1000L);
+    long high = Math.floorDiv(after.toEpochMilli() + 37_000L - planned, 1000L);
     long projected = assignment.projectedDelaySeconds().getAsLong();
     assertTrue(
         projected >= low && projected <= high,
-        "预计偏差应按 2 道（33 秒）算: projected=" + projected + " expected∈[" + low + "," + high + "]");
+        "预计偏差应按 2 道（37 秒）算: projected=" + projected + " expected∈[" + low + "," + high + "]");
   }
 
   @Test

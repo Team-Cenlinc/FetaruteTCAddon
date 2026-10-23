@@ -127,6 +127,25 @@ class PidsScreenRepositoryTest {
   }
 
   @Test
+  void rotationRoundTripsInOrder() {
+    PidsScreen pending = screens.save(screen(5));
+    assertTrue(screens.findById(pending.id()).orElseThrow().rotation().isEmpty());
+
+    PidsScreen rotating =
+        screens.save(
+            pending
+                .withOperator("SURC", Set.of(), pending.updatedAt())
+                .withRotation(List.of("SURC", "SURW", "SURN"), now()));
+
+    PidsScreen loaded = screens.findById(pending.id()).orElseThrow();
+    assertEquals(rotating, loaded);
+    assertEquals(List.of("SURC", "SURW", "SURN"), loaded.rotation(), "按加入的先后");
+
+    screens.save(loaded.withRotation(List.of(), now()));
+    assertTrue(screens.findById(pending.id()).orElseThrow().rotation().isEmpty());
+  }
+
+  @Test
   void twoScreensCannotShareAnAnchor() {
     screens.save(screen(5));
 

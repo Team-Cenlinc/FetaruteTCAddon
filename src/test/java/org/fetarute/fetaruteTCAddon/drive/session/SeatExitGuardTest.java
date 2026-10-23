@@ -55,4 +55,22 @@ class SeatExitGuardTest {
     assertEquals(Decision.QUIET, guard.decide(false, false, true, 0, false, 101));
     assertEquals(Decision.ALLOW, guard.decide(false, false, true, 0, false, 110));
   }
+
+  /** 车掌行驶中按住 Shift：每拍都有离座请求（两个事件各问一次），只提示一次；连按也隔一段时间才再提示。 */
+  @Test
+  void holdingShiftWhileMovingWithoutSneakEventsNoticesOnce() {
+    int notices = 0;
+    for (long tick = 100; tick < 160; tick++) {
+      for (int event = 0; event < 2; event++) {
+        if (guard.decide(false, true, false, Long.MIN_VALUE, false, tick) == Decision.MOVING) {
+          notices++;
+        }
+      }
+    }
+    assertEquals(1, notices, "按住 3 秒只提示一次");
+    assertEquals(
+        Decision.QUIET, guard.decide(false, true, false, Long.MIN_VALUE, false, 170), "松开再按，刚提示过");
+    assertEquals(
+        Decision.MOVING, guard.decide(false, true, false, Long.MIN_VALUE, false, 260), "隔了一段时间再按");
+  }
 }

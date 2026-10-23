@@ -65,6 +65,7 @@ class EtaBoardContinuityTest {
   private final UUID outUuid = UUID.randomUUID();
   private final UUID backUuid = UUID.randomUUID();
   private final UUID inUuid = UUID.randomUUID();
+  private final UUID trunkUuid = UUID.randomUUID();
   private final TrainSnapshotStore snapshots = new TrainSnapshotStore();
   private final UUID worldId = UUID.randomUUID();
   private final Instant now = Instant.now();
@@ -183,6 +184,81 @@ class EtaBoardContinuityTest {
         "下一趟 120 秒后才开，时间窗只有 60 秒");
   }
 
+  /** 解编解下的车照搬了主干的进度（TRUNK 在 PPK 终到、之后还有回库的节点），已登记在 PPK 待命：按它的下一趟列一行，不再按照搬的进度另列一行“本站终到”。 */
+  @Test
+  void aDetachedTrainWaitingMidRouteIsListedOnlyAsItsNextTrip() {
+    snapshots.update(
+        "train-1",
+        new TrainRuntimeSnapshot(
+            1L,
+            now,
+            worldId,
+            trunkUuid,
+            RouteId.of("SURN:L1:TRUNK"),
+            1,
+            Optional.of(PPK_2),
+            Optional.of(PPK_2),
+            Optional.empty(),
+            Optional.of(SignalAspect.PROCEED),
+            Optional.empty()));
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker presence =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker();
+    presence.onStationArrival(
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent(
+            "train-1", Optional.of(trunkUuid), "SURN:L1:TRUNK", 1, 3, PPK_2.value(), now));
+    EtaService before = board(Optional.empty(), List.of());
+    before.attachStationPresence(() -> Optional.of(presence));
+    List<BoardResult.BoardRow> standing = rows(before, "PPK");
+    assertEquals(1, standing.size(), "不在待命池里：照常按进度列出");
+    assertTrue(standing.get(0).terminating());
+
+    layovers.register("train-1", "surn:s:ppk", PPK_2, now.plusSeconds(30), Map.of());
+    EtaService service = board(Optional.empty(), List.of());
+    service.attachStationPresence(() -> Optional.of(presence));
+    List<BoardResult.BoardRow> rows = rows(service, "PPK");
+
+    assertEquals(1, rows.size(), () -> rows.toString());
+    assertEquals("SURN:L1:OUT", rows.get(0).routeId());
+    assertFalse(rows.get(0).terminating());
+    assertEquals(Optional.of("train-1"), rows.get(0).trainName());
+  }
+
+  /** 在运营终点分行后留下、不再载客的一段停在站台上：站牌不另列它（解下的一段由待命那一段列出）。 */
+  @Test
+  void theRemainderOfADivisionAtTheTerminusIsNotListedWhileItStands() {
+    snapshots.update(
+        "train-1",
+        new TrainRuntimeSnapshot(
+            1L,
+            now,
+            worldId,
+            trunkUuid,
+            RouteId.of("SURN:L1:TRUNK"),
+            1,
+            Optional.of(PPK_2),
+            Optional.of(PPK_2),
+            Optional.empty(),
+            Optional.of(SignalAspect.PROCEED),
+            Optional.empty()));
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker presence =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker();
+    presence.onStationArrival(
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent(
+            "train-1", Optional.of(trunkUuid), "SURN:L1:TRUNK", 1, 3, PPK_2.value(), now));
+    EtaService service = board(Optional.empty(), List.of());
+    service.attachStationPresence(() -> Optional.of(presence));
+    service.attachDivisionRemainders(
+        (train, route, index) ->
+            "train-1".equals(train) && "SURN:L1:TRUNK".equals(route) && index == 1);
+
+    assertTrue(rows(service, "PPK").isEmpty(), () -> rows(service, "PPK").toString());
+
+    EtaService elsewhere = board(Optional.empty(), List.of());
+    elsewhere.attachStationPresence(() -> Optional.of(presence));
+    elsewhere.attachDivisionRemainders((train, route, index) -> index == 0);
+    assertEquals(1, rows(elsewhere, "PPK").size(), "不是在这里分行留下的：照常列出");
+  }
+
   /** 来车走 IN 开往 PPK，载着 8 + 2 名乘客（两节车，座位 8 与 4）。 */
   private void inboundWithLoad() {
     snapshots.update(
@@ -236,7 +312,40 @@ class EtaBoardContinuityTest {
             RouteId.of("SURN:L1:IN"),
             List.of(AAA, PPK_1),
             Optional.of(RouteMetadata.of("SURN", "L1", "IN", null)));
+    RouteDefinition trunk =
+        new RouteDefinition(
+            RouteId.of("SURN:L1:TRUNK"),
+            List.of(AAA, PPK_1, BBB),
+            Optional.of(RouteMetadata.of("SURN", "L1", "TRUNK", null)));
     RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
+    when(routes.findById(trunkUuid)).thenReturn(Optional.of(trunk));
+    when(routes.listStops(trunk.id()))
+        .thenReturn(
+            List.of(
+                new RouteStop(
+                    trunkUuid,
+                    0,
+                    Optional.empty(),
+                    Optional.of(AAA.value()),
+                    Optional.empty(),
+                    RouteStopPassType.STOP,
+                    Optional.empty()),
+                new RouteStop(
+                    trunkUuid,
+                    1,
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    RouteStopPassType.TERMINATE,
+                    Optional.of("DYNAMIC:SURN:S:PPK")),
+                new RouteStop(
+                    trunkUuid,
+                    2,
+                    Optional.empty(),
+                    Optional.of(BBB.value()),
+                    Optional.empty(),
+                    RouteStopPassType.PASS,
+                    Optional.empty())));
     when(routes.findById(outUuid)).thenReturn(Optional.of(out));
     when(routes.findById(inUuid)).thenReturn(Optional.of(in));
     when(routes.findById(backUuid)).thenReturn(Optional.of(back));

@@ -223,4 +223,107 @@ class TrainSetupTest {
     assertEquals(Optional.of(SetupSystem.BREAKER), setup.nextStep());
     assertTrue(TrainSetup.alwaysReady(PowerSupply.PTG5, TIMINGS).nextStep().isEmpty());
   }
+
+  private static TrainSetup ready(PowerSupply supply) {
+    TrainSetup setup = new TrainSetup(supply, TIMINGS);
+    setup.startAll(0);
+    for (long tick = 0; tick < 100 && !setup.ready(); tick++) {
+      setup.tick(tick);
+    }
+    assertTrue(setup.ready());
+    return setup;
+  }
+
+  /** 冷车换受电方式：只换方式与启动顺序，什么也没接通。 */
+  @Test
+  void aColdTrainOnlyChangesItsSupply() {
+    TrainSetup setup = electric();
+
+    assertTrue(setup.switchSupply(PowerSupply.DIESEL, true, 0));
+
+    assertEquals(PowerSupply.DIESEL, setup.supply());
+    assertFalse(setup.applies(SetupSystem.BREAKER), "内燃没有主断");
+    assertEquals(TrainSetup.State.OFF, setup.state(SetupSystem.POWER));
+    assertFalse(setup.busy());
+  }
+
+  /** 跟着调度换模（standard 级）：系统保持接通；换成内燃去掉主断，换回电力主断随辅助电源接通。 */
+  @Test
+  void anUntimedSwitchKeepsTheTrainRunning() {
+    TrainSetup setup = ready(PowerSupply.PTG5);
+
+    assertTrue(setup.switchSupply(PowerSupply.PTG6, false, 50));
+    assertTrue(setup.ready());
+    assertEquals(PowerSupply.PTG6, setup.supply());
+
+    assertTrue(setup.switchSupply(PowerSupply.DIESEL, false, 51));
+    assertTrue(setup.ready());
+    assertFalse(setup.applies(SetupSystem.BREAKER));
+
+    assertTrue(setup.switchSupply(PowerSupply.PTG5, false, 52));
+    assertTrue(setup.ready());
+    assertEquals(TrainSetup.State.ON, setup.state(SetupSystem.BREAKER));
+  }
+
+  /** 驾驶员换模（simulation 级）：受电按新方式重新接通，耗时同受电一步，期间主电路断电；接通后照常可以牵引。 */
+  @Test
+  void aTimedSwitchRestartsThePowerStep() {
+    TrainSetup setup = ready(PowerSupply.PTG5);
+
+    assertTrue(setup.switchSupply(PowerSupply.DIESEL, true, 100));
+
+    assertEquals(TrainSetup.State.STARTING, setup.state(SetupSystem.POWER));
+    assertFalse(setup.ready());
+    assertFalse(setup.mainCircuitPowered());
+    assertEquals(new TrainSetup.Progress(SetupSystem.POWER, 6), setup.progress(100).orElseThrow());
+    assertFalse(setup.switchSupply(PowerSupply.PTG6, true, 101), "正在接通时不能再换");
+    setup.tick(106);
+    assertTrue(setup.ready());
+  }
+
+  /** 已是这种方式时不换。 */
+  @Test
+  void switchingToTheSameSupplyDoesNothing() {
+    TrainSetup setup = ready(PowerSupply.PTG5);
+
+    assertFalse(setup.switchSupply(PowerSupply.PTG5, true, 10));
+    assertTrue(setup.ready());
+  }
+
+  /** 调度换模不等正在接通的系统：那一步作废，换完一键启动接着进行。 */
+  @Test
+  void anUntimedSwitchDoesNotWaitForAStepInProgress() {
+    TrainSetup setup = electric();
+    setup.startAll(0);
+    setup.tick(1);
+    assertTrue(setup.busy());
+
+    assertTrue(setup.switchSupply(PowerSupply.DIESEL, false, 2));
+
+    assertEquals(PowerSupply.DIESEL, setup.supply());
+    assertTrue(setup.autoStarting(), "一键启动接着进行");
+    for (long tick = 2; tick < 100 && !setup.ready(); tick++) {
+      setup.tick(tick);
+    }
+    assertTrue(setup.ready());
+
+    TrainSetup starting = electric();
+    starting.startAll(0);
+    assertFalse(starting.switchSupply(PowerSupply.DIESEL, true, 0), "驾驶员换模要等正在接通的系统");
+    assertEquals(PowerSupply.PTG5, starting.supply());
+  }
+
+  /** 驾驶员换模重新受电时离座：受电作废，其后的主断与辅助电源一并断开，不留下违反顺序的状态。 */
+  @Test
+  void leavingTheCabDuringATimedSwitchDropsTheLaterSystems() {
+    TrainSetup setup = ready(PowerSupply.PTG5);
+    setup.switchSupply(PowerSupply.PTG6, true, 100);
+
+    setup.cabDeactivated();
+
+    assertEquals(TrainSetup.State.OFF, setup.state(SetupSystem.POWER));
+    assertEquals(TrainSetup.State.OFF, setup.state(SetupSystem.BREAKER));
+    assertEquals(TrainSetup.State.OFF, setup.state(SetupSystem.AUX));
+    assertEquals(Set.of(), setup.persistentOn());
+  }
 }

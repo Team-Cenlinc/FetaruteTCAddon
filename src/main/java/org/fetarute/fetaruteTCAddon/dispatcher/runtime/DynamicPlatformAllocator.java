@@ -10,6 +10,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -51,7 +53,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNorma
  * <p>分配策略：
  *
  * <ul>
- *   <li>遍历 [fromTrack, toTrack] 范围内的所有候选站台
+ *   <li>从图上实际节点筛选允许集合内的候选站台
  *   <li>优先选择未被占用的站台
  *   <li>若所有站台都被占用，不生成 materialized destination，由运行时保持在入口等待
  * </ul>
@@ -89,11 +91,17 @@ public final class DynamicPlatformAllocator {
   /** 列车物理位置（最后经过的图节点）；为 null 或返回空时视为位置未知。 */
   private final Function<String, Optional<NodeId>> physicalPosition;
 
+  /** 两节点最短距离；运行时接入共享的距离缓存，信号 tick 逐候选查可达不再每拍寻路。 */
+  private final PathDistance distances;
+
   /** 物理先后裁定的最近一次输出签名（按请求列车），只在变化时输出，体量受在场车数限制。 */
   private final Map<String, String> orderWithheldReported = new ConcurrentHashMap<>();
 
   /** 站台偏好（计划站台）；为空时只按方向优选。 */
   private volatile PlatformPreference preference = PlatformPreference.NONE;
+
+  /** 联挂搭档：搭档停着的股道对后到的车不算被占。 */
+  private volatile CouplingPartners couplingPartners = CouplingPartners.NONE;
 
   /** 暂定站台：trainKey -> 下一个停车站的暂定股道。一辆车同时只有一条。 */
   private final Map<String, Tentative> tentatives = new ConcurrentHashMap<>();
@@ -103,6 +111,21 @@ public final class DynamicPlatformAllocator {
 
   /** trainKey -> 下一次重看暂定站台的时刻。 */
   private final Map<String, Instant> tentativeRefreshAt = new ConcurrentHashMap<>();
+
+  /** 已选站台被暂时占住时最多保持多久：超过就放弃改选，避免列车在区间里无限期停着。 */
+  static final Duration STICKY_LIMIT = Duration.ofSeconds(120);
+
+  /**
+   * trainKey -> 已放弃的已选站台。运行时读有效节点覆盖时遇到它就当作没有，下一拍重新选台；同一站台重新被选上时撤销。
+   *
+   * <p>两种情况放弃：站台已不在图上或走不到（永久性，立即放弃）；被占用、被别车预订或前车在等持续超过 {@link #STICKY_LIMIT}。
+   */
+  private final Map<String, java.util.Set<NodeId>> abandoned = new ConcurrentHashMap<>();
+
+  /** trainKey -> (已选站台 -> 首次因暂时性原因不可用的时刻，纳秒)。 */
+  private final Map<String, Map<NodeId, Long>> unavailableSince = new ConcurrentHashMap<>();
+
+  private volatile java.util.function.LongSupplier clockNanos = System::nanoTime;
 
   /** 已分配记录：trainName -> (routeId:stopSequence) -> 带定义证据的分配。 */
   private final Map<String, Map<String, CachedAllocation>> allocations = new ConcurrentHashMap<>();
@@ -139,11 +162,49 @@ public final class DynamicPlatformAllocator {
       Consumer<String> debugLogger,
       DynamicCapacityWaitRegistry capacityWaits,
       Function<String, Optional<NodeId>> physicalPosition) {
+    this(
+        routeDefinitions,
+        occupancyManager,
+        debugLogger,
+        capacityWaits,
+        physicalPosition,
+        DynamicPlatformAllocator::uncachedDistance);
+  }
+
+  /**
+   * 带物理先后规则与距离缓存的构造器。
+   *
+   * @param distances 两节点最短距离；为 null 时每次现算
+   */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP2",
+      justification = "OccupancyManager 与容量等待登记都是运行时共享状态；选台必须读取同一份，不能复制。")
+  DynamicPlatformAllocator(
+      RouteDefinitionCache routeDefinitions,
+      OccupancyManager occupancyManager,
+      Consumer<String> debugLogger,
+      DynamicCapacityWaitRegistry capacityWaits,
+      Function<String, Optional<NodeId>> physicalPosition,
+      PathDistance distances) {
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
     this.occupancyManager = occupancyManager;
     this.debugLogger = debugLogger != null ? debugLogger : s -> {};
     this.capacityWaits = capacityWaits;
     this.physicalPosition = physicalPosition;
+    this.distances = distances != null ? distances : DynamicPlatformAllocator::uncachedDistance;
+  }
+
+  /** 两节点最短距离（方块）；不可达时为空。 */
+  @FunctionalInterface
+  interface PathDistance {
+    OptionalLong between(RailGraph graph, NodeId from, NodeId to);
+  }
+
+  private static OptionalLong uncachedDistance(RailGraph graph, NodeId from, NodeId to) {
+    return new RailGraphPathFinder()
+        .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
+        .map(path -> OptionalLong.of(path.totalLengthBlocks()))
+        .orElse(OptionalLong.empty());
   }
 
   /**
@@ -226,7 +287,8 @@ public final class DynamicPlatformAllocator {
     RailGraphPathFinder pathFinder = new RailGraphPathFinder();
     NodeId best = null;
     double bestScore = Double.NEGATIVE_INFINITY;
-    for (NodeId candidate : DynamicStopMatcher.candidateNodes(spec.get(), graph)) {
+    for (NodeId candidate :
+        DynamicStopMatcher.candidateNodes(spec.get(), graph, this::reportCandidateBudget)) {
       if (heldByOthers.contains(candidate)
           || isExternallyOccupied(candidate, trainName)
           || isReservedByOtherTrain(candidate, trainName)) {
@@ -359,6 +421,84 @@ public final class DynamicPlatformAllocator {
      * @return 计划股道；没有计划时为空
      */
     Optional<NodeId> preferred(String trainName, RouteDefinition route, int stopIndex);
+  }
+
+  /**
+   * 联挂（交路指令 COPL）：后到的车要开进搭档停着的那条股道。
+   *
+   * <p>只读、廉价：选台时每个候选都可能问一次。
+   */
+  public interface CouplingPartners {
+
+    /** 没有联挂。 */
+    CouplingPartners NONE =
+        new CouplingPartners() {
+          @Override
+          public Optional<NodeId> platformOf(String trainName, UUID routeId, int stopIndex) {
+            return Optional.empty();
+          }
+
+          @Override
+          public boolean partner(String trainName, String claimant) {
+            return false;
+          }
+        };
+
+    /**
+     * @param trainName 列车名
+     * @param routeId 列车当前交路
+     * @param stopIndex 交路节点下标
+     * @return 这辆车在这一站要开进的股道（搭档停着的那条）；不联挂时为空
+     */
+    Optional<NodeId> platformOf(String trainName, UUID routeId, int stopIndex);
+
+    /**
+     * @param trainName 列车名
+     * @param claimant 占用或预订站台的那列车
+     * @return {@code claimant} 是这辆车眼下要挂上的搭档
+     */
+    boolean partner(String trainName, String claimant);
+
+    /**
+     * 先不选台：搭档还没到、正开往本站（有上限，过了照常选台）。
+     *
+     * @param trainName 列车名
+     * @param routeId 列车当前交路
+     * @param stopIndex 交路节点下标
+     * @return 这一拍不选台、在站外等
+     */
+    default boolean defer(String trainName, UUID routeId, int stopIndex) {
+      return false;
+    }
+  }
+
+  /** 接入联挂搭档；{@code null} 恢复为没有。 */
+  void setCouplingPartners(CouplingPartners partners) {
+    this.couplingPartners = partners == null ? CouplingPartners.NONE : partners;
+  }
+
+  /** 联挂搭档还没到：这一拍先不选台；判定出错时照常选台。 */
+  private boolean deferForCouplingPartner(String trainName, RouteDefinition route, int stopIndex) {
+    if (couplingPartners == CouplingPartners.NONE) {
+      return false;
+    }
+    try {
+      Optional<UUID> routeId = routeDefinitions.findUuid(route.id());
+      return routeId.isPresent() && couplingPartners.defer(trainName, routeId.get(), stopIndex);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("DYNAMIC 联挂等搭档判定失败: train=" + trainName + ", error=" + ex);
+      return false;
+    }
+  }
+
+  /** {@code claimant} 是这辆车的联挂搭档；判定出错时不算。 */
+  private boolean couplingPartner(String trainName, String claimant) {
+    try {
+      return couplingPartners.partner(trainName, claimant);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("DYNAMIC 联挂搭档判定失败: train=" + trainName + ", error=" + ex);
+      return false;
+    }
   }
 
   /**
@@ -495,16 +635,23 @@ public final class DynamicPlatformAllocator {
             targetIndex,
             stop.sequence(),
             currentSpec,
-            graph,
-            currentNode,
-            trainName)) {
-          return DynamicResolution.selected(
-              new AllocationResult(
-                  trainName, route.id(), targetIndex, currentSpec, cached.allocatedNode()));
+            stop,
+            waypoints.get(targetIndex))) {
+          if (isAvailableForMaterialization(
+              cached.allocatedNode(), trainName, graph, currentNode)) {
+            return DynamicResolution.selected(
+                new AllocationResult(
+                    trainName, route.id(), targetIndex, currentSpec, cached.allocatedNode()));
+          }
+          if (!isAbandoned(trainName, cached.allocatedNode())) {
+            return DynamicResolution.blocked(
+                "materialized-platform-unavailable", java.util.OptionalInt.of(targetIndex));
+          }
+          // 已放弃（不在图上、走不到或占用超过上限）：缓存已撤，往下按候选重新选。
         }
         trainAllocations.remove(allocationKey, cached);
         debugLogger.accept(
-            "DYNAMIC 缓存分配失效: 定义、图、可达性、占用或预订证据已变化 (train="
+            "DYNAMIC 缓存分配失效: 停靠定义证据已变化 (train="
                 + trainName
                 + ", allocated="
                 + cached.allocatedNode().value()
@@ -533,6 +680,10 @@ public final class DynamicPlatformAllocator {
                 + ALLOCATION_EDGE_THRESHOLD);
       }
 
+      if (deferForCouplingPartner(trainName, route, targetIndex)) {
+        return DynamicResolution.blocked("coupling-partner-pending", OptionalInt.of(targetIndex));
+      }
+
       // 执行分配
       DynamicSpec spec = specOpt.get();
       Optional<NodeId> allocated =
@@ -552,9 +703,7 @@ public final class DynamicPlatformAllocator {
       }
 
       NodeId allocatedNode = allocated.get();
-      trainAllocations.put(
-          allocationKey,
-          new CachedAllocation(route.id(), targetIndex, stop.sequence(), spec, allocatedNode));
+      recordMaterialization(trainName, route, targetIndex, allocatedNode);
 
       debugLogger.accept(
           "DYNAMIC 分配成功: train="
@@ -599,6 +748,13 @@ public final class DynamicPlatformAllocator {
               && routeDefinitions
                   .findStop(route.id(), cached.stopIndex())
                   .filter(stop -> stop.sequence() == cached.stopSequence())
+                  .filter(
+                      stop ->
+                          DynamicStopMatcher.sameDefinition(
+                              Optional.of(cached.declaredStop()), Optional.of(stop)))
+                  .filter(
+                      stop ->
+                          cached.declaredNode().equals(route.waypoints().get(cached.stopIndex())))
                   .flatMap(DynamicStopMatcher::parseDynamicSpec)
                   .filter(cached.spec()::equals)
                   .filter(spec -> DynamicStopMatcher.matches(cached.allocatedNode(), spec))
@@ -666,6 +822,68 @@ public final class DynamicPlatformAllocator {
     }
     String key = routeId.value() + ":" + stopSequence;
     return Optional.ofNullable(trainAllocations.get(key)).map(CachedAllocation::allocatedNode);
+  }
+
+  /**
+   * 把已经通过资格与可用性校验的目标写入两条运行时路径共用的预订表。
+   *
+   * <p>推进点与信号 tick 的 materialization 都须登记，否则进路忙碌、尚未取得 NODE claim 时，其它列车会重复选走同一股道。
+   * 定义证据与清理周期沿用现有分配缓存；已有同一目标的有效记录保留其预订状态，物理前车让位不会因重复记录而被撤销。 该记录只协调内部优先权，不申请或释放真实占用。
+   *
+   * @param trainName 逻辑列车名
+   * @param route 当前交路定义
+   * @param stopIndex 已选目标在 waypoints 中的索引
+   * @param node 实际已选股道；普通停靠或集合外节点不登记
+   */
+  void recordMaterialization(String trainName, RouteDefinition route, int stopIndex, NodeId node) {
+    if (trainName == null
+        || trainName.isBlank()
+        || route == null
+        || node == null
+        || stopIndex < 0
+        || stopIndex >= route.waypoints().size()) {
+      return;
+    }
+    Optional<RouteStop> stop = routeDefinitions.findStop(route.id(), stopIndex);
+    Optional<DynamicSpec> spec = stop.flatMap(DynamicStopMatcher::parseDynamicSpec);
+    if (spec.isEmpty() || !DynamicStopMatcher.matches(node, spec.get())) {
+      return;
+    }
+    pruneStaleRouteAllocations(trainName, route);
+    java.util.Set<NodeId> given = abandoned.get(TrainNameNormalizer.normalizeKey(trainName));
+    if (given != null) {
+      // 重新选上同一站台（它又可用了）：撤销放弃，运行时照常读这条覆盖。
+      given.remove(node);
+    }
+    Map<String, CachedAllocation> held =
+        allocations.computeIfAbsent(
+            TrainNameNormalizer.normalizeKey(trainName), ignored -> new ConcurrentHashMap<>());
+    String key = route.id().value() + ":" + stop.orElseThrow().sequence();
+    NodeId declared = route.waypoints().get(stopIndex);
+    CachedAllocation previous = held.get(key);
+    if (previous != null
+        && previous.allocatedNode().equals(node)
+        && isCachedAllocationValid(
+            previous,
+            route.id(),
+            stopIndex,
+            stop.get().sequence(),
+            spec.get(),
+            stop.get(),
+            declared)) {
+      return;
+    }
+    held.put(
+        key,
+        new CachedAllocation(
+            route.id(),
+            stopIndex,
+            stop.get().sequence(),
+            spec.get(),
+            node,
+            stop.get(),
+            declared,
+            true));
   }
 
   /**
@@ -754,6 +972,8 @@ public final class DynamicPlatformAllocator {
   public void clearAllocations(String trainName) {
     if (trainName != null) {
       allocations.remove(TrainNameNormalizer.normalizeKey(trainName));
+      abandoned.remove(TrainNameNormalizer.normalizeKey(trainName));
+      unavailableSince.remove(TrainNameNormalizer.normalizeKey(trainName));
       orderWithheldReported.remove(TrainNameNormalizer.normalizeKey(trainName));
       tentatives.remove(TrainNameNormalizer.normalizeKey(trainName));
       tentativeRefreshAt.remove(TrainNameNormalizer.normalizeKey(trainName));
@@ -824,20 +1044,26 @@ public final class DynamicPlatformAllocator {
     RailGraphPathFinder pathFinder = new RailGraphPathFinder();
     List<ApproachCandidate> candidates = new ArrayList<>();
 
-    for (NodeId candidate : DynamicStopMatcher.candidateNodes(spec, graph)) {
+    // 可达性读距离缓存；完整路径只为空闲候选算一次（方向优选要用），全被占时逐拍重试不再寻路。
+    for (NodeId candidate :
+        DynamicStopMatcher.candidateNodes(spec, graph, this::reportCandidateBudget)) {
+      if (distances.between(graph, currentNode, candidate).isEmpty()) {
+        continue;
+      }
+      boolean free =
+          !isExternallyOccupied(candidate, trainName)
+              && !isReservedByOtherTrain(candidate, trainName)
+              && waiterAheadOnApproach(trainName, candidate, graph).isEmpty();
+      if (!free) {
+        candidates.add(new ApproachCandidate(candidate, false, List.of()));
+        continue;
+      }
       Optional<RailGraphPath> pathOpt =
           pathFinder.shortestPath(
               graph, currentNode, candidate, RailGraphPathFinder.Options.shortestDistance());
-      if (pathOpt.isEmpty()) {
-        continue;
+      if (pathOpt.isPresent()) {
+        candidates.add(new ApproachCandidate(candidate, true, pathOpt.get().nodes()));
       }
-
-      boolean physicallyFree = !isExternallyOccupied(candidate, trainName);
-      boolean free =
-          physicallyFree
-              && !isReservedByOtherTrain(candidate, trainName)
-              && waiterAheadOnApproach(trainName, candidate, graph).isEmpty();
-      candidates.add(new ApproachCandidate(candidate, free, pathOpt.get().nodes()));
     }
 
     if (candidates.isEmpty()) {
@@ -890,7 +1116,8 @@ public final class DynamicPlatformAllocator {
       if (claim == null || !resource.equals(claim.resource())) {
         continue;
       }
-      if (!TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+      if (!TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)
+          && !couplingPartner(trainName, claim.trainName())) {
         return true;
       }
       selfClaimSeen = true;
@@ -903,7 +1130,10 @@ public final class DynamicPlatformAllocator {
     }
     return occupancyManager
         .getClaim(resource)
-        .map(claim -> !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName))
+        .map(
+            claim ->
+                !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)
+                    && !couplingPartner(trainName, claim.trainName()))
         .orElse(true);
   }
 
@@ -915,13 +1145,15 @@ public final class DynamicPlatformAllocator {
     for (Map.Entry<String, Map<String, CachedAllocation>> entry : allocations.entrySet()) {
       if (entry == null
           || entry.getKey() == null
-          || TrainNameNormalizer.sameLogicalTrain(entry.getKey(), trainName)) {
+          || TrainNameNormalizer.sameLogicalTrain(entry.getKey(), trainName)
+          || couplingPartner(trainName, entry.getKey())) {
         continue;
       }
       Map<String, CachedAllocation> trainAllocations = entry.getValue();
       if (trainAllocations != null
           && trainAllocations.values().stream()
               .filter(Objects::nonNull)
+              .filter(CachedAllocation::reservesPlatform)
               .map(CachedAllocation::allocatedNode)
               .anyMatch(candidate::equals)) {
         return true;
@@ -936,28 +1168,179 @@ public final class DynamicPlatformAllocator {
       int targetIndex,
       int stopSequence,
       DynamicSpec currentSpec,
-      RailGraph graph,
-      NodeId currentNode,
-      String trainName) {
+      RouteStop currentStop,
+      NodeId declaredNode) {
     if (cached == null
         || !cached.routeId().equals(routeId)
         || cached.stopIndex() != targetIndex
         || cached.stopSequence() != stopSequence
         || !cached.spec().equals(currentSpec)
-        || !DynamicStopMatcher.matches(cached.allocatedNode(), currentSpec)
-        || graph.findNode(cached.allocatedNode()).isEmpty()
-        || new RailGraphPathFinder()
-            .shortestPath(
-                graph,
-                currentNode,
-                cached.allocatedNode(),
-                RailGraphPathFinder.Options.shortestDistance())
-            .isEmpty()) {
+        || !cached.declaredNode().equals(declaredNode)
+        || !DynamicStopMatcher.sameDefinition(
+            Optional.of(cached.declaredStop()), Optional.of(currentStop))
+        || !DynamicStopMatcher.matches(cached.allocatedNode(), currentSpec)) {
       return false;
     }
-    return !isExternallyOccupied(cached.allocatedNode(), trainName)
-        && !isReservedByOtherTrain(cached.allocatedNode(), trainName)
-        && waiterAheadOnApproach(trainName, cached.allocatedNode(), graph).isEmpty();
+    return true;
+  }
+
+  /** 站台对这列车当前是否可用；{@link #permanent()} 的原因说明这个选择不会再好起来。 */
+  enum Availability {
+    AVAILABLE,
+    CONTEXT_MISSING,
+    NODE_MISSING,
+    UNREACHABLE,
+    WAITER_AHEAD,
+    OCCUPIED;
+
+    boolean permanent() {
+      return this == NODE_MISSING || this == UNREACHABLE;
+    }
+  }
+
+  /**
+   * 站台对这列车当前是否可用，纯判断：不改预订、不计持有时长、不放弃任何选择。
+   *
+   * <p>按顺序检查：节点仍在图上、进站路上没有等同一站台的前车、可达（读注入的距离缓存）、没被别车占用或预订。
+   */
+  Availability availability(NodeId node, String trainName, RailGraph graph, NodeId currentNode) {
+    return availability(node, trainName, graph, currentNode, distances);
+  }
+
+  private Availability availability(
+      NodeId node, String trainName, RailGraph graph, NodeId currentNode, PathDistance distance) {
+    if (node == null || occupancyManager == null || graph == null || currentNode == null) {
+      return Availability.CONTEXT_MISSING;
+    }
+    if (graph.findNode(node).isEmpty()) {
+      return Availability.NODE_MISSING;
+    }
+    if (waiterAheadOnApproach(trainName, node, graph).isPresent()) {
+      return Availability.WAITER_AHEAD;
+    }
+    if (distance.between(graph, currentNode, node).isEmpty()) {
+      return Availability.UNREACHABLE;
+    }
+    if (isExternallyOccupied(node, trainName) || isReservedByOtherTrain(node, trainName)) {
+      return Availability.OCCUPIED;
+    }
+    return Availability.AVAILABLE;
+  }
+
+  /** 尚未选定的候选是否可用（{@link #availability} 的布尔形式），供逐候选筛选；没有副作用。 */
+  boolean isCandidateAvailable(NodeId node, String trainName, RailGraph graph, NodeId currentNode) {
+    return availability(node, trainName, graph, currentNode) == Availability.AVAILABLE;
+  }
+
+  /**
+   * 核对已选站台（materialization）是否仍可用，并据此维护这条选择：临时占用只让本车等待，不删除已选目标。
+   *
+   * <p>后车先订到站台、前车随后开始等台时，后车让出预订优先权，保持同一目标直到前车通过。 预订与目标事实分开，避免后车握住空台形成互卡；此操作不释放任何真实
+   * NODE/EDGE/CONFLICT claim。
+   *
+   * <p>站台已不在图上或走不到时立即放弃这个选择（缓存说不可达时先按当前图重算确认）；暂时性原因持续超过 {@link #STICKY_LIMIT} 也放弃（见 {@link
+   * #isAbandoned}）。只用于本车已选的站台，逐候选筛选用 {@link #isCandidateAvailable}。
+   */
+  boolean isAvailableForMaterialization(
+      NodeId node, String trainName, RailGraph graph, NodeId currentNode) {
+    Availability availability = availability(node, trainName, graph, currentNode);
+    if (availability == Availability.UNREACHABLE) {
+      availability =
+          availability(
+              node, trainName, graph, currentNode, DynamicPlatformAllocator::uncachedDistance);
+    }
+    switch (availability) {
+      case AVAILABLE -> {
+        Map<NodeId, Long> since = unavailableSince.get(TrainNameNormalizer.normalizeKey(trainName));
+        if (since != null) {
+          since.remove(node);
+        }
+        setReservationActive(trainName, node, true);
+        return true;
+      }
+      case NODE_MISSING -> abandon(trainName, node, "node-missing");
+      case UNREACHABLE -> abandon(trainName, node, "unreachable");
+      case WAITER_AHEAD -> {
+        setReservationActive(trainName, node, false);
+        temporarilyUnavailable(trainName, node, "waiter-ahead");
+      }
+      case OCCUPIED -> temporarilyUnavailable(trainName, node, "occupied");
+      case CONTEXT_MISSING -> {
+        // 上下文缺失（图或占用服务暂不可用）：不判断这条选择，等下一拍。
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 这列车是否已放弃这个已选站台：运行时读有效节点覆盖时遇到它就当作没有，重新选台。
+   *
+   * @param trainName 列车名
+   * @param node 已选站台
+   */
+  public boolean isAbandoned(String trainName, NodeId node) {
+    if (trainName == null || node == null) {
+      return false;
+    }
+    java.util.Set<NodeId> nodes = abandoned.get(TrainNameNormalizer.normalizeKey(trainName));
+    return nodes != null && nodes.contains(node);
+  }
+
+  /** 测试用：替换计时。 */
+  void setClock(java.util.function.LongSupplier nanos) {
+    clockNanos = nanos == null ? System::nanoTime : nanos;
+  }
+
+  /** 暂时不可用：记下起始时刻，持续超过上限就放弃。 */
+  private void temporarilyUnavailable(String trainName, NodeId node, String reason) {
+    long now = clockNanos.getAsLong();
+    long since =
+        unavailableSince
+            .computeIfAbsent(
+                TrainNameNormalizer.normalizeKey(trainName), ignored -> new ConcurrentHashMap<>())
+            .computeIfAbsent(node, ignored -> now);
+    if (now - since >= STICKY_LIMIT.toNanos()) {
+      abandon(trainName, node, reason + "-over-" + STICKY_LIMIT.toSeconds() + "s");
+    }
+  }
+
+  /** 放弃已选站台：撤掉缓存的分配与预订，记入放弃表，下一拍按候选重新选台。 */
+  private void abandon(String trainName, NodeId node, String reason) {
+    String key = TrainNameNormalizer.normalizeKey(trainName);
+    if (!abandoned.computeIfAbsent(key, ignored -> ConcurrentHashMap.newKeySet()).add(node)) {
+      return;
+    }
+    Map<String, CachedAllocation> held = allocations.get(key);
+    if (held != null) {
+      held.values().removeIf(value -> value.allocatedNode().equals(node));
+    }
+    Map<NodeId, Long> since = unavailableSince.get(key);
+    if (since != null) {
+      since.remove(node);
+    }
+    debugLogger.accept(
+        "DYNAMIC 放弃已选站台并改选: train=" + trainName + " node=" + node.value() + " reason=" + reason);
+  }
+
+  /** 只切换内部预订资格，materialized 节点与定义证据保持不变。 */
+  private void setReservationActive(String trainName, NodeId node, boolean active) {
+    Map<String, CachedAllocation> held =
+        allocations.get(TrainNameNormalizer.normalizeKey(trainName));
+    if (held != null) {
+      held.replaceAll(
+          (key, value) ->
+              value.allocatedNode().equals(node)
+                  ? new CachedAllocation(
+                      value.routeId(),
+                      value.stopIndex(),
+                      value.stopSequence(),
+                      value.spec(),
+                      node,
+                      value.declaredStop(),
+                      value.declaredNode(),
+                      active)
+                  : value);
+    }
   }
 
   /**
@@ -1021,6 +1404,13 @@ public final class DynamicPlatformAllocator {
             + " reason=waiting-train-ahead-on-approach");
   }
 
+  /** 按声明去重预算诊断，繁忙站台逐 tick 重试时不刷屏。 */
+  void reportCandidateBudget(String message) {
+    if (allocationDecisionReported.add(message)) {
+      debugLogger.accept(message);
+    }
+  }
+
   private record ApproachCandidate(NodeId nodeId, boolean free, List<NodeId> pathNodes) {
     private ApproachCandidate {
       Objects.requireNonNull(nodeId, "nodeId");
@@ -1030,7 +1420,14 @@ public final class DynamicPlatformAllocator {
   }
 
   private record CachedAllocation(
-      RouteId routeId, int stopIndex, int stopSequence, DynamicSpec spec, NodeId allocatedNode) {
+      RouteId routeId,
+      int stopIndex,
+      int stopSequence,
+      DynamicSpec spec,
+      NodeId allocatedNode,
+      RouteStop declaredStop,
+      NodeId declaredNode,
+      boolean reservesPlatform) {
     private CachedAllocation {
       Objects.requireNonNull(routeId, "routeId");
       Objects.requireNonNull(spec, "spec");
@@ -1158,11 +1555,7 @@ public final class DynamicPlatformAllocator {
     if (spec == null) {
       return "-";
     }
-    String range =
-        spec.fromTrack() == spec.toTrack()
-            ? String.valueOf(spec.fromTrack())
-            : "[" + spec.fromTrack() + ":" + spec.toTrack() + "]";
-    return spec.operatorCode() + ":" + spec.nodeType() + ":" + spec.nodeName() + ":" + range;
+    return spec.payload();
   }
 
   /**

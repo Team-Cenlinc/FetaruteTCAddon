@@ -7,6 +7,12 @@
         <Method name="getLoggerManager"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 拆挂协作者必须是调度持有的同一实例：插件自己发起的拆挂登记与改名通知都挂在它上面，不能复制。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService"/>
+        <Method name="coupling"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getRailGraphService"/>
@@ -29,6 +35,12 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getSignNodeRegistry"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- 改牌监听与图命令必须共享同一同步器及其签名核验队列，不能复制外部托管句柄。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getSignNodeStorageSync"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
     <Match>
@@ -853,5 +865,40 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaGuardCommand"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- 车钩扳手：命令持有插件实例、同股道列车对按引用交给占用判定；ItemStack#setItemMeta 会修改物品；MinecartMember#getEntity 的泛型返回值 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaCouplerCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.coupler.CouplerService"/>
+        <Or>
+            <Method name="pairs"/>
+            <Method name="decoupling"/>
+            <Method name="coupling"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.coupler.CouplerService"/>
+        <Method name="center"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.coupler.CarEnds"/>
+        <Method name="center"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.coupler.WrenchItem"/>
+        <Method name="create"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <!-- 组合编组解析结果带着 TrainCarts 的 SpawnableGroup：只在出车那一刻用，不另行复制 -->
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern$Parsed"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
 </FindBugsFilter>

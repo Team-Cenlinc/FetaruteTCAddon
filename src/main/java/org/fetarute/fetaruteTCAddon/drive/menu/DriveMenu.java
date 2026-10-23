@@ -66,8 +66,12 @@ public final class DriveMenu {
     long now = Bukkit.getCurrentTick();
     for (MenuAction action : MenuAction.values()) {
       ButtonView view = viewOf(action, session, now);
-      inventory.setItem(
-          MenuLayout.slotOf(action), view == null ? null : DriveMenuItems.build(locale, view));
+      ItemStack item = view == null ? null : DriveMenuItems.build(locale, view);
+      if (item == null && action.powerModeIndex() >= 0) {
+        // 单模车、车上不到这么多种受电方式：仍是玻璃板
+        item = DriveMenuItems.divider();
+      }
+      inventory.setItem(MenuLayout.slotOf(action), item);
     }
     CabSystems cab = session.cab();
     for (MenuIndicator indicator : MenuIndicator.values()) {
@@ -114,6 +118,9 @@ public final class DriveMenu {
   private static ButtonView viewOf(MenuAction action, DriveSession session, long now) {
     TrainSetup setup = session.setup();
     SimulationLevel.SetupMode mode = session.setupMode();
+    if (action.powerModeIndex() >= 0) {
+      return powerModeView(action, session, now);
+    }
     Optional<SetupSystem> system = action.system();
     if (system.isPresent()) {
       if (!setup.applies(system.get())) {
@@ -180,7 +187,47 @@ public final class DriveMenu {
           busy ? remainingSeconds(setup, now) : -1,
           true);
     }
+    if ((action == MenuAction.DOOR_LEFT || action == MenuAction.DOOR_RIGHT)
+        && session.driverLink() != null
+        && session.driverLink().guardAboard()) {
+      // 车门归车掌：按钮不亮、不能点，说明车掌开着还是关着
+      return new ButtonView(
+          action,
+          false,
+          false,
+          org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG5,
+          -1,
+          false,
+          session.driverLink().guardDoorsOpen()
+              ? "drive.menu.detail.guard-doors-open"
+              : "drive.menu.detail.guard-doors",
+          Map.of());
+    }
     return ButtonView.simple(action, isActive(action, session));
+  }
+
+  /** 多模车第三排的受电方式按钮：当前用的亮着（重新受电中显示剩余秒数），其余可点；单模车或车上没有这一种时为 {@code null}。 */
+  private static ButtonView powerModeView(MenuAction action, DriveSession session, long now) {
+    java.util.List<org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply> supplies =
+        session.powerSupplies();
+    int index = action.powerModeIndex();
+    if (supplies.size() <= 1 || index >= supplies.size()) {
+      return null;
+    }
+    TrainSetup setup = session.setup();
+    org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply supply = supplies.get(index);
+    boolean current = supply == setup.supply();
+    boolean busy = current && setup.state(SetupSystem.POWER) == TrainSetup.State.STARTING;
+    boolean required = session.pendingPower().filter(supply::equals).isPresent();
+    return new ButtonView(
+        action,
+        current,
+        busy,
+        supply,
+        busy ? remainingSeconds(setup, now) : -1,
+        !current,
+        required ? "drive.menu.detail.power-required" : null,
+        Map.of());
   }
 
   /** 主断跳闸后的主断开关：按复位进度显示；主断没有跳闸时为 {@code null}。 */

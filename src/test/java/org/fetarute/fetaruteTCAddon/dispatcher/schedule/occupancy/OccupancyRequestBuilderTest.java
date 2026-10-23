@@ -1872,7 +1872,21 @@ class OccupancyRequestBuilderTest {
             .orElseThrow()
             .request();
 
-    assertEquals(CorridorDirection.B_TO_A, request.corridorDirections().get(conflict));
+    OccupancyRequest entering =
+        builder
+            .buildContextFromNodes(
+                "other",
+                Optional.of(RouteId.of("SURC:DS:DS-1F_FULL")),
+                List.of(zkwHhu, depot),
+                0,
+                Instant.parse("2026-01-01T00:00:00Z"),
+                0)
+            .orElseThrow()
+            .request();
+
+    // 车库线附近没有区间路径点：按资源自己的有序节点（D:HHU:3, 502）定方向；出库与进库标号相反
+    assertEquals(CorridorDirection.A_TO_B, request.corridorDirections().get(conflict));
+    assertEquals(CorridorDirection.B_TO_A, entering.corridorDirections().get(conflict));
     assertTrue(
         diagnostics.stream().noneMatch(message -> message.contains("方向判定失败")),
         () -> "已由完整计划确定方向时不应留下失败诊断: " + diagnostics);
@@ -2251,10 +2265,28 @@ class OccupancyRequestBuilderTest {
             .orElseThrow()
             .request();
 
-    assertEquals(CorridorDirection.A_TO_B, canonical.corridorDirections().get(conflict));
+    // 不带区间锚点的同向请求（前面的路径点已经走过，只剩站内一段）
+    OccupancyRequest withoutAnchor =
+        builder
+            .buildContextFromNodes(
+                "SURC-DS-LW-8443",
+                Optional.of(RouteId.of("SURC:DS:DS-1F_Full")),
+                List.of(current, wyb),
+                0,
+                Instant.parse("2026-01-01T00:00:02Z"),
+                0)
+            .orElseThrow()
+            .request();
+
+    // 资源附近没有区间路径点：按资源自己的有序节点（wyb, terminalSwitcher）定方向，三次同向请求标号一致
+    assertEquals(CorridorDirection.B_TO_A, canonical.corridorDirections().get(conflict));
     assertEquals(
         canonical.corridorDirections().get(conflict),
         liveSuffix.corridorDirections().get(conflict));
+    assertEquals(
+        canonical.corridorDirections().get(conflict),
+        withoutAnchor.corridorDirections().get(conflict),
+        "带不带区间锚点，同一列车同一方向必须是同一个标号");
   }
 
   @Test

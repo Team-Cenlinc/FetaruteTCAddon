@@ -112,7 +112,7 @@ public final class StationApiImpl implements StationApi {
     if (stationId == null) {
       return Optional.empty();
     }
-    return stationRepository.findById(stationId).map(this::convertStation);
+    return stationRepository.findById(stationId).map(StationApiImpl::convertStation);
   }
 
   @Override
@@ -122,7 +122,7 @@ public final class StationApiImpl implements StationApi {
     }
     return stationRepository
         .findByOperatorAndCode(operatorId, stationCode)
-        .map(this::convertStation);
+        .map(StationApiImpl::convertStation);
   }
 
   @Override
@@ -272,7 +272,8 @@ public final class StationApiImpl implements StationApi {
     }
   }
 
-  private StationInfo convertStation(Station station) {
+  /** 车站记录转成公开 API 的视图。 */
+  public static StationInfo convertStation(Station station) {
     Optional<Position> position =
         station.location().map(loc -> new Position(loc.x(), loc.y(), loc.z()));
 

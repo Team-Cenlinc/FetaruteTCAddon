@@ -20,27 +20,26 @@ import org.fetarute.typewriter.entries.action.AssignGuardDutyActionEntry
 import java.util.Optional
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_stop_worked_event", "When a FetaruteTC guard finishes the work at a station", Colors.YELLOW, "mdi:door-sliding")
+@Entry("fetarute_guard_stop_worked_event", "FTCA 车掌做完一站作业时", Colors.YELLOW, "mdi:door-sliding")
 @ContextKeys(GuardStopWorkedContextKeys::class)
 /**
- * The `Guard Stop Worked Event` is triggered each time the guard has worked a station (doors opened and closed,
- * starting signal given) and the train leaves it. Stations the train ran past, or left before the doors were
- * released, do not count.
+ * “车掌做完一站”事件：车掌做完一站作业（开关车门、发出发车信号）、列车开出这一站时触发。
+ * 越站的、没放行就开走的不算。
  *
- * The departure watch may still be running when this fires; the final score is in the `Guard Trip Scored Event`.
+ * 触发时出站监视可能还没结束；这一站的最终扣分以“车掌一趟结算”事件为准。
  *
- * ## How could this be used?
- * Give a tutorial hint after a station where the doors timed out, or count clean stations for an achievement.
+ * ## 用法示例
+ * 车门超时的那一站之后给一条教学提示，或数无扣分的站来发成就。
  */
 class GuardStopWorkedEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only stations of duties given by this action. Leave empty for any station, also without a duty.")
+    @Help("只要这个动作派出的车掌任务里的站；留空则任何站都算，包括不领任务的值乘。")
     val assignedBy: Ref<AssignGuardDutyActionEntry> = emptyRef(),
-    @Help("Only this station name. Leave blank for any station.")
+    @Help("只要这个站名的车站；留空不限车站。")
     val station: String = "",
-    @Help("Only this result. Leave empty for any result.")
+    @Help("只要这个结果；留空不限结果。")
     val result: Optional<GuardStopResult> = Optional.empty(),
 ) : EventEntry
 

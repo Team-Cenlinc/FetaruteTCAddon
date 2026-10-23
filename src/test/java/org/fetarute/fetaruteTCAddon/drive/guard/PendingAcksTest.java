@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 import java.util.List;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.drive.driver.SignalAcknowledge;
+import org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock;
 import org.junit.jupiter.api.Test;
 
 /** simulation 级驾驶员收到车掌的发车信号要回一短：按时回算收到，到时没回记一次漏确认。 */
@@ -47,10 +48,14 @@ class PendingAcksTest {
     acks.expect(driver, PendingAcks.deadline(signal, guard));
     BuzzerPress press = new BuzzerPress(guard.buzzerLongTicks(), guard.buzzerDoubleTicks());
     long pressedAt = signal + guard.ackSeconds() * 20L;
-    press.press(pressedAt);
+    // 铃按客户端时钟（毫秒）认，期限按服务器 tick 算：客户端与服务器同速走
+    press.press(pressedAt * ClientClock.MILLIS_PER_TICK);
     // 与车掌会话每拍的顺序相同：先认铃声，再看过期。
     for (long now = pressedAt + 1; now < pressedAt + 200; now++) {
-      if (press.tick(now).filter(kind -> kind == BuzzerPress.Kind.SHORT).isPresent()) {
+      if (press
+          .tick(now * ClientClock.MILLIS_PER_TICK)
+          .filter(kind -> kind == BuzzerPress.Kind.SHORT)
+          .isPresent()) {
         assertTrue(acks.acknowledge(driver), "认出一短时还在等");
         return;
       }

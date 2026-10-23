@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +45,57 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
 import org.junit.jupiter.api.Test;
 
 class StorageSpawnManagerTest {
+
+  /** 按运营需求出库没有独立 baseline：保留可出票服务，但不生成周期票或周期预测。 */
+  @Test
+  void operationDispatchedCreateNeedsNoBaselineAndNeverGeneratesPeriodicTickets() {
+    Fixture base = enabledRoute();
+    Line old = base.line();
+    Line line =
+        new Line(
+            old.id(),
+            old.code(),
+            old.operatorId(),
+            old.name(),
+            old.secondaryName(),
+            old.serviceType(),
+            old.color(),
+            old.status(),
+            Optional.empty(),
+            Map.of(),
+            old.createdAt(),
+            old.updatedAt());
+    Route oldRoute = base.routes().get(0);
+    Route route =
+        new Route(
+            oldRoute.id(),
+            oldRoute.code(),
+            oldRoute.lineId(),
+            oldRoute.name(),
+            oldRoute.secondaryName(),
+            oldRoute.patternType(),
+            RouteOperationType.CREATE,
+            oldRoute.distanceMeters(),
+            oldRoute.runtimeSeconds(),
+            Map.of("dispatch_by_operation", true),
+            oldRoute.createdAt(),
+            oldRoute.updatedAt());
+    StorageProvider provider =
+        mockProvider(
+            new Fixture(
+                base.company(), base.operator(), line, List.of(route), base.stopsByRouteId()));
+    StorageSpawnManager manager =
+        new StorageSpawnManager(
+            new StorageSpawnManager.SpawnManagerSettings(
+                Duration.ZERO, Duration.ZERO, 5, 5, 10, Duration.ofHours(1)),
+            null);
+    Instant now = Instant.parse("2026-10-12T00:00:00Z");
+
+    assertTrue(manager.pollDueTickets(provider, now).isEmpty());
+    assertEquals(1, manager.snapshotPlan().size(), "出入库票仍能找到服务");
+    assertTrue(manager.pollDueTickets(provider, now.plusSeconds(3600)).isEmpty());
+    assertTrue(manager.snapshotForecast(now, Duration.ofHours(1), 5).isEmpty());
+  }
 
   @Test
   void pollDueTicketsGeneratesTicketForEnabledRoute() {
@@ -243,8 +295,8 @@ class StorageSpawnManagerTest {
     Map<String, SpawnService> servicesByRoute =
         manager.snapshotPlan().services().stream()
             .collect(Collectors.toMap(SpawnService::routeCode, Function.identity()));
-    assertEquals(Duration.ofSeconds(900), servicesByRoute.get("R1").baseHeadway());
-    assertEquals(Duration.ofSeconds(450), servicesByRoute.get("R2").baseHeadway());
+    assertEquals(Duration.ofSeconds(900), servicesByRoute.get("R1").baseHeadway().orElseThrow());
+    assertEquals(Duration.ofSeconds(450), servicesByRoute.get("R2").baseHeadway().orElseThrow());
     assertEquals("SURN:D:DEPOT:1", servicesByRoute.get("R1").depotNodeId());
     assertEquals("SURN:D:DEPOT:1", servicesByRoute.get("R2").depotNodeId());
   }
@@ -320,8 +372,8 @@ class StorageSpawnManagerTest {
         manager.snapshotPlan().services().stream()
             .collect(Collectors.toMap(SpawnService::routeCode, Function.identity()));
     assertEquals(2, servicesByRoute.size());
-    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-OP").baseHeadway());
-    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-RET").baseHeadway());
+    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-OP").baseHeadway().orElseThrow());
+    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-RET").baseHeadway().orElseThrow());
   }
 
   @Test
@@ -340,8 +392,8 @@ class StorageSpawnManagerTest {
         manager.snapshotPlan().services().stream()
             .collect(Collectors.toMap(SpawnService::routeCode, Function.identity()));
     assertEquals(2, servicesByRoute.size());
-    assertEquals(Duration.ofSeconds(240), servicesByRoute.get("OP-G").baseHeadway());
-    assertEquals(Duration.ofSeconds(240), servicesByRoute.get("RET-G").baseHeadway());
+    assertEquals(Duration.ofSeconds(240), servicesByRoute.get("OP-G").baseHeadway().orElseThrow());
+    assertEquals(Duration.ofSeconds(240), servicesByRoute.get("RET-G").baseHeadway().orElseThrow());
   }
 
   @Test
@@ -360,8 +412,8 @@ class StorageSpawnManagerTest {
         manager.snapshotPlan().services().stream()
             .collect(Collectors.toMap(SpawnService::routeCode, Function.identity()));
     assertEquals(2, servicesByRoute.size());
-    assertEquals(Duration.ofSeconds(120), servicesByRoute.get("OP-A").baseHeadway());
-    assertEquals(Duration.ofSeconds(180), servicesByRoute.get("OP-B").baseHeadway());
+    assertEquals(Duration.ofSeconds(120), servicesByRoute.get("OP-A").baseHeadway().orElseThrow());
+    assertEquals(Duration.ofSeconds(180), servicesByRoute.get("OP-B").baseHeadway().orElseThrow());
   }
 
   @Test
@@ -452,8 +504,8 @@ class StorageSpawnManagerTest {
     assertEquals(2, servicesByRoute.size());
     assertTrue(servicesByRoute.containsKey("R-OP"));
     assertTrue(servicesByRoute.containsKey("R-RET"));
-    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-OP").baseHeadway());
-    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-RET").baseHeadway());
+    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-OP").baseHeadway().orElseThrow());
+    assertEquals(Duration.ofSeconds(200), servicesByRoute.get("R-RET").baseHeadway().orElseThrow());
   }
 
   private static Fixture enabledRoute() {
@@ -528,6 +580,67 @@ class StorageSpawnManagerTest {
             Optional.of("CRET SURN:D:DEPOT:1"));
 
     return new Fixture(company, operator, line, List.of(route), Map.of(routeId, List.of(cret)));
+  }
+
+  @Test
+  void decoupleTargetsAreNotSpawnedOnTheirOwn() {
+    Fixture base = enabledRoute();
+    Route trunk = base.routes().get(0);
+    UUID branchId = UUID.randomUUID();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+    Route branch =
+        new Route(
+            branchId,
+            "BR",
+            base.line().id(),
+            "Branch",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_enabled", true),
+            ts,
+            ts);
+    List<RouteStop> trunkStops = new ArrayList<>(base.stopsByRouteId().get(trunk.id()));
+    trunkStops.add(
+        new RouteStop(
+            trunk.id(),
+            1,
+            Optional.empty(),
+            Optional.of("SURN:S:MID:1"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DECP REAR:2:GOTO:BR")));
+    RouteStop branchStart =
+        new RouteStop(
+            branchId,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:S:MID:2"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    StorageProvider provider =
+        mockProvider(
+            new Fixture(
+                base.company(),
+                base.operator(),
+                base.line(),
+                List.of(trunk, branch),
+                Map.of(trunk.id(), trunkStops, branchId, List.of(branchStart))));
+    StorageSpawnManager manager =
+        new StorageSpawnManager(
+            new StorageSpawnManager.SpawnManagerSettings(
+                Duration.ofSeconds(999), Duration.ZERO, 5, 10, 10),
+            null);
+
+    manager.pollDueTickets(provider, Instant.parse("2026-01-19T00:00:00Z"));
+
+    List<String> codes =
+        manager.snapshotPlan().services().stream().map(SpawnService::routeCode).toList();
+    assertTrue(codes.contains("R1"), codes::toString);
+    assertFalse(codes.contains("BR"), "解编 GOTO 指向的交路由解下的车跑：" + codes);
   }
 
   private static Fixture operationAndReturnRoutes() {

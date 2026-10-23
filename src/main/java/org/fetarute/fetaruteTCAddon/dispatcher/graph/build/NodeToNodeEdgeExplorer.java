@@ -36,7 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  *
  * <ul>
  *   <li>不会遍历无节点的轨道（如废弃矿井）
- *   <li>遇到节点就停止，边长就是实际轨道距离
+ *   <li>遇到节点就停止，边长取 TC 几何距离与实际轨道方块步数的较大值
  *   <li>使用 TC 原生轨道行走逻辑，更准确
  * </ul>
  *
@@ -70,6 +70,10 @@ public final class NodeToNodeEdgeExplorer {
   private final Set<NodeId> switcherNodeIds;
   private final double maxDistance;
   private final Consumer<String> debugLogger;
+  private final Consumer<String> warnLogger;
+
+  /** 已经告警过的零长度区间（同一对节点从几个方向都会撞上，只报一次）。 */
+  private final Set<EdgeId> zeroLengthEdges = new HashSet<>();
 
   private final Queue<EdgeExplorationTask> pendingTasks = new ArrayDeque<>();
   private final Map<EdgeId, ExploredRailEdgeAccumulator> discoveredEdges = new HashMap<>();
@@ -82,7 +86,7 @@ public final class NodeToNodeEdgeExplorer {
   private final Set<UnterminatedDirection> unterminatedDirections = new TreeSet<>();
 
   /**
-   * 创建边探索器。
+   * 创建边探索器，零长度区间等告警写进调试日志。
    *
    * @param world 世界
    * @param anchorIndex 锚点位置 → 节点 ID 的映射（用于检测是否到达另一个节点）
@@ -90,36 +94,32 @@ public final class NodeToNodeEdgeExplorer {
    */
   public NodeToNodeEdgeExplorer(
       World world, Map<RailBlockPos, NodeId> anchorIndex, Consumer<String> debugLogger) {
-    this(world, anchorIndex, Set.of(), DEFAULT_MAX_DISTANCE, debugLogger);
+    this(world, anchorIndex, Set.of(), DEFAULT_MAX_DISTANCE, debugLogger, debugLogger);
   }
 
-  public NodeToNodeEdgeExplorer(
-      World world,
-      Map<RailBlockPos, NodeId> anchorIndex,
-      Set<NodeId> switcherNodeIds,
-      Consumer<String> debugLogger) {
-    this(world, anchorIndex, switcherNodeIds, DEFAULT_MAX_DISTANCE, debugLogger);
-  }
-
-  public NodeToNodeEdgeExplorer(
-      World world,
-      Map<RailBlockPos, NodeId> anchorIndex,
-      double maxDistance,
-      Consumer<String> debugLogger) {
-    this(world, anchorIndex, Set.of(), maxDistance, debugLogger);
-  }
-
+  /**
+   * 创建边探索器。
+   *
+   * @param world 世界
+   * @param anchorIndex 锚点位置 → 节点 ID 的映射（用于检测是否到达另一个节点）
+   * @param switcherNodeIds 道岔节点
+   * @param maxDistance 单个方向的探索上限，超过按尽头线处理；非正数取默认值
+   * @param debugLogger 调试日志输出
+   * @param warnLogger 需要运维处理的告警（零长度区间等）；为空时写进调试日志
+   */
   public NodeToNodeEdgeExplorer(
       World world,
       Map<RailBlockPos, NodeId> anchorIndex,
       Set<NodeId> switcherNodeIds,
       double maxDistance,
-      Consumer<String> debugLogger) {
+      Consumer<String> debugLogger,
+      Consumer<String> warnLogger) {
     this.world = Objects.requireNonNull(world, "world");
     this.anchorIndex = Objects.requireNonNull(anchorIndex, "anchorIndex");
     this.switcherNodeIds = switcherNodeIds == null ? Set.of() : Set.copyOf(switcherNodeIds);
     this.maxDistance = maxDistance > 0 ? maxDistance : DEFAULT_MAX_DISTANCE;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
+    this.warnLogger = warnLogger != null ? warnLogger : this.debugLogger;
   }
 
   /**
@@ -337,6 +337,7 @@ public final class NodeToNodeEdgeExplorer {
     if (!ws.startCaptured) {
       captureCurrentPath(ws);
       ws.startCaptured = true;
+      ws.previousRailPos = currentTask.startAnchor;
     }
 
     // 移动一个轨道块
@@ -366,8 +367,13 @@ public final class NodeToNodeEdgeExplorer {
 
     RailBlockPos currentPos =
         new RailBlockPos(currentBlock.getX(), currentBlock.getY(), currentBlock.getZ());
+    if (!currentPos.equals(ws.previousRailPos)) {
+      ws.railBlockSteps++;
+      ws.previousRailPos = currentPos;
+    }
+    double measuredDistance = measuredDistance(walker.movedTotal, ws.railBlockSteps);
     NodeId targetNodeId = anchorIndex.get(currentPos);
-    WalkerStep step = classifyStep(startNodeId, targetNodeId, walker.movedTotal, maxDistance);
+    WalkerStep step = classifyStep(startNodeId, targetNodeId, measuredDistance, maxDistance);
     if (step == WalkerStep.UNTERMINATED) {
       recordUnterminatedDirection(new UnterminatedDirection(startNodeId, currentPos));
       debugLogger.accept(
@@ -381,8 +387,18 @@ public final class NodeToNodeEdgeExplorer {
     }
 
     if (step == WalkerStep.ARRIVED) {
-      int distance = (int) Math.round(walker.movedTotal);
+      int distance = (int) Math.round(measuredDistance);
       EdgeId edgeId = EdgeId.undirected(startNodeId, targetNodeId);
+      if (distance <= 0) {
+        // 跨进相邻轨道至少按 1 格计（见 measuredDistance），为零只能是还没离开起点那段轨道就撞上别的节点：
+        // 两个节点的锚点落在同一段轨道上，锚点索引里这一格登记成了另一个节点。告警，区间按 1 格记，不让整次建图失败。
+        // 不能跳过：同一段轨道上的两块牌子，其中一个节点的每个方向都会先撞上另一个，跳过就一条区间都没有了。
+        if (zeroLengthEdges.add(edgeId)) {
+          warnLogger.accept(
+              zeroLengthWarning(startNodeId, currentTask.startAnchor, targetNodeId, currentPos));
+        }
+        distance = 1;
+      }
 
       discoveredEdges
           .computeIfAbsent(edgeId, ignored -> new ExploredRailEdgeAccumulator())
@@ -394,6 +410,37 @@ public final class NodeToNodeEdgeExplorer {
     }
 
     return false;
+  }
+
+  /**
+   * 区间的实测长度：按 TrainCarts 累计的几何长度。
+   *
+   * <p>moveFull 从 junction 端点出发、首次进入相邻轨道时几何距离可以为零，跨过了轨道却不到一格时按一格计。 不能拿步数当下限：原版斜线轨道每块只有约 0.707
+   * 格，按步数取大值会把斜线区间放大约 41%，进而影响时分、ETA 与超距判定。
+   *
+   * @param movedTotal TrainCarts 累计的几何长度（格）
+   * @param railBlockSteps 跨过的轨道方块数
+   */
+  static double measuredDistance(double movedTotal, int railBlockSteps) {
+    return movedTotal < 1.0 && railBlockSteps > 0 ? 1.0 : movedTotal;
+  }
+
+  /** 零长度区间的告警文字：两端节点与各自的锚点轨道坐标。 */
+  static String zeroLengthWarning(
+      NodeId from, RailBlockPos fromAnchor, NodeId to, RailBlockPos toAnchor) {
+    return "调度图区间长度为 0，按 1 格计: "
+        + from.value()
+        + " "
+        + formatPos(fromAnchor)
+        + " ↔ "
+        + to.value()
+        + " "
+        + formatPos(toAnchor)
+        + "；请核对 TrainCarts 的牌子轨道关联及锚点索引；不同股道映射到同一坐标可能是关联异常";
+  }
+
+  private static String formatPos(RailBlockPos pos) {
+    return pos == null ? "(?)" : "(" + pos.x() + ", " + pos.y() + ", " + pos.z() + ")";
   }
 
   /** 单步推进后的判定结果。 */
@@ -507,6 +554,8 @@ public final class NodeToNodeEdgeExplorer {
     final Set<RailFootprintCell> footprintCells = new TreeSet<>();
     boolean footprintCaptured = true;
     boolean startCaptured;
+    RailBlockPos previousRailPos;
+    int railBlockSteps;
 
     WalkerState(TrackWalkingPoint walker) {
       this.walker = walker;

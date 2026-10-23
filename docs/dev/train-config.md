@@ -18,6 +18,7 @@ tags:
 - `train.default-type`（默认 `metro`）
 - `train.types.<type>.accel-bps2`
 - `train.types.<type>.decel-bps2`
+- `train.ato-brake-fraction`（默认 `0.75`）：自动运行的减速度 = 车种减速度 × 本值，见下节“三条速度曲线”
 - `runtime.caution-speed-bps`（默认 CAUTION 速度）
 
 ## 车种预设
@@ -35,10 +36,21 @@ tags:
 表中数值是满值。实际加减速按 `SpeedCurve` 的首尾柔和 S 形变化，编表、ETA 与控车用同一个函数：
 
 - 加速：以满值的 30% 起步，约 1.5 秒升到满值；离目标速度还差约 2.5 秒可走完的速度差时开始渐收，以 25% 贴上目标。
-- 制动：从巡航速度开始时同样由 30% 升到满值，接近末速度（进站限速、慢速边限速）时同样渐收到 25%。
+- 制动：从巡航速度开始时同样由 30% 升到满值；接近末速度（停车、进站限速、慢速边限速）时约 1.6 秒内渐收到 40%（冲动约 1 m/s³，与实车 ATO 停车前缓解制动相当），比加速到速收得快，停车前最后一格不再慢慢挪。
 - 规律只取决于速度（当前速度、这一段的起点速度与目标速度），不取决于时间：控车任何时刻中断、重新下发都沿同一条曲线接着走。
 - 两端渐变各有固定时长，与加速度大小无关：0→V 比恒加速度多约 2.1 秒（metro 0→22.2 格/秒约 22.3 秒，恒加速度 20.2 秒），每次减速同理。
-- 两端不能从 0 起步：纯按速度的规律若起点加速度为 0 就永远离不开起点，所以起止各留 30% / 25% 的下限。
+- 两端不能从 0 起步：纯按速度的规律若起点加速度为 0 就永远离不开起点，所以起止各留下限（起步 30%，加速到速 25%，制动到末速度 40%）。
+
+### 三条速度曲线
+同一个车种的减速度用在三处，取值不同：
+
+| 曲线 | 减速度 | 用在哪 |
+|---|---|---|
+| 安全曲线 | 车种减速度（常用制动）原值 | 移动授权终点、阻塞前的停车曲线（另乘 `runtime.speed-curve-factor`） |
+| 自动运行曲线 | 车种减速度 × `train.ato-brake-fraction`（默认 0.75） | 调度控车的速度天花板、AutoStation 停站刹车、驾驶台 ATO 模式、编表、ETA |
+| 驾驶员建议速度 | 驾驶台 B4 的 0.85 倍，另留反应距离 | 人工驾驶 HUD 的建议速度（`DriverGuidance`） |
+
+自动运行比常用制动柔和：现实 ATO 一般也不按常用制动满值停车。编表与控车用同一条自动运行曲线，表定时分与实际运行一致；改本值后要重新 build 时刻表。车上标签 `FTA_TRAIN_DECEL_BPS2` 记的是常用制动原值，乘比例只在用到自动运行曲线的地方做。
 
 未打车种标签的列车按 `train.default-type` 取值；编表与 ETA 的运行曲线也按默认车种计算，改动车种预设或默认车种后需重新 build 并发布时刻表，否则表定时分与实际运行不一致。
 注意 `ConfigUpdater` 只补缺失键、不改已有值：老服务器升级后 `train.default-type: emu` 与旧的 emu 数值会原样保留，需要手工改为 `metro` 与新预设。
@@ -90,37 +102,42 @@ tags:
 - `config_caution` / `component_caution`：当前处于 CAUTION/PROCEED_WITH_CAUTION，目标速度来自配置或连通分量 caution，并非 edge speed 失效。
 - `movement_authority`：前方 blocker/caution 距离不足，移动授权主动压速。
 - `edge_speed_lookahead`：前方存在更低 effective speed 的边，系统提前减速。
-- `approach_curve`：前方有进站限速区，列车正按车型减速度刹向区界（区外制动段）。
-- `speed_ceiling_hold`：过节点时的推进放行被速度天花板（进站限速区或前方慢速边）封顶。
+- `approach_curve`：列车正沿自动运行曲线刹向前方停车点（车站）或进站限速区（车库、区间停车点）。
+- `speed_ceiling_hold`：过节点时的推进放行被速度天花板（停车点、进站限速区或前方慢速边）封顶。
 - `speed_curve`：执行层按真实约束距离做制动曲线；若没有 blocker/caution/STOP waypoint，应检查诊断中的距离字段。
 
 ### approach 触发规则
 
 `approach` 不按“下一节点编码像 Station/Depot”直接触发。运行时会从当前 route index 向前找到下一处 `STOP/TERMINATE` stop，把当前节点到该 stop 的 route 片段按调度图最短路展开，再在展开路径上划出**进站限速区**。
 
+车站没有进站限速：列车沿自动运行曲线从线路速度直接刹到停车点，不先降到一个进站速度再交给 TrainCarts 居中（那样短车最后几格刹得极急、长车在站台上慢慢滑）。车库与区间停车点仍有进站限速：车库牌子不是精确停车点、库线上还停着车；区间停车点由调度层在节点处停车。
+
 触发点：
 
-- `Station` stop：Station 本体、同 operator/station/track 的 station throat，以及与这些节点立即相邻的 switcher，限速使用 `runtime.approach-speed-bps`。
+- `Station` stop：Station 本体、同 operator/station/track 的 station throat，以及与这些节点立即相邻的 switcher；不限速（只决定 `approach_*` 诊断里的停车点）。
 - `Depot` stop：Depot 本体、同 operator/depot/track 的 depot throat，以及与这些节点立即相邻的 switcher，限速使用 `runtime.approach-depot-speed-bps`。
 - 普通 `Waypoint` stop：只有该 STOP/TERMINATE waypoint 自身，限速使用 `runtime.approach-speed-bps`。
 - `PASS` 站、普通区间点、未 materialize 的动态占位符不是触发点。
 
-划区规则（`StopApproach.zones`，编表与 ETA 的运行曲线 `RunCurveModel` 用的是同一个函数）：沿展开路径逐节点看，节点到它之后第一个触发点的距离不超过 `runtime.approach-window-blocks`（默认 `96.0`），或边数不超过 `runtime.approach-window-edges`（默认 `0` 即禁用），就从该节点到下一节点整段按进站限速运行；相邻的段合并成一个区。停车点本身也算一个区（运行曲线以进站限速为到站速度）。
+划区规则（`StopApproach.zones`，编表与 ETA 的运行曲线 `RunCurveModel` 用的是同一个函数）：沿展开路径逐节点看，节点到它之后第一个触发点的距离不超过 `runtime.approach-window-blocks`（默认 `96.0`），或边数不超过 `runtime.approach-window-edges`（默认 `0` 即禁用），就从该节点到下一节点整段按进站限速运行；相邻的段合并成一个区。停车点本身也算一个区（运行曲线以进站限速为到站速度）。车站的限速为 0，不划区。
 
-控车限速取**速度天花板**（`SpeedCeiling`）：沿途各边限速、进站限速区与到站速度，按 S 形制动曲线从停车点往回推，保证任何一处都来得及降到前方每一处限速。编表运行曲线（`RunCurve`）用的是同一个函数、同一组输入，控车与表定时分因此是同一条速度曲线：
+控车限速取**速度天花板**（`SpeedCeiling`）：沿途各边限速、进站限速区与到站速度，按自动运行曲线从停车点往回推，保证任何一处都来得及降到前方每一处限速。编表运行曲线（`RunCurve`）用的是同一个函数、同一组输入，控车与表定时分因此是同一条速度曲线：
 
-- 车头在区内：限进站速度，`final_limiter_source` 显示为 `approach`、`depot_approach` 或 `stop_waypoint_approach`。
-- 车头在区外、天花板已低于线路速度：`final_limiter_source=approach_curve`（刹向进站限速区）或 `edge_speed_lookahead`（刹向慢速边），由天花板记下的约束来源区分。关闭 `runtime.speed-curve-enabled` 时天花板只取逐点限速，不做区外制动。
+- 车头在区内（车库、区间停车点）：限进站速度，`final_limiter_source` 显示为 `depot_approach` 或 `stop_waypoint_approach`。
+- 天花板已低于线路速度：`final_limiter_source=approach_curve`（刹向停车点或进站限速区）或 `edge_speed_lookahead`（刹向慢速边），由天花板记下的约束来源区分。关闭 `runtime.speed-curve-enabled` 时天花板只取逐点限速，不做区外制动；车站没有刹车曲线可接，照旧按 `approach-speed-bps` 进站、由 AutoStation 刹停。
 - 两次调度之间由逐 tick 斜坡沿同一个天花板继续下调（见下节）。
 
-改 `approach-window-*`、进站限速或车种加减速后都要重新 build 时刻表。天花板按车型减速度原值计算，不乘 `runtime.speed-curve-factor`（编表同样不乘）；该系数只作用于阻塞/授权终点的停车曲线。
+改 `approach-window-*`、进站限速、车种加减速或 `train.ato-brake-fraction` 后都要重新 build 时刻表。天花板按自动运行曲线计算，不乘 `runtime.speed-curve-factor`（编表同样不乘）；该系数只作用于阻塞/授权终点的停车曲线。
 
-**计划停车由进站控制接管**：移动授权终点正是下一处计划停车点（`ROUTE_STOP_OR_TERMINAL` 且有 RouteStop 证明）、且进站限速已就绪时，这个终点不再作为“刹到 0”的约束参与移动授权、速度曲线与 Smart 前瞻，停车点按上面的进站规则到站（车站由 AutoStation 居中刹停）。此前它从上一图节点量距，末段边短于约 54 格时整段被压到进站限速以下（2026-09-27 实服末段 45 格时进站只有 8.1 格/秒），并常被降为 PROCEED_WITH_CAUTION。前方真实阻塞仍按硬约束处理；STOP 信号、没有进站限速（`approach-speed-bps` 为 0）或授权终点不是该停车点时，行为不变。
+**车站停车点在站牌之后**：车中心对牌子时，车头压上站牌后还要再走约半个车长（有停车位置标时是车头到标的距离）。编表与 ETA 按刹到站牌节点停稳计；控车的天花板把路径延长到真正的停车点、刹到 0：一段刹车，站牌处不是刹车的终点，不在那里收尾、压上站牌后再从头起一段。停车点在站牌之后多远（`StationStopCoordinator#stationTailBlocks`）：压上站牌后取 AutoStation 停站刹车动作的余下距离；压牌前照 AutoStation 对位的同一规则估（`StationStopTailEstimator`：有停车位置标时按标、先到联挂站等对方挂上来时按挂上以后整列的中点，其余按半个车长，即相邻车厢中心距离之和的一半），估不出时按半个车长。停车点离站牌太近、站牌处的速度低于保底速度 1.5 格/秒时，终点改为站牌处取保底速度，保证车一定压得上站牌；保底速度也不超过压上站牌后余下距离（停车点距离 + 约半格）里刹得住的速度，单节车不会在最后一拍骤停。压上站牌下一 tick 调度按刹车动作的余下距离重算一次，不等下一次信号检查。压上站牌后由 AutoStation 接着沿同一条曲线刹完（见 `autostation.md`），每站比刹到节点晚停约“站牌到停车点的距离 ÷ 线路速度”。压牌前的估值向下取整格（车厢间距逐 tick 有抖动，取整后同一条边上天花板的输入不变、缓存才命中；压上站牌时可能比曲线略慢，停站动作惰行等曲线降下来）。刹车动作在走时调度不再下发发车动作（它会排在刹车动作之后，停住的同一 tick 把车开走）。
+
+**计划停车由进站控制接管**：移动授权终点正是下一处计划停车点（`ROUTE_STOP_OR_TERMINAL` 且有 RouteStop 证明）、且进站限速已就绪时，这个终点不再作为“刹到 0”的约束参与移动授权、速度曲线与 Smart 前瞻，停车点按上面的进站规则到站（车站沿自动运行曲线刹到站牌、由 AutoStation 刹完）。车站的“就绪”看天花板算得出；车库与区间停车点看进站限速与限速区。此前它从上一图节点量距，末段边短于约 54 格时整段被压到进站限速以下（2026-09-27 实服末段 45 格时进站只有 8.1 格/秒），并常被降为 PROCEED_WITH_CAUTION。前方真实阻塞仍按硬约束处理；STOP 信号、授权终点不是该停车点，或车库/区间停车点没有进站限速（为 0）时，行为不变。
 
 仍保留的差异：
 
 - 调度节拍：限速回升（驶过慢速边、授权延伸）后，控车要等下一次信号 tick（约 1 秒）才重新下发发车动作；编表按回升点立即提速。
-- 区间停车点（STOP waypoint）：运行曲线按到点速度 0 算（从进站限速刹停约多出 4 秒），控车按进站限速到点、由调度层停车后再居中。多出的几秒大致抵消停车与居中耗时（车站把这段记在 `timetable.station-stop-overhead-seconds`，区间停车点没有），在有实测数据前不改。
+- 区间停车点（STOP waypoint）：运行曲线按到点速度 0 算（从进站限速刹停约多出 4 秒），控车按进站限速到点、由调度层停车后再居中。多出的几秒大致抵消停车与居中耗时（区间停车点没有停站开销），在有实测数据前不改。
+- 车站：编表按刹到站牌节点停稳，实际停在站牌之后（见上），每站晚停约“站牌到停车点的距离 ÷ 线路速度”（短车不到 1 秒，8 节长车约 3～4 秒），不另计。
 - 关闭 `runtime.speed-curve-enabled` 时控车不做区外制动，编表照常按减速度反推。
 
 `/fta train debug` 会额外输出 `approach_node`、`approach_kind`、`approach_reason`、`distance_to_approach` 与 `approach_limit_bps`。`approach_reason` 含 `distance`（车头到第一个触发点）、`node_distance`（当前图节点到第一个触发点）、`zone_start`（车头到最近限速区起点）与 `engaged`（车头是否已在区内）；区外制动已在限速时也会显示，此时 `engaged=false`。

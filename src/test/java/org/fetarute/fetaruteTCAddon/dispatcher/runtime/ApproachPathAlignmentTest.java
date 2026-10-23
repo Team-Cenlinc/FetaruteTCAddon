@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.UUID;
 import org.bukkit.Location;
 import org.bukkit.util.Vector;
@@ -54,8 +55,8 @@ import org.junit.jupiter.api.Test;
  * 控车沿到下一停车点的整段路径与编表运行曲线对齐。
  *
  * <ul>
- *   <li>计划停车点已由进站控制接管时，授权终点不再按“刹到 0”压速：那条曲线从上一图节点量距，末段边短时整段被压到进站限速以下 （实服末段 45 格时进站只有 8.1
- *       格/秒），编表却按进站限速到站；
+ *   <li>计划停车点已由进站控制接管时，授权终点不再按“刹到 0”压速：那条曲线从上一图节点量距、刹到站牌节点停住，车会停在站牌前压不上站牌；
+ *       车站由速度天花板接管（沿自动运行曲线刹到站牌之后的停车点，站牌处留保底速度），与区间停车点的进站限速无关；
  *   <li>前瞻窗口只有几条边，编表运行曲线沿整段路径反推制动：窗口外的慢速边也要按同一条制动曲线提前减速。
  * </ul>
  *
@@ -74,27 +75,124 @@ class ApproachPathAlignmentTest {
   private static final NodeId C = NodeId.of("SURC:LWN:SWN:1:003");
   private static final NodeId FAR_STATION = NodeId.of("SURC:S:SWN:1");
 
-  /** 末段 30 格进站：进站控制接管后按进站限速 10 bps 进站，不再被授权终点的“刹到 0”曲线压到约 7 bps。 */
+  /** 末段 30 格进站：车站由速度天花板接管，授权终点不再“刹到 0”；进站限速设成多少（含 0）都不影响车站。 */
   @Test
-  void plannedStopGovernedByApproachArrivesAtApproachSpeed() {
-    ControlDiagnostics diagnostics = shortLastEdgeTick(10.0);
+  void plannedStationStopIsGovernedByTheStationCurve() {
+    for (double approach : new double[] {10.0, 0.0}) {
+      ControlDiagnostics diagnostics = shortLastEdgeTick(approach, 5.0);
 
-    assertEquals(SignalAspect.PROCEED, diagnostics.currentSignal(), diagnostics.toString());
-    assertEquals(10.0, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
-    assertEquals("approach", diagnostics.finalLimiterSource(), diagnostics.toString());
+      assertEquals(SignalAspect.PROCEED, diagnostics.currentSignal(), diagnostics.toString());
+      assertTrue(diagnostics.movementAuthorityLimitBps().isEmpty(), diagnostics.toString());
+      assertEquals(stationCeilingAt(5.0), diagnostics.finalTargetBps(), 1.0e-6);
+      assertEquals("approach_curve", diagnostics.finalLimiterSource(), diagnostics.toString());
+    }
   }
 
-  /** 进站限速关闭（0）时没有进站控制可接管，授权终点照旧按移动授权收紧：不能因此放开对停车点的制动。 */
+  /** 车头离站牌只剩半格：天花板留着保底速度让车压上站牌（停车点就在站牌处时，保底速度不超过余下半格里刹得住的速度）；授权终点若照旧“刹到 0”， 这里会被压到 0、车停在站牌前。 */
   @Test
-  void plannedStopWithoutApproachControlKeepsMovementAuthority() {
-    ControlDiagnostics diagnostics = shortLastEdgeTick(0.0);
+  void nearTheSignTheStationKeepsTheTriggerFloor() {
+    ControlDiagnostics diagnostics = shortLastEdgeTick(10.0, 29.5);
 
-    assertTrue(diagnostics.finalTargetBps() < 10.0, diagnostics.toString());
+    assertTrue(diagnostics.movementAuthorityLimitBps().isEmpty(), diagnostics.toString());
+    assertTrue(diagnostics.finalTargetBps() > 0.0, diagnostics.toString());
+    // 调度的车头进度按整格计（29.5 → 29）
+    assertEquals(
+        stationCeilingAt(29.0), diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
   }
 
   /**
-   * A —100— B —100（8 bps）— C —50— 车站，B、C 为通过点。前瞻窗口只到 B，编表运行曲线却从 A 起就按慢速边反推：车头在 x=10 时应限 √(64 +
-   * 2·1·90) ≈ 15.6。
+   * 压上站牌后 AutoStation 的停站刹车动作在走（停车位置标在站牌之后 20 格，远于半个车长）：调度的限速按动作的余下距离沿同一条曲线给， 不按半个车长压成保底速度——否则
+   * TrainCarts 截速，车以保底速度爬到标志处。
+   */
+  @Test
+  void whileAutoStationBrakesTheCeilingFollowsItsRemainingDistance() {
+    ControlDiagnostics diagnostics =
+        shortLastEdgeTick(
+            10.0, 29.5, train -> train.stopCurveRemainingBlocks = OptionalDouble.of(20.0));
+
+    double exit = SpeedCeiling.brakingLimitBps(ATO, LINE_BPS, 0.0, 20.0);
+    assertTrue(
+        exit
+            > org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .eta
+                    .model
+                    .RunCurveModel
+                    .STATION_TRIGGER_FLOOR_BPS
+                + 1.0,
+        "离标志 20 格时远高于保底速度");
+    // 一段刹车：路径延长到站牌之后 20 格的停车点、刹到 0
+    assertEquals(
+        SpeedCeiling.of(
+                new double[] {30, 20}, new double[] {LINE_BPS, LINE_BPS}, List.of(), 0.0, ATO)
+            .limitBps(29.0), // 调度的车头进度按整格计（29.5 → 29）
+        diagnostics.finalTargetBps(),
+        1.0e-6,
+        diagnostics.toString());
+  }
+
+  /** 压牌前按半个车长估停车点：车厢间距逐 tick 有零点几格的抖动，估值取整格，同一条边上天花板的输入不变（缓存才命中）；向下取整，宁可压上站牌时慢一点。 */
+  @Test
+  void theHalfBodyEstimateIsRoundedDownToWholeBlocks() {
+    ControlDiagnostics low =
+        shortLastEdgeTick(10.0, 5.0, train -> train.headToCenterBlocks = OptionalDouble.of(10.2));
+    ControlDiagnostics high =
+        shortLastEdgeTick(10.0, 5.0, train -> train.headToCenterBlocks = OptionalDouble.of(10.8));
+
+    // 两者都按 10 格算：路径延长到站牌之后 10 格的停车点、刹到 0
+    double expected =
+        SpeedCeiling.of(
+                new double[] {30, 10}, new double[] {LINE_BPS, LINE_BPS}, List.of(), 0.0, ATO)
+            .limitBps(5.0);
+    assertEquals(expected, low.finalTargetBps(), 1.0e-6, low.toString());
+    assertEquals(expected, high.finalTargetBps(), 1.0e-6, high.toString());
+  }
+
+  private static final SpeedCurve ATO =
+      SpeedCurve.ato(
+          1.0,
+          1.0,
+          org.fetarute
+              .fetaruteTCAddon
+              .config
+              .ConfigManager
+              .TrainConfigSettings
+              .DEFAULT_ATO_BRAKE_FRACTION);
+
+  /** W —30— 车站的天花板在车头 x 处的值：没有进站限速区，自动运行曲线刹到站牌、留保底速度。 */
+  private static double stationCeilingAt(double headX) {
+    return SpeedCeiling.of(
+            new double[] {30},
+            new double[] {LINE_BPS},
+            List.of(),
+            org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel.stationControlExitBps(
+                SpeedCurve.ato(
+                    1.0,
+                    1.0,
+                    org.fetarute
+                        .fetaruteTCAddon
+                        .config
+                        .ConfigManager
+                        .TrainConfigSettings
+                        .DEFAULT_ATO_BRAKE_FRACTION),
+                LINE_BPS,
+                0.0),
+            SpeedCurve.ato(
+                1.0,
+                1.0,
+                org.fetarute
+                    .fetaruteTCAddon
+                    .config
+                    .ConfigManager
+                    .TrainConfigSettings
+                    .DEFAULT_ATO_BRAKE_FRACTION))
+        .limitBps(headX);
+  }
+
+  /**
+   * A —100— B —100（8 bps）— C —50— 车站，B、C 为通过点。前瞻窗口只到 B，编表运行曲线却从 A 起就按慢速边反推：车头在 x=10 时约限 √(64 +
+   * 2·0.75·90) ≈ 14.3（减速度乘自动运行的舒适比例，S 形略低）。
    */
   @Test
   void slowEdgeBeyondTheLookaheadWindowBrakesLikeTheRunCurve() {
@@ -108,26 +206,97 @@ class ApproachPathAlignmentTest {
         Map.of(1, RouteStopPassType.PASS, 2, RouteStopPassType.PASS, 3, RouteStopPassType.STOP);
 
     ControlDiagnostics diagnostics =
-        signalTick(List.of(A, B, C, FAR_STATION), xs, slowEdges, stops, 6.0, 10.0, LINE_BPS);
+        signalTick(
+            List.of(A, B, C, FAR_STATION),
+            xs,
+            slowEdges,
+            stops,
+            6.0,
+            10.0,
+            LINE_BPS,
+            train -> {},
+            service -> {});
 
-    // 编表与控车共用的天花板：车头之后 90 格 @20、100 格 @8、50 格 @20，进站限速区 [C, 车站] 限 6。
+    // 编表与控车共用的天花板：车头之后 90 格 @20、100 格 @8、50 格 @20，车站没有进站限速区，刹到站牌、留保底速度；
+    // 减速度取自动运行的舒适比例。
     double expected =
         SpeedCeiling.of(
                 new double[] {90, 100, 50},
                 new double[] {LINE_BPS, 8.0, LINE_BPS},
-                List.of(
-                    new SpeedCeiling.Cap(190.0, 240.0, 6.0),
-                    new SpeedCeiling.Cap(240.0, 240.0, 6.0)),
-                6.0,
-                new SpeedCurve(1.0, 1.0))
+                List.of(),
+                org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel
+                    .stationControlExitBps(
+                        SpeedCurve.ato(
+                            1.0,
+                            1.0,
+                            org.fetarute
+                                .fetaruteTCAddon
+                                .config
+                                .ConfigManager
+                                .TrainConfigSettings
+                                .DEFAULT_ATO_BRAKE_FRACTION),
+                        LINE_BPS,
+                        0.0),
+                SpeedCurve.ato(
+                    1.0,
+                    1.0,
+                    org.fetarute
+                        .fetaruteTCAddon
+                        .config
+                        .ConfigManager
+                        .TrainConfigSettings
+                        .DEFAULT_ATO_BRAKE_FRACTION))
             .limitBps(0.0);
     assertTrue(expected < LINE_BPS, "x=10 应已在慢速边的制动段内");
     assertEquals(expected, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
     assertEquals("edge_speed_lookahead", diagnostics.finalLimiterSource(), diagnostics.toString());
   }
 
-  /** W —30— 车站，车头在 W 之后 5 格、以进站限速行驶。 */
-  private static ControlDiagnostics shortLastEdgeTick(double approachSpeedBps) {
+  /** W —30— 车站，车头在 W 之后 {@code headX} 格、以 10 bps 行驶。 */
+  private static ControlDiagnostics shortLastEdgeTick(double approachSpeedBps, double headX) {
+    return shortLastEdgeTick(approachSpeedBps, headX, train -> {});
+  }
+
+  /** 压牌前就按停车位置标估停车点：估出停在站牌之后 40 格（例如先到联挂站的车按挂上以后的节数选的标志），天花板从一开始就刹向那里， 不按半个车长刹到站牌、压上站牌后再提速。 */
+  @Test
+  void beforeTheSignAFarStopMarkIsBrakedForFromTheStart() {
+    ControlDiagnostics diagnostics =
+        signalTickWithService(
+            5.0,
+            train -> train.headToCenterBlocks = OptionalDouble.of(10.0),
+            service ->
+                service
+                    .stationStops()
+                    .setStopTail((train, name, route, node) -> OptionalDouble.of(40.7)));
+
+    double expected =
+        SpeedCeiling.of(
+                new double[] {30, 40}, new double[] {LINE_BPS, LINE_BPS}, List.of(), 0.0, ATO)
+            .limitBps(5.0);
+    assertEquals(expected, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
+  }
+
+  private static ControlDiagnostics signalTickWithService(
+      double headX,
+      java.util.function.Consumer<FakeTrain> setup,
+      java.util.function.Consumer<RuntimeDispatchService> serviceSetup) {
+    Map<NodeId, Double> xs = new LinkedHashMap<>();
+    xs.put(W, 0.0);
+    xs.put(STATION, 30.0);
+    return signalTick(
+        List.of(W, STATION),
+        xs,
+        Map.of(),
+        Map.of(1, RouteStopPassType.STOP),
+        10.0,
+        headX,
+        10.0,
+        setup,
+        serviceSetup);
+  }
+
+  private static ControlDiagnostics shortLastEdgeTick(
+      double approachSpeedBps, double headX, java.util.function.Consumer<FakeTrain> setup) {
     Map<NodeId, Double> xs = new LinkedHashMap<>();
     xs.put(W, 0.0);
     xs.put(STATION, 30.0);
@@ -137,8 +306,10 @@ class ApproachPathAlignmentTest {
         Map.of(),
         Map.of(1, RouteStopPassType.STOP),
         approachSpeedBps,
-        5.0,
-        10.0);
+        headX,
+        10.0,
+        setup,
+        service -> {});
   }
 
   /**
@@ -158,7 +329,9 @@ class ApproachPathAlignmentTest {
       Map<Integer, RouteStopPassType> stops,
       double approachSpeedBps,
       double headX,
-      double speedBps) {
+      double speedBps,
+      java.util.function.Consumer<FakeTrain> setup,
+      java.util.function.Consumer<RuntimeDispatchService> serviceSetup) {
     UUID worldId = UUID.randomUUID();
     RouteDefinition route = new RouteDefinition(RouteId.of("WS-1L"), waypoints, Optional.empty());
     TagStore tags =
@@ -234,6 +407,8 @@ class ApproachPathAlignmentTest {
     RailState head = mock(RailState.class);
     when(head.positionLocation()).thenReturn(new Location(null, headX, 64.0, 0.0));
     train.railState = Optional.of(head);
+    setup.accept(train);
+    serviceSetup.accept(service);
 
     service.handleSignalTick(train, false);
 

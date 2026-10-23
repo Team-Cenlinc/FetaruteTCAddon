@@ -16,6 +16,7 @@ command:
         nav:
           hint: ["<gray>(点击翻页)</gray>"]
     validate:
+      dispatch-by-operation-type: ["<prefix> <red>随运营交路调度仅允许 CREATE/RETURN。</red>"]
       spawn-group-missing: ["<prefix> <red>route 绑定了不存在的交路组</red> <gray>(group=<white><group></white>)</gray>"]
       spawn-weight-missing: ["<prefix> <red>同一交路组存在多条 OPERATION route，但本 route 未配置 spawn_weight</red> <gray>(group=<white><group></white>)</gray>"]
       create-missing-cret: ["<prefix> <red>CREATE route 首个停靠点必须配置 CRET</red>"]
@@ -28,6 +29,7 @@ command:
       archived:
         lore-2: ["<gray>写入时间:</gray> <white><when></white>"]
     info:
+      dispatch-by-operation: ["<gray>随运营交路出入库：</gray> <dark_aqua><enabled></dark_aqua> <gray>（保留沿途停站，无独立频率）</gray>"]
       pattern: ["<gray>模式:</gray> <dark_aqua><pattern></dark_aqua>"]
       spawn-group-baseline: ["<gray>交路基线(秒):</gray> <dark_aqua><seconds></dark_aqua>"]
       operation: ["<gray>运营属性:</gray> <dark_aqua><operation></dark_aqua>"]
@@ -54,7 +56,9 @@ command:
     max-speed: ["，最高 <value> 格/秒"]
   pids:
     help:
-      give: ["<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"]
+      give:
+        - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"
+        - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5、status-3x5 线路运行状况屏或自定义布局）</dark_aqua>"
     list:
       operator-only: ["<operator>（<code>，不绑车站）"]
   train:
@@ -286,9 +290,14 @@ pids:
       queue:
         title-secondary: ["Please queue"]
         body: ["请勿拥挤，有序上车"]
-        body-secondary: ["No pushing, board in order"]
+        body-secondary: ["No pushing, board in order", "Board in turn, without pushing"]
       doors:
-        body-secondary: ["Do not rush as the doors close"]
+        body-secondary: ["Do not rush as the doors close", "Don't board as the doors close"]
+      check:
+        title-secondary: ["Check your train"]
+        body-secondary: ["Not all trains make the same stops"]
+      gap:
+        body-secondary: ["Watch your step as you board"]
       passing:
         body: ["请勿靠近站台边缘"]
         body-secondary: ["Stand clear of the platform edge"]

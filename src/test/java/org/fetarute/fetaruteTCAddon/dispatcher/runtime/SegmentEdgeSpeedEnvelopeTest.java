@@ -244,9 +244,11 @@ class SegmentEdgeSpeedEnvelopeTest {
     service.handleSignalTick(train, false);
 
     TrainConfig config = trainConfigs.resolve(tags.properties(), view);
+    // 控车用自动运行的曲线：减速度乘舒适比例，与编表同一条。
     return new Tick(
         service.getDiagnostics(TRAIN).orElseThrow().edgeLimitBps(),
-        new SpeedCurve(config.accelBps2(), config.decelBps2()));
+        SpeedCurve.ato(
+            config.accelBps2(), config.decelBps2(), view.trainConfigSettings().atoBrakeFraction()));
   }
 
   /** A —26— SW —48— X —600— B，节点坐标沿 x 轴与边长一致，供车头位置插值。 */

@@ -20,6 +20,9 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntPredicate;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -51,13 +54,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  *   <li><b>派车</b>（{@link VehicleDutyPlanner}）：在<b>已经排定</b>的班次上指派车辆， 每个 duty 都被硬上限夹住、从有 CREATE
  *       线路的起点开、在有 RETURN 线路的终点收。
  *   <li><b>查冲突</b>（{@link TimetableConflictChecker}）：把全部运行（班次 + 出库/回库走行 +
- *       站台待命）投影到边、道岔、站台、单线区段上扫描重叠。 目标 headway 排出来有冲突时，向上搜索<b>最小可行
- *       headway</b>：默认回退到它并明确警告，严格模式则构建失败。
+ *       站台待命）投影到边、道岔、站台、单线区段上扫描重叠。 先在同一 headway 下重选完整交路相位，仍排不开时在搜索预算内放宽并明确警告，严格模式则构建失败。
  * </ol>
  *
  * <p>前三步的顺序不可交换。特别是第三步绝不能反过来影响第二步：一旦允许"某终点恰好停着车，所以多发这条线"， 车辆周转就会扭曲服务比例，而那种扭曲在运营上是看不见的。
- * 第三步唯一能对第二步做的是<b>减法</b>：起点没有出库途径、终点没有回库途径的班次被取消并逐条报告——那是物理约束，不是周转偏好。 第四步同理只做减法：它只会把 headway
- * 放宽，从不挪动单个班次去"绕开"冲突——那会让表的结构依赖于冲突的偶然分布。
+ * 第三步唯一能对第二步做的是<b>减法</b>：起点没有出库途径、终点没有回库途径的班次被取消并逐条报告——那是物理约束，不是周转偏好。 完整交路相位比较只平移既有方向单元，保持组间隔、SWRR
+ * 序列和接续关系；额外取消班次不能成为较优候选。
  *
  * <h2>线路级校验</h2>
  *
@@ -79,14 +81,6 @@ public final class TimetableBuilder {
   /** 搜索可行 headway 时最多放宽到目标的多少倍。 */
   public static final int HEADWAY_SEARCH_MAX_MULTIPLIER = 4;
 
-  /**
-   * 按车接续的喂车方向在中途最多多停几秒。
-   *
-   * <p>多停写进表里，运行时靠"早到等点"执行（{@code timetable.hold-max-seconds}，默认 120 秒；调度层另有 150 秒硬上限）。
-   * 上限取得远低于它，保证表上的每一次多停运行时都真的会扣。
-   */
-  public static final int FEEDER_HOLD_LIMIT_SECONDS = 60;
-
   /** 逐组收紧最多走几遍：后收紧的单元可能给先前收不紧的腾出空间，走到一遍里谁都收不动为止。 */
   static final int TIGHTEN_PASSES = 3;
 
@@ -107,12 +101,44 @@ public final class TimetableBuilder {
   /** 进度：错峰候选与发起的编表器共用一份，完整构建次数一起数。 */
   private final TimetableBuildProgress progress;
 
+  /** 编表线程数（{@code timetable.build-threads} 换算后）；1 为串行。 */
+  private final int threads;
+
+  /** 这次 build 的并行池，错峰候选与发起的编表器共用；为空时 {@link #build} 现开一个、编完关掉。 */
+  private final BuildPool pool;
+
+  /** 原表在目标间隔下的试排：错峰的平移候选与原表同一份准备、同一组参数，直接复用，不再各自把相位重选一遍。 */
+  private final TargetMemo<Prepared, Attempt> memo;
+
+  /** 准备与原表不同时从原表的相位起排（{@link #warmAttempt}）：只给错峰的中途加停候选开。 */
+  private final boolean warmStart;
+
+  /** 这个编表器有没有哪次试排真的用了热启动（{@link #warmAttempt} 给出了结果）：没用上时它编出来的就是整套重选的结果。 */
+  private final AtomicBoolean warmAdopted = new AtomicBoolean();
+
   public TimetableBuilder() {
     this(TimetableBuildProgress.untracked());
   }
 
+  /** 串行编表：测试与不关心线程数的调用方用，不起线程，行为与并行之前完全相同。 */
   public TimetableBuilder(TimetableBuildProgress progress) {
-    this(new TimetableTimingCalculator(), Map.of(), true, progress);
+    this(progress, 1);
+  }
+
+  /**
+   * @param progress 进度
+   * @param threads 编表线程数；1 为串行。结果与线程数无关，线程数只影响快慢
+   */
+  public TimetableBuilder(TimetableBuildProgress progress, int threads) {
+    this(
+        new TimetableTimingCalculator(),
+        Map.of(),
+        true,
+        progress,
+        threads,
+        null,
+        new TargetMemo<>(),
+        false);
   }
 
   public TimetableBuilder(TimetableTimingCalculator timingCalculator) {
@@ -138,10 +164,26 @@ public final class TimetableBuilder {
       Map<String, Integer> groupShift,
       boolean relaxAllowed,
       TimetableBuildProgress progress) {
+    this(timingCalculator, groupShift, relaxAllowed, progress, 1, null, new TargetMemo<>(), false);
+  }
+
+  private TimetableBuilder(
+      TimetableTimingCalculator timingCalculator,
+      Map<String, Integer> groupShift,
+      boolean relaxAllowed,
+      TimetableBuildProgress progress,
+      int threads,
+      BuildPool pool,
+      TargetMemo<Prepared, Attempt> memo,
+      boolean warmStart) {
     this.timingCalculator = Objects.requireNonNull(timingCalculator, "timingCalculator");
     this.groupShift = Map.copyOf(groupShift);
     this.relaxAllowed = relaxAllowed;
     this.progress = Objects.requireNonNull(progress, "progress");
+    this.threads = Math.max(1, threads);
+    this.pool = pool;
+    this.memo = Objects.requireNonNull(memo, "memo");
+    this.warmStart = warmStart;
   }
 
   /**
@@ -154,37 +196,106 @@ public final class TimetableBuilder {
    */
   public TimetableBuildResult build(
       BuildInput input, TimetableBuildOptions requested, Instant now) {
-    Objects.requireNonNull(input, "input");
-    Objects.requireNonNull(requested, "requested");
-    requested = withConsistLengths(input, requested);
-    Instant builtAt = now == null ? Instant.now() : now;
-    Built base = buildOnce(input, requested, builtAt, Optional.empty(), Optional.empty());
+    if (pool != null) {
+      return buildInPool(input, requested, now);
+    }
+    // 一次 build 一个池、一份原表试排记录：错峰候选、相位候选都在里面编，编完关掉，不留线程也不留整表。
+    try (BuildPool opened = BuildPool.open(threads)) {
+      return inPool(opened).buildInPool(input, requested, now);
+    }
+  }
+
+  /** 同样设定、在给定的池里编的编表器，带一份新的原表试排记录。 */
+  private TimetableBuilder inPool(BuildPool opened) {
+    return new TimetableBuilder(
+        timingCalculator,
+        groupShift,
+        relaxAllowed,
+        progress,
+        threads,
+        opened,
+        new TargetMemo<>(),
+        warmStart);
+  }
+
+  private TimetableBuildResult buildInPool(
+      BuildInput input, TimetableBuildOptions requested, Instant now) {
+    Original original = original(input, requested, now);
+    Built base = original.base();
     if (base.chosen().isEmpty()) {
       return collapsed(base.result());
     }
-    Prepared chosen = base.chosen().get();
-    // 快车按基础 route 判定；区分车型时班次挂的是变体，变体随它的基础 route 算快车。
-    Set<UUID> fastRoutes =
-        withVariants(
-            RapidStagger.fastRoutes(
-                chosen.classification().groups(),
-                chosen.profiles(),
-                chosen.graphIndex(),
-                separationOf(base.options())),
-            chosen);
+    Set<UUID> fastRoutes = original.fastRoutes();
     RapidStagger.Measure measure =
         measureRapids(base, fastRoutes, TimetableBuildOptions.Following.NONE);
     RapidStagger.Measure reported = reportedRapids(base, fastRoutes, measure);
     TimetableBuildResult result =
         switch (RapidStagger.plan(
-            requested.rapidStagger(), measure, reported, base.result().headwayRelaxed())) {
-          case MEASURE_ONLY -> RapidStagger.annotate(base.result(), reported, routeCodes(chosen));
-          case TURNBACK_ONLY -> staggerRapids(
-              input, requested, builtAt, base, measure, reported, fastRoutes, true);
-          case SEARCH -> staggerRapids(
-              input, requested, builtAt, base, measure, reported, fastRoutes, false);
+            original.options().rapidStagger(), measure, reported, base.result().headwayRelaxed())) {
+          case MEASURE_ONLY -> RapidStagger.annotate(
+              base.result(), reported, routeCodes(base.chosen().get()));
+          case TURNBACK_ONLY -> staggerRapids(input, original, measure, reported, true);
+          case SEARCH -> staggerRapids(input, original, measure, reported, false);
         };
     return collapsed(result);
+  }
+
+  /**
+   * 原表与它的编表参数：错峰搜索与包内的单候选入口（{@link #staggerCandidate}）都从它出发编候选（{@link #stagger}）。
+   *
+   * @param options 补上车型车长后的参数（{@link #withConsistLengths}）
+   * @param builtAt 构建时间
+   * @param base 原表
+   * @param fastRoutes 快车交路；原表排不出时为空
+   */
+  private record Original(
+      TimetableBuildOptions options, Instant builtAt, Built base, Set<UUID> fastRoutes) {}
+
+  /** 补上车型车长、编原表、找快车交路。 */
+  private Original original(BuildInput input, TimetableBuildOptions requested, Instant now) {
+    Objects.requireNonNull(input, "input");
+    Objects.requireNonNull(requested, "requested");
+    TimetableBuildOptions options = withConsistLengths(input, requested);
+    Instant builtAt = now == null ? Instant.now() : now;
+    Built base = buildOnce(input, options, builtAt, Optional.empty(), Optional.empty());
+    return new Original(
+        options, builtAt, base, base.chosen().isEmpty() ? Set.of() : fastRoutesOf(base));
+  }
+
+  /** 快车交路：按基础 route 判定；区分车型时班次挂的是变体，变体随它的基础 route 算快车。 */
+  private static Set<UUID> fastRoutesOf(Built base) {
+    Prepared chosen = base.chosen().orElseThrow();
+    return withVariants(
+        RapidStagger.fastRoutes(
+            chosen.classification().groups(),
+            chosen.profiles(),
+            chosen.graphIndex(),
+            separationOf(base.options())),
+        chosen);
+  }
+
+  /**
+   * 编原表，再按给定的组平移与多停编一个快车错峰候选，与错峰搜索里的是同一条路径（{@link #stagger}）：包内测试用它钉住单个候选的编法， 不必让搜索恰好走到那个候选。
+   *
+   * @param expired 错峰到没到时间上限
+   * @return 候选；不可用时为空
+   * @throws IllegalStateException 原表排不出
+   */
+  Optional<RapidStagger.Candidate> staggerCandidate(
+      BuildInput input,
+      TimetableBuildOptions requested,
+      Instant now,
+      Map<String, Integer> shift,
+      Optional<RapidStagger.Dwell> dwell,
+      java.util.function.BooleanSupplier expired) {
+    try (BuildPool opened = BuildPool.open(threads)) {
+      TimetableBuilder inPool = inPool(opened);
+      Original original = inPool.original(input, requested, now);
+      if (original.base().chosen().isEmpty()) {
+        throw new IllegalStateException(original.base().result().warnings().toString());
+      }
+      return inPool.stagger(input, original, shift, dwell, expired, new AtomicInteger());
+    }
   }
 
   /** 快车型被卡：同一段共线上，快的车型跟在慢的车型后面追上前车（与快车被卡同一套实测，{@link CorridorCatchUp}）。只报告，不改表； 不区分车型或没有快慢之分时为空。 */
@@ -373,69 +484,139 @@ public final class TimetableBuilder {
     if (!target.clean()) {
       String summary =
           TimetableBuildReportText.summarizeUnabsorbable(target.unabsorbable(), targetHeadway);
-      if (options.strictConflicts()) {
-        List<String> reasons = new ArrayList<>();
-        reasons.add(summary + "；严格模式下不回退");
-        reasons.addAll(
-            TimetableBuildReportText.describeConflicts(
-                target.conflicts(), options.serviceStartSecondOfDay()));
-        return new Built(
-            TimetableBuildResult.failure(String.join("\n", reasons), prepared.infeasible()),
-            Optional.of(prepared),
-            Optional.empty(),
-            options);
-      }
       List<String> searchNotes = new ArrayList<>();
       // 已经排不开的各组间隔：搜索与收紧都往里记，收紧时用它剪掉注定失败的完整构建。
       List<Failure> failed = new ArrayList<>();
       failed.add(new Failure(FeederHold.NONE, target.intervals()));
-      Optional<Found> fallback =
-          searchFeasibleHeadway(prepared, options, target, input, builtAt, searchNotes, failed);
-      if (fallback.isEmpty()) {
-        return new Built(
-            TimetableBuildResult.failure(
-                summary
-                    + "；"
-                    + TimetableBuildReportText.describeSearchFailure(
-                        targetHeadway,
-                        targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER,
-                        target.conflicts(),
-                        target.terminals(),
-                        options.dutyLimits().turnaround()),
-                prepared.infeasible()),
-            Optional.of(prepared),
-            Optional.empty(),
-            options);
+      HoldSearch holds = new HoldSearch(prepared, options, input);
+      if (options.strictConflicts()) {
+        // 严格模式不放宽间隔；喂车方向中途多停不改间隔，与非严格模式同一个顺序先试它，排开了就用。
+        Optional<Found> held =
+            holdsAtTarget(holds, options, targetHeadway, builtAt, searchNotes, failed);
+        // 多停也排不开：在已选相位上取消让不掉的班次，至多 --max-cancel 班（0 不取消；没给时按运营班次的比例）。
+        int cancelLimit = options.maxCancelTripsFor(target.slotByCode().size());
+        String cancelLimitText = cancelLimitText(options, cancelLimit, target.slotByCode().size());
+        Optional<Cancellation> cancellation =
+            held.isEmpty() && cancelLimit > 0
+                ? Optional.of(
+                    cancelUnabsorbable(prepared, options, input, builtAt, target, cancelLimit))
+                : Optional.empty();
+        boolean cancelledClean =
+            cancellation.isPresent()
+                && cancellation.get().attempt().clean()
+                && cancellation.get().count() <= cancelLimit;
+        if (held.isEmpty() && !cancelledClean) {
+          long tried = holds.feasible(options).stream().filter(hold -> !hold.isNone()).count();
+          List<String> reasons = new ArrayList<>();
+          reasons.add(
+              summary
+                  + "；严格模式下不放宽间隔"
+                  + (tried > 0 ? "，喂车方向中途多停 " + tried + " 种也排不开" : "")
+                  + cancellation
+                      .map(
+                          done ->
+                              done.attempt().clean()
+                                  ? "，取消 " + done.countText() + "才排开，超过上限（" + cancelLimitText + "）"
+                                  : "，取消 "
+                                      + done.countText()
+                                      + "后仍有 "
+                                      + done.attempt().unabsorbable().size()
+                                      + " 处（"
+                                      + cancelLimitText
+                                      + "）")
+                      .orElse(""));
+          cancellation.ifPresent(
+              done -> reasons.addAll(describeCancelled(done.cancelled(), prepared, options)));
+          // 失败结果里的冲突与残余保持"目标间隔原表"的口径；取消之后还剩的只写进文案。
+          Optional<Attempt> afterCancel =
+              cancellation.map(Cancellation::attempt).filter(after -> !after.clean());
+          if (afterCancel.isPresent()) {
+            reasons.add("取消之后仍让不掉的：");
+          }
+          reasons.addAll(
+              TimetableBuildReportText.describeUnabsorbable(
+                  afterCancel.orElse(target).unabsorbable(), options.serviceStartSecondOfDay()));
+          return new Built(
+              targetFailure(String.join("\n", reasons), prepared, target),
+              Optional.of(prepared),
+              Optional.empty(),
+              options);
+        }
+        if (held.isPresent()) {
+          chosenPrepared = held.get().prepared();
+          chosen = held.get().attempt();
+          warnings.addAll(searchNotes);
+          warnings.add(summary + "，间隔不变（严格模式不放宽间隔，靠喂车方向中途多停排开，见上）");
+        } else {
+          Cancellation done = cancellation.orElseThrow();
+          chosen = done.attempt();
+          warnings.addAll(searchNotes);
+          warnings.add(
+              summary
+                  + "，间隔不变（严格模式不放宽间隔，取消 "
+                  + done.countText()
+                  + "让不掉的班次，"
+                  + cancelLimitText
+                  + "）：");
+          warnings.addAll(describeCancelled(done.cancelled(), prepared, options));
+        }
+      } else {
+        Optional<Found> fallback =
+            searchFeasibleHeadway(
+                prepared, options, target, input, builtAt, searchNotes, failed, holds);
+        if (fallback.isEmpty()) {
+          List<String> reasons = new ArrayList<>();
+          reasons.add(
+              summary
+                  + "；"
+                  + TimetableBuildReportText.describeSearchFailure(
+                      targetHeadway,
+                      targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER,
+                      new TimetableConflictChecker.Report(
+                          target.unabsorbable().stream()
+                              .map(ConflictAbsorption.Residual::conflict)
+                              .toList()),
+                      target.terminals(),
+                      options.dutyLimits().turnaround()));
+          reasons.addAll(
+              TimetableBuildReportText.describeUnabsorbable(
+                  target.unabsorbable(), options.serviceStartSecondOfDay()));
+          return new Built(
+              targetFailure(String.join("\n", reasons), prepared, target),
+              Optional.of(prepared),
+              Optional.empty(),
+              options);
+        }
+        Found found = fallback.get();
+        chosenPrepared = found.prepared();
+        chosen =
+            tightenGroups(
+                found.prepared(),
+                options,
+                target,
+                found.attempt(),
+                found.input(),
+                builtAt,
+                searchNotes,
+                failed,
+                found.hold());
+        warnings.addAll(searchNotes);
+        String outcome =
+            widenedIntervals(
+                    target.intervals(),
+                    target.headwaySeconds(),
+                    chosen.intervals(),
+                    chosen.headwaySeconds())
+                .map(widened -> "，已回退到搜索找到的可行间隔 " + widened)
+                .orElse(found.hold().isNone() ? "，间隔不变" : "，间隔不变（靠喂车方向中途多停排开，见上）");
+        warnings.add(
+            summary
+                + outcome
+                + "（--strict 可改为构建失败）"
+                + (target.conflicts().external().isEmpty()
+                    ? ""
+                    : "；其中 " + target.conflicts().external().size() + " 处是与已发布邻表的冲突，只能挪自己"));
       }
-      Found found = fallback.get();
-      chosenPrepared = found.prepared();
-      chosen =
-          tightenGroups(
-              found.prepared(),
-              options,
-              target,
-              found.attempt(),
-              found.input(),
-              builtAt,
-              searchNotes,
-              failed,
-              found.hold());
-      warnings.addAll(searchNotes);
-      String outcome =
-          widenedIntervals(
-                  target.intervals(),
-                  target.headwaySeconds(),
-                  chosen.intervals(),
-                  chosen.headwaySeconds())
-              .map(widened -> "，已回退到最小可行间隔 " + widened)
-              .orElse(found.hold().isNone() ? "，间隔不变" : "，间隔不变（靠喂车方向中途多停排开，见上）");
-      warnings.add(
-          summary
-              + outcome
-              + "（--strict 可改为构建失败）"
-              + (target.conflicts().external().isEmpty()
-                  ? ""
-                  : "；其中 " + target.conflicts().external().size() + " 处是与已发布邻表的冲突，只能挪自己"));
       warnings.addAll(
           TimetableBuildReportText.describeConflicts(
               target.conflicts(), options.serviceStartSecondOfDay()));
@@ -478,6 +659,7 @@ public final class TimetableBuilder {
       warnings.add("route " + route.routeCode() + " 排除：" + route.reason());
     }
     warnings.addAll(TimetableBuildReportText.describeDropped(chosen.dropped()));
+    warnings.addAll(chosen.couplingNotes());
     List<VehicleDuty> duties = chosen.timetable().duties();
     VehicleDutyPlanner.Result finalDuties =
         new VehicleDutyPlanner.Result(duties, List.of(), duties.size(), List.of());
@@ -565,24 +747,31 @@ public final class TimetableBuilder {
    *
    * <p>快车被卡量两遍：搜索里的取舍与早停按占用区间，最终在编过的候选里按闭塞时间挑、报告也写闭塞时间的数（见 {@link RapidStagger}）。
    *
+   * @param original 原表（排得出）
    * @param baseMeasure 原表按占用区间量的被卡
    * @param baseReported 原表按闭塞时间量的被卡（没有跟车规则时同 {@code baseMeasure}）
    * @param turnbackOnly 原表已放宽：只试加长折返（它可能正好让目标间隔排得开），不平移、不中途加停
    */
   private TimetableBuildResult staggerRapids(
       BuildInput input,
-      TimetableBuildOptions requested,
-      Instant builtAt,
-      Built base,
+      Original original,
       RapidStagger.Measure baseMeasure,
       RapidStagger.Measure baseReported,
-      Set<UUID> fastRoutes,
       boolean turnbackOnly) {
     long started = System.nanoTime();
+    TimetableBuildOptions requested = original.options();
+    Built base = original.base();
+    Set<UUID> fastRoutes = original.fastRoutes();
     stage(TimetableBuildProgress.Stage.STAGGER);
-    int[] candidatesTried = {0};
+    // 时间上限按进度的时钟算：与"已用时"同一个钟，测试可注入。
+    int budgetMinutes = requested.staggerMinutes();
+    Instant deadline = progress.now().plus(Duration.ofMinutes(budgetMinutes));
+    java.util.function.BooleanSupplier expired =
+        budgetMinutes <= 0 ? () -> false : () -> !progress.now().isBefore(deadline);
+    // 候选在池内线程上并发编，序号只用来报进度。
+    AtomicInteger candidatesTried = new AtomicInteger();
+    AtomicInteger unrebuilt = new AtomicInteger();
     Prepared prepared = base.prepared().orElseThrow();
-    TimetableBuildOptions candidateOptions = requested.withRapidStagger(false);
     Map<UUID, String> codes = routeCodes(prepared);
     Map<String, Integer> intervals = intervalsOf(prepared, base.options());
     List<String> fastGroups =
@@ -600,7 +789,7 @@ public final class TimetableBuilder {
           group,
           RapidStagger.period(intervals.getOrDefault(group, minInterval(intervals)), others));
     }
-    RapidStagger.Candidate original =
+    RapidStagger.Candidate unshifted =
         new RapidStagger.Candidate(
             Map.of(),
             Optional.empty(),
@@ -611,7 +800,7 @@ public final class TimetableBuilder {
     RapidStagger.Search search =
         RapidStagger.search(
             periods,
-            original,
+            unshifted,
             RapidStagger.turnbackSource(
                 base.options().dutyLimits().turnaround(),
                 base.result().timetable().orElseThrow(),
@@ -623,9 +812,8 @@ public final class TimetableBuilder {
             new RapidStagger.Evaluator() {
               @Override
               public Optional<RapidStagger.Candidate> shift(Map<String, Integer> shift) {
-                detail("第 " + ++candidatesTried[0] + " 个候选：平移 " + shift);
-                return stagger(
-                    input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.empty());
+                detail("第 " + candidatesTried.incrementAndGet() + " 个候选：平移 " + shift);
+                return stagger(input, original, shift, Optional.empty(), expired, unrebuilt);
               }
 
               @Override
@@ -633,16 +821,17 @@ public final class TimetableBuilder {
                   Map<String, Integer> shift, RapidStagger.Dwell dwell) {
                 detail(
                     "第 "
-                        + ++candidatesTried[0]
+                        + candidatesTried.incrementAndGet()
                         + " 个候选："
                         + dwell.routeCode()
                         + " 加停 "
                         + dwell.seconds()
                         + "s");
-                return stagger(
-                    input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.of(dwell));
+                return stagger(input, original, shift, Optional.of(dwell), expired, unrebuilt);
               }
-            });
+            },
+            pool(),
+            expired);
     long millis = (System.nanoTime() - started) / 1_000_000L;
     TimetableBuildResult chosen =
         search.improved().map(RapidStagger.Candidate::result).orElse(base.result());
@@ -651,11 +840,13 @@ public final class TimetableBuilder {
     return RapidStagger.annotate(chosen, chosenMeasure, codes)
         .withPhaseNote(
             RapidStagger.describeSearch(
-                original.asReported(),
+                unshifted.asReported(),
                 search.improved().map(RapidStagger.Candidate::asReported),
                 search.tried(),
                 millis,
-                turnbackOnly));
+                turnbackOnly,
+                search.timedOut() ? budgetMinutes : 0,
+                unrebuilt.get()));
   }
 
   /**
@@ -663,15 +854,29 @@ public final class TimetableBuilder {
    *
    * <p>只平移相位时输入不变，沿用原表的准备；加停改了停站，时分与投影都要重算。终到折返加长改的是终到停靠的停站时间， 折返表按它重算（{@link
    * #resolveTurnarounds}）。
+   *
+   * <p>中途加停的候选先从原表的相位起排（{@link #warmAttempt}）；热启动真的用上了、排出来却不可用时，再整套重选相位编一次——
+   * 不可用可能只是相位没跟着新停站选（多用车、少班次、目标间隔排不开），热启动不能因此丢掉一个整套重选时可用的候选。 热启动没用上时编出来的已经是整套重选的结果，不再重编；
+   * 到了错峰的时间上限也不再重编。
+   *
+   * <p>加长折返的候选不热启动：往返对的反向相位按"走行 + 折返"锚定（{@link PhasePlanner}），它正是靠折返加长把反向整体往后推；
+   * 沿用原表相位时反向发车与原表逐班相同，加长只落在派车接续上。
+   *
+   * @param original 原表（排得出）
+   * @param expired 错峰到没到时间上限
+   * @param unrebuilt 热启动排出来不可用、因到点没有重编的候选在这里记一个
    */
   private Optional<RapidStagger.Candidate> stagger(
       BuildInput input,
-      TimetableBuildOptions options,
-      Instant builtAt,
-      Built base,
-      Set<UUID> fastRoutes,
+      Original original,
       Map<String, Integer> shift,
-      Optional<RapidStagger.Dwell> dwell) {
+      Optional<RapidStagger.Dwell> dwell,
+      java.util.function.BooleanSupplier expired,
+      AtomicInteger unrebuilt) {
+    TimetableBuildOptions options = original.options().withRapidStagger(false);
+    Instant builtAt = original.builtAt();
+    Built base = original.base();
+    Set<UUID> fastRoutes = original.fastRoutes();
     Optional<Prepared> known = dwell.isPresent() ? Optional.empty() : base.prepared();
     BuildInput variant =
         dwell
@@ -689,12 +894,41 @@ public final class TimetableBuilder {
                   return input.withRoutes(routes);
                 })
             .orElse(input);
+    RapidStagger.Outcome baseOutcome = RapidStagger.Outcome.of(base.result());
+    TimetableBuilder candidate =
+        new TimetableBuilder(
+            timingCalculator,
+            shift,
+            false,
+            progress,
+            threads,
+            pool(),
+            memo,
+            // 加长折返不开热启动。它改了终到停站，折返表跟着变，原表试排的参数比较（TargetMemo#originalFor）本来也认不到原表；
+            // 两道闸有意重复：任一道被改松，另一道仍挡着。
+            dwell.filter(d -> !d.turnback()).isPresent());
     Built built =
-        new TimetableBuilder(timingCalculator, shift, false, progress)
-            .buildOnce(variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
+        candidate.buildOnce(
+            variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
+    if (candidate.warmAdopted.get()
+        && (built.chosen().isEmpty()
+            || !RapidStagger.acceptable(baseOutcome, RapidStagger.Outcome.of(built.result())))) {
+      if (expired.getAsBoolean()) {
+        unrebuilt.incrementAndGet();
+        return Optional.empty();
+      }
+      built =
+          new TimetableBuilder(
+                  timingCalculator, shift, false, progress, threads, pool(), memo, false)
+              .buildOnce(
+                  variant,
+                  options,
+                  builtAt,
+                  built.prepared().or(() -> known),
+                  base.prepared().map(Prepared::graphIndex));
+    }
     RapidStagger.Outcome outcome = RapidStagger.Outcome.of(built.result());
-    if (built.chosen().isEmpty()
-        || !RapidStagger.acceptable(RapidStagger.Outcome.of(base.result()), outcome)) {
+    if (built.chosen().isEmpty() || !RapidStagger.acceptable(baseOutcome, outcome)) {
       return Optional.empty();
     }
     RapidStagger.Measure searched =
@@ -709,6 +943,13 @@ public final class TimetableBuilder {
             reportedRapids(built, fastRoutes, searched)));
   }
 
+  /** 记一次第三层完整候选；错峰候选里的另记在错峰名下（{@link #attemptAtPhases}）。 */
+  private void phaseTrial() {
+    if (relaxAllowed) {
+      progress.trial(TimetableBuildProgress.Trial.PHASE_CANDIDATE);
+    }
+  }
+
   /** 错峰候选（不许放宽）的阶段由发起它的错峰搜索报，自己不改阶段。 */
   private void stage(TimetableBuildProgress.Stage stage) {
     if (relaxAllowed) {
@@ -720,6 +961,11 @@ public final class TimetableBuilder {
     if (relaxAllowed) {
       progress.detail(text);
     }
+  }
+
+  /** 这次 build 的并行池；不经 {@link #build} 直接用时串行。 */
+  private BuildPool pool() {
+    return pool == null ? BuildPool.serial() : pool;
   }
 
   private static int separationOf(TimetableBuildOptions options) {
@@ -811,7 +1057,7 @@ public final class TimetableBuilder {
     List<VehicleDutyPlanner.Leg> returnLegs = new ArrayList<>();
     Map<UUID, String> legStation = new HashMap<>();
     Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new HashMap<>();
-    Set<UUID> passengerReturns = new HashSet<>();
+    Set<UUID> passengerLegs = new HashSet<>();
     Map<UUID, Integer> runByRoute = new HashMap<>();
     // 车型变体：基础 route → 车型键 → 变体 ID。不区分车型时为空。
     Map<UUID, Map<String, UUID>> variants = new HashMap<>();
@@ -889,11 +1135,17 @@ public final class TimetableBuilder {
                     route.routeCode(), "CREATE 线路首站没有 CRET 指令，无法实体化列车"));
             continue;
           }
-          if (owned && ServiceGroupClassifier.carriesPassengers(route)) {
+          if (owned
+              && !route.dispatchByOperation()
+              && ServiceGroupClassifier.carriesPassengers(route)) {
             // 带客的出库班是班次：上它所属组的子网格，从车库实体化（与 OPERATION + CRET 同一条路径），而不是当走行段。
             // 别的线的带客出库班不在此列——我只是借它出库，把它排成我的班次会连人家自己的 headway 票一起拦掉。
             operations.add(new OperationPlan(route, true, endsAtDepot(route.stops())));
             break;
+          }
+          if (owned && ServiceGroupClassifier.carriesPassengers(route)) {
+            passengerLegs.add(route.routeId());
+            passengerLegs.addAll(variantIds.values());
           }
           createLegs.add(
               new VehicleDutyPlanner.Leg(
@@ -916,7 +1168,7 @@ public final class TimetableBuilder {
           boolean passenger = owned && ServiceGroupClassifier.carriesPassengers(route);
           if (passenger) {
             // 带客的回库班：仍由派车器在交路收尾处生成（到达 + 折返），但落 trip 行给 PIDS 与导出。
-            passengerReturns.add(route.routeId());
+            passengerLegs.add(route.routeId());
           }
           returnLegs.add(
               new VehicleDutyPlanner.Leg(
@@ -929,7 +1181,7 @@ public final class TimetableBuilder {
           variantIds.forEach(
               (key, variantId) -> {
                 if (passenger) {
-                  passengerReturns.add(variantId);
+                  passengerLegs.add(variantId);
                 }
                 returnLegs.add(
                     new VehicleDutyPlanner.Leg(
@@ -1028,8 +1280,23 @@ public final class TimetableBuilder {
     if (candidates.stream().allMatch(candidate -> candidate.weight() <= 0)) {
       throw new BuildFailure("所有运营 route 的 weight 都不是正数，无法分配服务比例");
     }
+    // 加解编：支线交路由主干派生，不上网格；写法有问题（切不开、读不到编组）编表直接报错
+    CouplingPlanner.Analysis couplings =
+        couplingsOf(
+            input,
+            plans,
+            operations.stream()
+                .map(op -> op.route().routeId())
+                .collect(java.util.stream.Collectors.toSet()));
+    if (!couplings.errors().isEmpty()) {
+      throw new BuildFailure("加解编写法有误：" + String.join("；", couplings.errors()));
+    }
     // 只对进发车表的 route 分组分方向：走行段不上网格。
-    List<RouteInput> scheduled = operations.stream().map(OperationPlan::route).toList();
+    List<RouteInput> scheduled =
+        operations.stream()
+            .map(OperationPlan::route)
+            .filter(route -> !couplings.branchRoutes().contains(route.routeId()))
+            .toList();
     ServiceGroupClassifier.Classification classification =
         ServiceGroupClassifier.classify(scheduled);
     return new Prepared(
@@ -1043,11 +1310,58 @@ public final class TimetableBuilder {
         Map.copyOf(profiles),
         List.copyOf(infeasible),
         classification,
-        Set.copyOf(passengerReturns),
+        Set.copyOf(passengerLegs),
         Map.copyOf(runByRoute),
         trajectoriesOf(input, modelByRoute),
         Map.copyOf(variants),
-        baseByVariant(variants));
+        baseByVariant(variants),
+        couplings);
+  }
+
+  /** 推出加解编结构（基础时分）。 */
+  private static CouplingPlanner.Analysis couplingsOf(
+      BuildInput input, List<TimetableRoutePlan> plans, Set<UUID> gridRoutes) {
+    if (input.couplings() == CouplingInputs.NONE
+        && input.routes().stream()
+            .flatMap(route -> route.stops().stream())
+            .noneMatch(
+                stop ->
+                    org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .route
+                            .RouteCouplingDirectives
+                            .rawDecouple(stop)
+                            .isPresent()
+                        || org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .route
+                            .RouteCouplingDirectives
+                            .rawCouple(stop)
+                            .isPresent())) {
+      return CouplingPlanner.Analysis.NONE;
+    }
+    Map<UUID, TimetableRoutePlan> byRoute = new HashMap<>();
+    for (TimetableRoutePlan plan : plans) {
+      if (plan.consist().isEmpty()) {
+        byRoute.putIfAbsent(plan.routeId(), plan);
+      }
+    }
+    Set<UUID> planned = new HashSet<>();
+    for (RouteInput route : input.routes()) {
+      if (!input.fleet().sharesFor(route.routeId()).isEmpty()) {
+        planned.add(route.routeId());
+      }
+    }
+    return CouplingPlanner.analyze(
+        input.sortedRoutes(),
+        byRoute,
+        input.couplings(),
+        planned,
+        gridRoutes,
+        input::poolOf,
+        org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.coupleSeconds());
   }
 
   /**
@@ -1135,7 +1449,381 @@ public final class TimetableBuilder {
   /** 每组每方向铺子网格、选相位、派车、串行、编号、查冲突。排不出任何班次时抛 {@link BuildFailure}。 */
   private Attempt attempt(
       Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
+    // 平移只叠加在选好的相位上（shiftedAttempt）：选相位与平移无关，原表已经选过的直接拿来。
+    TimetableBuildOptions key = options.withRapidStagger(false);
+    Optional<Attempt> known = memo.find(prepared, key);
+    if (known.isEmpty() && warmStart) {
+      Optional<Attempt> warm = warmAttempt(prepared, options, key, input, builtAt);
+      if (warm.isPresent()) {
+        warmAdopted.set(true);
+        return warm.get();
+      }
+    }
+    Attempt selected =
+        known.orElseGet(
+            () -> {
+              Attempt chosen = selectedAttempt(prepared, options, input, builtAt);
+              memo.offer(prepared, key, chosen);
+              return chosen;
+            });
+    return shiftedAttempt(prepared, options, input, builtAt, selected);
+  }
+
+  /**
+   * 错峰中途加停的候选从原表选好的相位起排（热启动）：这类候选只改了一条 route 的停站，准备要重做，但相位不再整套重选
+   * （第三层的完整候选评估是一次构建里最贵的部分），直接按原表的相位、叠上候选的组平移试排一次。
+   *
+   * <p>这是启发式：整套重选可能在新停站下挑出另一个相位，热启动看不到它；候选的挑选规则不变，只是每个候选按原表相位评。 原表的试排是这次 build
+   * 里第一份、在任何候选之前记下的，与线程数无关，串行与并行结果相同。
+   *
+   * <p>原表相位在新时分下不可行时退回整套重选：排不出任何班次（{@link BuildFailure}），或让不掉的冲突比原表在自己的相位上还多——
+   * 停站改了，原表相位上的交会点跟着挪，多出来的冲突在目标间隔下往往让不掉，候选就此被淘汰；那不是这个加停不好，是相位没跟着选。 只给错峰的中途加停候选用（{@link
+   * #warmStart}），原表自己的各种重排照旧；热启动排出来的候选不可用时，候选再整套重选编一次（{@link #stagger}）。
+   *
+   * <p>相位说明不沿用原表的：那是按原表的走行与折返写的，换成一句"沿用原表相位"。
+   *
+   * @return 热启动的试排；没有可用的原表相位或原表相位不可行时为空
+   */
+  private Optional<Attempt> warmAttempt(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      TimetableBuildOptions key,
+      BuildInput input,
+      Instant builtAt) {
+    Optional<Attempt> original = memo.originalFor(key);
+    if (original.isEmpty()) {
+      return Optional.empty();
+    }
+    Attempt warm;
+    try {
+      warm =
+          attemptAtPhases(
+              prepared, options, input, builtAt, Optional.of(original.get().phases()), groupShift);
+    } catch (BuildFailure failure) {
+      return Optional.empty();
+    }
+    if (warm.unabsorbable().size() > original.get().unabsorbable().size()) {
+      return Optional.empty();
+    }
+    PhasePlanner.Phases phases = warm.phases();
+    return Optional.of(
+        warm.withPhases(
+            new PhasePlanner.Phases(
+                phases.phaseByDirection(),
+                phases.offsetByGroup(),
+                phases.deltaByDirection(),
+                List.of(WARM_START_NOTE),
+                List.of(),
+                phases.connections())));
+  }
+
+  /** 热启动的候选的相位说明。 */
+  static final String WARM_START_NOTE = "相位沿用原表（快车错峰的候选从原表相位热启动，不按新停站重选）";
+
+  /** 按目标间隔选相位并试排（不含快车错峰的平移）。 */
+  private Attempt selectedAttempt(
+      Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
+    Attempt initial =
+        attemptAtPhases(prepared, options, input, builtAt, Optional.empty(), Map.of());
+    List<ServiceGroupClassifier.Group> groups =
+        gridGroupsOf(
+            prepared.classification().groups(),
+            prepared.operationPlans().stream()
+                .map(TimetableRoutePlan::routeId)
+                .collect(java.util.stream.Collectors.toSet()));
+    if (groups.isEmpty()) {
+      return initial;
+    }
+    TimetableBuildOptions trialOptions = completionOptions(options, initial.intervals());
+    int tailFrom =
+        completionTailFrom(
+            options,
+            trialOptions,
+            prepared.operationPlans().stream()
+                .mapToInt(TimetableRoutePlan::totalRunSeconds)
+                .max()
+                .orElse(0),
+            prepared.plans().stream()
+                .filter(plan -> plan.kind() == RouteOperationType.RETURN)
+                .mapToInt(TimetableRoutePlan::totalRunSeconds)
+                .max()
+                .orElse(0));
+    // 各相位候选在池内线程上并发试排，结果按相位记在这里；只留评分最好的那份，其余算完分数就丢，免得几十份整表同时压在堆上。
+    Map<Map<String, Integer>, Attempt> completed = new ConcurrentHashMap<>();
+    if (!trialOptions.equals(options)) {
+      phaseTrial();
+    }
+    completed.put(
+        initial.phases().deltaByDirection(),
+        trialOptions.equals(options)
+            ? initial
+            : attemptAtPhases(
+                prepared, trialOptions, input, builtAt, Optional.of(initial.phases()), Map.of()));
+    PhasePlanner.Phases selected =
+        ResourcePhasePlanner.refineCompleted(
+            initial.phases(),
+            groups,
+            initial.intervals(),
+            options.dutyLimits().maxIdleSeconds(),
+            inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs()),
+            phases -> {
+              Attempt result = completed.get(phases.deltaByDirection());
+              if (result == null) {
+                phaseTrial();
+                try {
+                  result =
+                      attemptAtPhases(
+                          prepared, trialOptions, input, builtAt, Optional.of(phases), Map.of());
+                } catch (BuildFailure failure) {
+                  return new ResourcePhasePlanner.CompletionScore(
+                      Integer.MAX_VALUE,
+                      Integer.MAX_VALUE,
+                      Long.MAX_VALUE,
+                      Integer.MAX_VALUE,
+                      Long.MAX_VALUE);
+                }
+                keepBest(completed, phases.deltaByDirection(), result, tailFrom);
+              }
+              return result.completionScore(tailFrom);
+            },
+            pool());
+    if (selected.deltaByDirection().equals(initial.phases().deltaByDirection())) {
+      // 相位没换，但候选预算不够时的说明要留下。
+      return selected.equals(initial.phases()) ? initial : initial.withPhases(selected);
+    }
+    // 选中的不一定还留着（挑选还看取消数，不只看评分）：没留住就按选中的相位再排一次，结果相同。
+    Attempt kept = trialOptions.equals(options) ? completed.get(selected.deltaByDirection()) : null;
+    Attempt chosen =
+        kept != null
+            ? kept
+            : attemptAtPhases(prepared, options, input, builtAt, Optional.of(selected), Map.of());
+    // 预览只是候选排序，不能作为发布或回退的可行性判据；完整窗口必须再次通过相同硬约束与取消数检查。
+    if (chosen.dropped().size() <= initial.dropped().size()
+        && chosen.completionScore().compareTo(initial.completionScore()) < 0) {
+      return chosen.withPhases(selected);
+    }
+    // 复核没过要说出来：否则报告里看不出完整交路相位试过、选过，只是没用上。
+    List<String> notes = new ArrayList<>(initial.phases().resourceNotes());
+    notes.add(
+        String.format(
+            Locale.ROOT,
+            "完整交路相位在完整窗口上复核没过（让不掉的 %d → %d 处、取消 %d → %d 班），保留原相位",
+            initial.unabsorbable().size(),
+            chosen.unabsorbable().size(),
+            initial.dropped().size(),
+            chosen.dropped().size()));
+    PhasePlanner.Phases original = initial.phases();
+    return initial.withPhases(
+        new PhasePlanner.Phases(
+            original.phaseByDirection(),
+            original.offsetByGroup(),
+            original.deltaByDirection(),
+            original.notes(),
+            notes,
+            original.connections()));
+  }
+
+  /** 只留评分最好的一份试排：先比评分、评分相同再比相位，按这个全序留最前的一份，与候选编完的先后无关（串行与并行留下的相同）。 */
+  private static void keepBest(
+      Map<Map<String, Integer>, Attempt> completed,
+      Map<String, Integer> delta,
+      Attempt result,
+      int tailFrom) {
+    synchronized (completed) {
+      boolean better = true;
+      for (Map.Entry<Map<String, Integer>, Attempt> kept : completed.entrySet()) {
+        int byScore =
+            result.completionScore(tailFrom).compareTo(kept.getValue().completionScore(tailFrom));
+        if (byScore > 0
+            || (byScore == 0 && delta.toString().compareTo(kept.getKey().toString()) >= 0)) {
+          better = false;
+          break;
+        }
+      }
+      if (better) {
+        completed.clear();
+        completed.put(delta, result);
+      }
+    }
+  }
+
+  /** 显式快车错峰只叠加在已选相位上，不能反向影响自动评分而改变其它组的名义网格。 */
+  private Attempt shiftedAttempt(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      BuildInput input,
+      Instant builtAt,
+      Attempt base) {
+    return groupShift.isEmpty()
+        ? base
+        : attemptAtPhases(
+            prepared, options, input, builtAt, Optional.of(base.phases()), groupShift);
+  }
+
+  /**
+   * 相位候选视野覆盖两次最长 duty 寿命，并至少包含最长 duty 加三个最长发车周期。
+   *
+   * <p>只看首轮开班会把补车分配与后续交路替换混为一谈；第二轮覆盖车辆封口后的再次补车。
+   * 长窗口避免每个候选都重复排全天，预览之后仍对获选方案排完整窗口；邻表保留统一零点，不改写原数据或发布时间范围。
+   */
+  private static TimetableBuildOptions completionOptions(
+      TimetableBuildOptions options, Map<String, Integer> intervals) {
+    int longest = intervals.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+    long horizon =
+        Math.min(
+            options.horizonSeconds(),
+            Math.max(
+                2L * options.dutyLimits().maxDutyDurationSeconds(),
+                (long) options.dutyLimits().maxDutyDurationSeconds()
+                    + (long) ResourcePhasePlanner.CYCLES * longest));
+    return new TimetableBuildOptions(
+        options.serviceStartSecondOfDay(),
+        options.serviceStartSecondOfDay() + (int) horizon,
+        options.headway(),
+        options.defaultDwell(),
+        options.dutyLimits(),
+        options.tripCodePrefix(),
+        options.zoneId(),
+        options.separation(),
+        options.strictConflicts(),
+        options.groupIntervals(),
+        options.repair(),
+        options.rapidStagger(),
+        options.following(),
+        options.recoveryMinDwellSeconds(),
+        options.maxCancelTrips(),
+        options.holdMaxSeconds(),
+        options.staggerMinutes());
+  }
+
+  /**
+   * 相位候选的取消从哪一秒起不计：试排窗口比计划窗口短时，末端的班次会因端点排队、让车被推过窗口末端而截掉（"越过计划窗口"）——
+   * 那是窗口人为截断，哪个相位把更多班次推到末端，哪个就多取消几班，与它在真实窗口里取消多少无关。拿它去比"不拿取消换冲突"会误杀候选。 剔掉的只是末端"最长一趟全程 + 单步让车上限 +
+   * 最长一段回库走行"之内发车的那些（交路收尾要把回库也排进窗口，末班之后的回库同样会被窗口截断）： 再早发车的班次被推过窗口末端之前先撞上的是交路上限，那是真取消。
+   * 不取整个最长交路寿命：试排视野只有两个交路寿命，剔掉后一半等于只看开班那一段，稳态里反复出现的取消看不见，选中的相位到完整窗口上多取消、被打回原相位。
+   * 试排窗口就是计划窗口时末端是真的，全算。
+   *
+   * <p>剔掉的只是候选之间的比较；选中的相位还要在完整窗口上与原相位比一次取消数（{@link #selectedAttempt}），真多取消的照样不要。
+   *
+   * @param longestRunSeconds 最长一条运营 route 的全程时分
+   * @param longestReturnSeconds 最长一条回库线路（RETURN）的全程时分；没有回库线路时为 0
+   */
+  static int completionTailFrom(
+      TimetableBuildOptions requested,
+      TimetableBuildOptions trial,
+      int longestRunSeconds,
+      int longestReturnSeconds) {
+    if (trial.horizonSeconds() >= requested.horizonSeconds()) {
+      return Integer.MAX_VALUE;
+    }
+    long tail =
+        (long) Math.max(0, longestRunSeconds)
+            + trial.repair().maxWaitSeconds()
+            + Math.max(0, longestReturnSeconds);
+    return (int) Math.max(0L, trial.horizonSeconds() - tail);
+  }
+
+  /** 名义发车早于 {@code tailFrom} 的取消数。 */
+  static int droppedBefore(List<Integer> droppedAt, int tailFrom) {
+    int count = 0;
+    for (int at : droppedAt) {
+      if (at < tailFrom) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** 单个相位的完整试排：包括真实补车、回库、待命、串行及让车；候选之间不共用可变派车状态。 */
+  private Attempt attemptAtPhases(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      BuildInput input,
+      Instant builtAt,
+      Optional<PhasePlanner.Phases> selectedPhases,
+      Map<String, Integer> extraShift) {
+    return attemptAtPhases(prepared, options, input, builtAt, selectedPhases, extraShift, Set.of());
+  }
+
+  /**
+   * 同上，另外取消几个名义格子上的班次（严格模式 {@code --max-cancel}）：派车照常把它们算进去（与不取消时派出同一套交路）， 派完再从各自的交路里拿掉（{@link
+   * DutyWithdrawal}），记为 {@link
+   * VehicleDutyPlanner.UnassignedReason#CONFLICT_CANCELLED}；别的交路不动，之后照常串行、让车。
+   *
+   * @param cancelled 要取消的名义格子
+   */
+  private Attempt attemptAtPhases(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      BuildInput input,
+      Instant builtAt,
+      Optional<PhasePlanner.Phases> selectedPhases,
+      Map<String, Integer> extraShift,
+      Set<CancelSlot> cancelled) {
+    // 加解编把几条交路连在一起：派车之后端点串行、让车修复截掉了卷进加解编的班次，就带着这些截断重派——
+    // 主干被截掉的下一轮不排，只有派生的支线被截掉的下一轮照跑主干、不拆挂。轮数有上限，用完按最后一轮的结果。
+    Set<CancelSlot> excluded = new HashSet<>();
+    Set<CancelSlot> uncoupled = new HashSet<>();
+    Once previous = null;
+    for (int round = 0; ; round++) {
+      Once once;
+      try {
+        once =
+            attemptOnce(
+                prepared,
+                options,
+                input,
+                builtAt,
+                selectedPhases,
+                extraShift,
+                cancelled,
+                excluded,
+                uncoupled);
+      } catch (BuildFailure failure) {
+        // 重派那一轮反倒排不出（例如截掉的主干正是剩下的全部）：用上一轮的结果
+        if (previous == null) {
+          throw failure;
+        }
+        return previous.attempt();
+      }
+      if ((once.brokenTrunks().isEmpty() && once.brokenBranches().isEmpty())
+          || round >= COUPLING_ROUNDS) {
+        return once.attempt();
+      }
+      excluded.addAll(once.brokenTrunks());
+      uncoupled.addAll(once.brokenBranches());
+      previous = once;
+    }
+  }
+
+  /** 加解编截断后重派的轮数上限。 */
+  private static final int COUPLING_ROUNDS = 3;
+
+  /**
+   * 一次完整构建与它截断的加解编班次。
+   *
+   * @param attempt 构建结果
+   * @param brokenTrunks 被截掉的主干（下一轮不排）
+   * @param brokenBranches 派生的支线被截掉的主干（下一轮照跑、不拆挂）
+   */
+  private record Once(
+      Attempt attempt, Set<CancelSlot> brokenTrunks, Set<CancelSlot> brokenBranches) {}
+
+  private Once attemptOnce(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      BuildInput input,
+      Instant builtAt,
+      Optional<PhasePlanner.Phases> selectedPhases,
+      Map<String, Integer> extraShift,
+      Set<CancelSlot> cancelled,
+      Set<CancelSlot> excluded,
+      Set<CancelSlot> uncoupled) {
     progress.fullBuild();
+    if (!relaxAllowed) {
+      // 不许放宽的编表器只用来编快车错峰的候选：它里面的每一次完整构建都记在错峰名下。
+      progress.trial(TimetableBuildProgress.Trial.STAGGER_CANDIDATE);
+    }
     UUID timetableId = prepared.timetableId();
     int horizon = options.horizonSeconds();
     int separation = (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds());
@@ -1160,28 +1848,33 @@ public final class TimetableBuilder {
     // 留在相位层里它会被当成一条幻影流——与反向配成往返对去锚定别人，还参与合流点打分。
     List<ServiceGroupClassifier.Group> gridGroups =
         gridGroupsOf(groups, candidateIndexByRoute.keySet());
-    PhasePlanner.Phases phases = planPhases(prepared, options, intervalByGroup, gridGroups);
-    // ---- 2.5 第三层：前两层只看端点，沿线哪里交会、咽喉上出库流与回库流什么时候相遇它们看不见。
-    // 给每个方向选一个 δ，用同一套冲突模型按周期评估；按车接续链整体平移，不拆开。
-    phases =
-        ResourcePhasePlanner.refine(
-            phases,
-            gridGroups,
-            intervalByGroup,
-            periodicTemplates(prepared, gridGroups, intervalByGroup, options),
-            prepared.profiles(),
-            prepared.graphIndex(),
-            separation,
-            options.repair().maxWaitSeconds(),
-            options.dutyLimits().maxIdleSeconds(),
-            inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs()));
+    PhasePlanner.Phases phases;
+    if (selectedPhases.isPresent()) {
+      phases = selectedPhases.get();
+    } else {
+      phases = planPhases(prepared, options, intervalByGroup, gridGroups);
+      // ---- 2.5 第三层：前两层只看端点，沿线哪里交会、咽喉上出库流与回库流什么时候相遇它们看不见。
+      // 给每个方向选一个 δ，用同一套冲突模型按周期评估；按车接续链整体平移，不拆开。
+      phases =
+          ResourcePhasePlanner.refine(
+              phases,
+              gridGroups,
+              intervalByGroup,
+              periodicTemplates(prepared, gridGroups, intervalByGroup, options),
+              prepared.profiles(),
+              prepared.graphIndex(),
+              separation,
+              options.repair().maxWaitSeconds(),
+              options.dutyLimits().maxIdleSeconds(),
+              inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs()));
+    }
     List<GroupGrid.DirectionGrid> grids = new ArrayList<>();
     List<Placed> placed = new ArrayList<>();
     for (ServiceGroupClassifier.Group group : gridGroups) {
       int interval = intervalByGroup.get(group.name());
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
         int phase =
-            phases.effectivePhaseOf(direction.key()) + groupShift.getOrDefault(group.name(), 0);
+            phases.effectivePhaseOf(direction.key()) + extraShift.getOrDefault(group.name(), 0);
         // 可行性：这一班必须在计划窗口内跑完。全程时分长的 route 因此会在窗口末尾被自然挤出，
         // 而它的 deficit 留在分配器里——这正是"约束恢复后能追回份额"的机制。
         WeightedTripAllocator.FeasibilityCheck feasibility =
@@ -1212,12 +1905,26 @@ public final class TimetableBuilder {
     List<VehicleDutyPlanner.PlannedTrip> plannedTrips = new ArrayList<>(placed.size());
     Map<UUID, WeightedTripAllocator.Allocation> allocationByProvisional = new HashMap<>();
     Map<UUID, Placed> placedByProvisional = new HashMap<>();
+    List<TimetableBuildResult.DroppedTrip> dropped = new ArrayList<>();
+    List<Integer> droppedAt = new ArrayList<>();
+    // 取消的格子照常进派车（派车结果与不取消时逐条相同），派完再从各自的交路里拿掉，见 DutyWithdrawal。
+    Set<UUID> withdrawn = new HashSet<>();
     for (int i = 0; i < placed.size(); i++) {
       Placed item = placed.get(i);
       int candidateIndex = candidateIndexByRoute.get(item.slot().routeId());
       OperationPlan op = prepared.operations().get(candidateIndex);
       TimetableRoutePlan plan = operationPlans.get(candidateIndex);
       int departureSeconds = item.slot().departureSeconds();
+      if (excluded.contains(new CancelSlot(plan.routeId(), departureSeconds))) {
+        // 加解编：上一轮端点串行、让车修复截掉了这一班主干，这一轮不排
+        dropped.add(
+            new TimetableBuildResult.DroppedTrip(
+                plan.routeCode(),
+                clock(secondOfDay(departureSeconds, options)),
+                VehicleDutyPlanner.UnassignedReason.STUB_SATURATED));
+        droppedAt.add(departureSeconds);
+        continue;
+      }
       UUID provisional =
           UUID.nameUUIDFromBytes(
               ("provisional:" + timetableId + ":" + i)
@@ -1225,6 +1932,9 @@ public final class TimetableBuilder {
       allocationByProvisional.put(
           provisional, new WeightedTripAllocator.Allocation(item.slot().slot(), candidateIndex));
       placedByProvisional.put(provisional, item);
+      if (cancelled.contains(new CancelSlot(plan.routeId(), departureSeconds))) {
+        withdrawn.add(provisional);
+      }
       VehicleDutyPlanner.PlannedTrip trip =
           new VehicleDutyPlanner.PlannedTrip(
               provisional,
@@ -1237,8 +1947,52 @@ public final class TimetableBuilder {
               op.startsAtDepot(),
               op.endsAtDepot(),
               input.poolOf(plan.routeId()),
-              consistOptions(input, prepared, plan.routeId()));
+              prepared
+                  .couplings()
+                  .consistOptions(plan.routeId(), plan.totalRunSeconds())
+                  .orElseGet(() -> consistOptions(input, prepared, plan.routeId())));
       plannedTrips.add(trip);
+    }
+    // 加解编：按每一班主干派生支线班次（不上网格、与主干同频），连同拆挂计划交给派车。主干被取消，派生的一并取消。
+    VehicleDutyPlanner.Couplings couplingPlan = VehicleDutyPlanner.Couplings.none();
+    Map<UUID, UUID> derivedParent = new HashMap<>();
+    List<String> couplingNotes = List.of();
+    if (!prepared.couplings().isEmpty()) {
+      Map<UUID, TimetableRoutePlan> planById = new HashMap<>();
+      Map<UUID, boolean[]> flags = new HashMap<>();
+      for (int i = 0; i < operationPlans.size(); i++) {
+        planById.put(operationPlans.get(i).routeId(), operationPlans.get(i));
+        OperationPlan op = prepared.operations().get(i);
+        flags.put(op.route().routeId(), new boolean[] {op.startsAtDepot(), op.endsAtDepot()});
+      }
+      CouplingPlanner.Derived derived =
+          CouplingPlanner.derive(
+              prepared.couplings(),
+              plannedTrips.stream()
+                  .filter(
+                      trip ->
+                          !uncoupled.contains(
+                              new CancelSlot(trip.routeId(), trip.departureSeconds())))
+                  .toList(),
+              planById,
+              flags,
+              org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives
+                  .coupleSeconds());
+      for (VehicleDutyPlanner.PlannedTrip trip : derived.trips()) {
+        Integer candidateIndex = candidateIndexByRoute.get(trip.routeId());
+        if (candidateIndex == null) {
+          continue;
+        }
+        allocationByProvisional.put(
+            trip.tripId(), new WeightedTripAllocator.Allocation(0, candidateIndex));
+        if (withdrawn.contains(derived.parentOf().get(trip.tripId()))) {
+          withdrawn.add(trip.tripId());
+        }
+        plannedTrips.add(trip);
+      }
+      couplingPlan = derived.couplings();
+      derivedParent.putAll(derived.parentOf());
+      couplingNotes = derived.notes();
     }
 
     // 各起点上的名义发车时刻：派车器用它回答"这辆车在终点还要等多久才有下一班"，
@@ -1262,17 +2016,40 @@ public final class TimetableBuilder {
             .add(trip.departureSeconds());
       }
     }
+    TimetableDepotAllocator allocator = depotAllocator(prepared, plannedTrips, input, separation);
     VehicleDutyPlanner.Result planned =
-        VehicleDutyPlanner.plan(
+        DutyWithdrawal.withdraw(
             timetableId,
+            VehicleDutyPlanner.plan(
+                timetableId,
+                plannedTrips,
+                prepared.legs(),
+                options.dutyLimits(),
+                nextSlotByOrigin,
+                preferredFeeders(phases.connections()),
+                allocator,
+                couplingPlan),
             plannedTrips,
+            withdrawn,
             prepared.legs(),
             options.dutyLimits(),
-            nextSlotByOrigin,
-            preferredFeeders(phases.connections()));
+            allocator);
     Map<UUID, VehicleDutyPlanner.UnassignedTrip> unassigned = new HashMap<>();
+    List<String> stranded = new ArrayList<>();
     for (VehicleDutyPlanner.UnassignedTrip trip : planned.unassigned()) {
+      if (trip.reason() == VehicleDutyPlanner.UnassignedReason.DECOUPLE_STRANDED) {
+        // 解下的车就地待命或回库，但解编站回不了库、也没有班次接它：用户定编表报错，须改写法
+        stranded.add(trip.tripCode());
+        continue;
+      }
       unassigned.put(trip.tripId(), trip);
+    }
+    if (!stranded.isEmpty()) {
+      throw new BuildFailure(
+          "解编切下的车回不了库：解编站没有回库线路，也没有班次接它（就地待命、回库，或 GOTO 的支线班次排不上）（"
+              + String.join("、", stranded.stream().limit(5).toList())
+              + (stranded.size() > 5 ? " 等 " + stranded.size() + " 班" : "")
+              + "）；请给解编站配一条回库线路（首站是解编站）");
     }
     Map<UUID, UUID> dutyByProvisional = new HashMap<>();
     Map<UUID, Optional<String>> consistByDuty = new HashMap<>();
@@ -1286,7 +2063,6 @@ public final class TimetableBuilder {
     // ---- 3. 只保留派上车的班次，其余取消并说明原因。编号要等端点串行之后再做：串行会改时刻、也会改先后。
     Map<UUID, Integer> nominalByProvisional = new HashMap<>();
     List<TimetableTrip> provisionalTrips = new ArrayList<>(plannedTrips.size());
-    List<TimetableBuildResult.DroppedTrip> dropped = new ArrayList<>();
     for (VehicleDutyPlanner.PlannedTrip provisional : plannedTrips) {
       WeightedTripAllocator.Allocation allocation =
           allocationByProvisional.get(provisional.tripId());
@@ -1300,6 +2076,7 @@ public final class TimetableBuilder {
                 missing == null
                     ? VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS
                     : missing.reason()));
+        droppedAt.add(provisional.departureSeconds());
         continue;
       }
       nominalByProvisional.put(provisional.tripId(), provisional.departureSeconds());
@@ -1338,7 +2115,8 @@ public final class TimetableBuilder {
               shiftToServiceDay(duty.returnSecondOfDay(), options),
               shiftToServiceDay(duty.plannedEndSecondOfDay(), options),
               duty.closeReason(),
-              duty.consist()));
+              duty.consist(),
+              duty.coupling()));
     }
     Timetable provisionalTable =
         timetableOf(input, options, prepared, provisionalTrips, provisionalDuties, builtAt);
@@ -1377,6 +2155,7 @@ public final class TimetableBuilder {
               operationPlans.get(allocation.candidateIndex()).routeCode(),
               clock(secondOfDay(nominalByProvisional.getOrDefault(truncated, 0), options)),
               VehicleDutyPlanner.UnassignedReason.STUB_SATURATED));
+      droppedAt.add(nominalByProvisional.getOrDefault(truncated, 0));
     }
     if (serialized.timetable().trips().isEmpty()) {
       throw new BuildFailure("端点排队超限，没有一班能在计划窗口内跑完：检查折返时间、端点权重与股道数");
@@ -1408,26 +2187,36 @@ public final class TimetableBuilder {
               operationPlans.get(allocation.candidateIndex()).routeCode(),
               clock(secondOfDay(nominalByProvisional.getOrDefault(truncated, 0), options)),
               VehicleDutyPlanner.UnassignedReason.STUB_SATURATED));
+      droppedAt.add(nominalByProvisional.getOrDefault(truncated, 0));
     }
     if (repaired.timetable().trips().isEmpty()) {
       throw new BuildFailure("让车累计超限，没有一班能在计划窗口内跑完：检查裕量、折返时间与 --max-wait");
     }
 
+    // ---- 3.65 加解编对齐：串行、让车挪了主干之后，派生的支线班次跟着推后；回程支线晚了主干在联挂站等它 ----
+    Timetable alignedTable =
+        CouplingAlignment.align(
+            repaired.timetable(),
+            prepared.couplings(),
+            routeId -> planOf(prepared.plans(), routeId),
+            prepared::baseOf,
+            options.dutyLimits().turnaround(),
+            org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.coupleSeconds());
+
     // ---- 3.6 按实际发车顺序编号、派生主键、替换 duty 引用 ----------------------------
     TimetableTripNumbering.Numbered numbered =
-        TimetableTripNumbering.number(
-            timetableId, options, repaired.timetable(), nominalByProvisional);
+        TimetableTripNumbering.number(timetableId, options, alignedTable, nominalByProvisional);
     Map<UUID, String> routeCodeById = new HashMap<>();
     for (TimetableRoutePlan plan : prepared.plans()) {
       routeCodeById.put(plan.routeId(), plan.routeCode());
     }
     List<TimetableTrip> withReturns =
-        TimetableTripNumbering.appendReturnTrips(
+        TimetableTripNumbering.appendPassengerLegTrips(
             timetableId,
             options,
             numbered.trips(),
             numbered.duties(),
-            prepared.passengerReturns(),
+            prepared.passengerLegs(),
             routeCodeById);
     Timetable timetable =
         timetableOf(input, options, prepared, withReturns, numbered.duties(), builtAt);
@@ -1436,10 +2225,18 @@ public final class TimetableBuilder {
       codeByFinalId.put(trip.id(), trip.tripCode());
     }
     Map<String, String> finalCodeByProvisionalCode = new HashMap<>();
+    // 运营班次的最终车次号 → 名义格子：严格模式按它取消，重排之后车次号会变，格子不变。
+    Map<String, CancelSlot> slotByCode = new HashMap<>();
     for (TimetableTrip trip : repaired.timetable().trips()) {
       UUID finalId = numbered.finalByProvisional().get(trip.id());
       if (finalId != null) {
-        finalCodeByProvisionalCode.put(trip.tripCode(), codeByFinalId.getOrDefault(finalId, "?"));
+        String finalCode = codeByFinalId.getOrDefault(finalId, "?");
+        finalCodeByProvisionalCode.put(trip.tripCode(), finalCode);
+        Placed item = placedByProvisional.get(trip.id());
+        if (item != null) {
+          slotByCode.put(
+              finalCode, new CancelSlot(item.slot().routeId(), item.slot().departureSeconds()));
+        }
       }
     }
     List<ResourceRepair.Yield> yields =
@@ -1487,11 +2284,13 @@ public final class TimetableBuilder {
         ConflictAbsorption.classify(
             conflicts,
             timetable,
-            occupancy,
+            new TimetableOccupancyProjector.Occupancy(movements, stays),
             prepared.graphIndex(),
             separation,
             options.repair().maxWaitSeconds(),
-            options.dutyLimits().turnaround());
+            options.dutyLimits().turnaround(),
+            profiles,
+            recoveryOf(options, input));
 
     // 份额按方向报：weight 只在同方向多 route 之间切，跨方向、跨组比没有意义。
     // 数的必须是<b>让车修复之后</b>还留在表上的班次：端点串行之后让车还会再截断一批，按串行后的表数会把
@@ -1515,27 +2314,152 @@ public final class TimetableBuilder {
                 direction.candidates(), keptByDirection.getOrDefault(direction.key(), List.of())));
       }
     }
-    return new Attempt(
-        (int) headwaySeconds,
-        timetable,
-        List.copyOf(dropped),
-        List.copyOf(shares),
-        conflicts,
-        residuals,
-        List.copyOf(shifts),
-        yields,
-        serialized.terminals(),
-        serialized.throats(),
-        Map.copyOf(intervalByGroup),
-        PhasePlanner.interleaves(grids),
-        phases.notes(),
-        phases.resourceNotes(),
-        PhasePlanner.residues(
-            gridGroups,
-            intervalByGroup,
-            prepared.runByRoute(),
-            options.dutyLimits().turnaround(),
-            inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs())));
+    Set<CancelSlot> brokenTrunks = new HashSet<>();
+    Set<CancelSlot> brokenBranches = new HashSet<>();
+    if (!derivedParent.isEmpty()) {
+      Map<UUID, VehicleDutyPlanner.PlannedTrip> plannedById = new HashMap<>();
+      plannedTrips.forEach(trip -> plannedById.put(trip.tripId(), trip));
+      Set<UUID> coupledTrunks = new HashSet<>(derivedParent.values());
+      Set<UUID> truncatedAll = new HashSet<>(serialized.truncatedTripIds());
+      truncatedAll.addAll(repaired.truncatedTripIds());
+      for (UUID truncatedId : truncatedAll) {
+        UUID parent = derivedParent.get(truncatedId);
+        VehicleDutyPlanner.PlannedTrip trunk =
+            plannedById.get(parent != null ? parent : truncatedId);
+        if (trunk == null || (parent == null && !coupledTrunks.contains(truncatedId))) {
+          continue;
+        }
+        CancelSlot slot = new CancelSlot(trunk.routeId(), trunk.departureSeconds());
+        (parent == null ? brokenTrunks : brokenBranches).add(slot);
+      }
+    }
+    return new Once(
+        new Attempt(
+            (int) headwaySeconds,
+            timetable,
+            List.copyOf(dropped),
+            List.copyOf(droppedAt),
+            List.copyOf(shares),
+            conflicts,
+            residuals,
+            List.copyOf(shifts),
+            yields,
+            serialized.terminals(),
+            serialized.throats(),
+            Map.copyOf(intervalByGroup),
+            PhasePlanner.interleaves(grids),
+            phases.notes(),
+            phases.resourceNotes(),
+            PhasePlanner.residues(
+                gridGroups,
+                intervalByGroup,
+                prepared.runByRoute(),
+                options.dutyLimits().turnaround(),
+                inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs())),
+            phases,
+            unabsorbableByDirection(residuals, timetable, prepared, gridGroups),
+            Map.copyOf(slotByCode),
+            couplingNotes),
+        brokenTrunks,
+        brokenBranches);
+  }
+
+  /**
+   * 顺推判据用的停站压缩：最短停站来自参数，档案里多算的停站开销来自走行模型（编表时加进停站的就是它），车门下限取运行时的缺省， 换模加时按各 route
+   * 的停靠表推算（与时分档案加进停站的是同一份）。
+   */
+  private static ConflictAbsorption.Recovery recoveryOf(
+      TimetableBuildOptions options, BuildInput input) {
+    Map<UUID, List<Integer>> switches = new HashMap<>();
+    for (RouteInput route : input.routes()) {
+      int[] plan =
+          org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopExtraDwell.plan(route.stops());
+      if (java.util.Arrays.stream(plan).anyMatch(seconds -> seconds > 0)) {
+        switches.put(route.routeId(), java.util.Arrays.stream(plan).boxed().toList());
+      }
+    }
+    return new ConflictAbsorption.Recovery(
+        options.recoveryMinDwellSeconds(),
+        input.runTimeModel().stationStopOverheadSeconds(),
+        ConflictAbsorption.Recovery.RUNTIME_DOOR_FLOOR_SECONDS,
+        switches);
+  }
+
+  /** 每个方向的班次卷进了几处不可吸收残余：一处残余两边的班次各记一次（同一方向只记一次）。出入库走行与邻表的班次不属于任何方向，不记。 第三层据此决定先挑哪个单元。 */
+  private static Map<String, Integer> unabsorbableByDirection(
+      List<ConflictAbsorption.Residual> residuals,
+      Timetable timetable,
+      Prepared prepared,
+      List<ServiceGroupClassifier.Group> gridGroups) {
+    Map<UUID, String> directionByRoute = new HashMap<>();
+    for (ServiceGroupClassifier.Group group : gridGroups) {
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        for (UUID routeId : direction.routeIds()) {
+          directionByRoute.put(routeId, direction.key());
+        }
+      }
+    }
+    Map<String, String> directionByCode = new HashMap<>();
+    for (TimetableTrip trip : timetable.trips()) {
+      String key = directionByRoute.get(prepared.baseOf(trip.routeId()));
+      if (key != null) {
+        directionByCode.put(trip.tripCode(), key);
+      }
+    }
+    return countByDirection(ConflictAbsorption.unabsorbable(residuals), directionByCode);
+  }
+
+  /**
+   * 每个方向卷进了几处残余：一处残余两边的本表班次各记一次（同一方向只记一次）。邻表那一边不记——它的车次号可能与本表的某一班相同， 按车次号查方向会把邻表的冲突记到本表那个方向头上。
+   *
+   * @param directionByCode 本表班次的车次号 → 方向键
+   */
+  static Map<String, Integer> countByDirection(
+      List<ConflictAbsorption.Residual> residuals, Map<String, String> directionByCode) {
+    Map<String, Integer> out = new TreeMap<>();
+    for (ConflictAbsorption.Residual residual : residuals) {
+      TimetableConflictChecker.Conflict conflict = residual.conflict();
+      Set<String> keys = new TreeSet<>();
+      if (conflict.firstOwner().isEmpty()) {
+        Optional.ofNullable(directionByCode.get(conflict.first())).ifPresent(keys::add);
+      }
+      if (conflict.secondOwner().isEmpty()) {
+        Optional.ofNullable(directionByCode.get(conflict.second())).ifPresent(keys::add);
+      }
+      for (String key : keys) {
+        out.merge(key, 1, Integer::sum);
+      }
+    }
+    return Map.copyOf(out);
+  }
+
+  /** 名义运营班次、邻表与已选补车共同构成出库压力；每次完整相位试排重新建账。 */
+  private static TimetableDepotAllocator depotAllocator(
+      Prepared prepared,
+      List<VehicleDutyPlanner.PlannedTrip> trips,
+      BuildInput input,
+      int separation) {
+    Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new HashMap<>(prepared.profiles());
+    List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
+    List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
+    for (VehicleDutyPlanner.PlannedTrip trip : trips) {
+      movements.add(
+          new TimetableConflictChecker.Movement(
+              trip.tripCode(), trip.routeId(), trip.departureSeconds()));
+    }
+    for (NeighborTimetable neighbor : input.neighbors()) {
+      neighbor.profiles().forEach(profiles::putIfAbsent);
+      movements.addAll(neighbor.movements());
+      stays.addAll(neighbor.stays());
+    }
+    // 班次与出入库走行用的是车型变体 ID，线路归属登记在基础 route 上。
+    return new TimetableDepotAllocator(
+        prepared.graphIndex(),
+        profiles,
+        movements,
+        stays,
+        separation,
+        route -> Optional.ofNullable(input.lineByRoute().get(prepared.baseOf(route))));
   }
 
   /** 一班允许的车型、份额权重与按各车型跑的全程时分（按方案里的顺序）。不区分车型、或这条 route 一个车型的时分都算不出来时为空。 */
@@ -1613,6 +2537,7 @@ public final class TimetableBuilder {
    *
    * @param searchNotes 搜索过程的说明（跳过了哪些结构上不可行的间隔、喂车方向多停了多少），进报告
    * @param failed 排不开的间隔（连同当时的多停），搜索往里追加
+   * @param holds 喂车多停的搜索：结构预筛与按多停重算的准备都缓存在里面
    */
   private Optional<Found> searchFeasibleHeadway(
       Prepared prepared,
@@ -1621,21 +2546,15 @@ public final class TimetableBuilder {
       BuildInput input,
       Instant builtAt,
       List<String> searchNotes,
-      List<Failure> failed) {
+      List<Failure> failed,
+      HoldSearch holds) {
     int targetHeadway = target.headwaySeconds();
     stage(TimetableBuildProgress.Stage.RELAX);
-    HoldSearch holds = new HoldSearch(prepared, options, input);
     // 目标间隔不多停已经试过；结构上排不开时先看喂车方向中途多停能不能错开，再往上放宽。
-    for (FeederHold hold : holds.feasible(options)) {
-      if (hold.isNone()) {
-        continue;
-      }
-      detail("目标间隔 " + targetHeadway + "s，试喂车中途多停");
-      Optional<Found> found = tryAt(holds, hold, options, builtAt, failed);
-      if (found.isPresent()) {
-        searchNotes.add(holds.describe(hold));
-        return found;
-      }
+    Optional<Found> held =
+        holdsAtTarget(holds, options, targetHeadway, builtAt, searchNotes, failed);
+    if (held.isPresent()) {
+      return held;
     }
     if (!relaxAllowed) {
       return Optional.empty();
@@ -1673,7 +2592,7 @@ public final class TimetableBuilder {
                   candidates.skippedFrom(),
                   candidates.skippedTo(),
                   candidates.skipped(),
-                  FEEDER_HOLD_LIMIT_SECONDS));
+                  relaxed.feederHoldLimitSeconds()));
         }
         if (!hold.isNone()) {
           searchNotes.add(holds.describe(hold));
@@ -1682,6 +2601,156 @@ public final class TimetableBuilder {
       }
     }
     return Optional.empty();
+  }
+
+  /**
+   * 目标间隔不变，按 {@link HoldSearch#feasible} 的顺序试喂车方向中途多停（不多停那一种已经试过，跳过），第一个干净的交回。
+   * 多停写进停站，运行时按早到等点扣留——严格模式与非严格模式用的是同一种多停。
+   */
+  private Optional<Found> holdsAtTarget(
+      HoldSearch holds,
+      TimetableBuildOptions options,
+      int targetHeadway,
+      Instant builtAt,
+      List<String> searchNotes,
+      List<Failure> failed) {
+    for (FeederHold hold : holds.feasible(options)) {
+      if (hold.isNone()) {
+        continue;
+      }
+      detail("目标间隔 " + targetHeadway + "s，试喂车中途多停");
+      Optional<Found> found = tryAt(holds, hold, options, builtAt, failed);
+      if (found.isPresent()) {
+        searchNotes.add(holds.describe(hold));
+        return found;
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 严格模式取消让不掉的班次：目标间隔（喂车多停也试过）仍有不可吸收残余时，按残余的顺序取第一处里要等的那一班（后车）取消， 在已选的相位上重排一次、重新分类，直到干净，或取消数到 {@code
+   * --max-cancel} 上限。
+   *
+   * <p>取消发生在相位选择与完整窗口复核之后，不回头改相位：相位层"不拿取消换冲突"比的是相位候选，这里是相位定了之后拿掉个别班次。
+   * 后车不是运营班次（出入库走行、待命、带客回库班）或已经取消过时取对方；两方都取消不了就看下一处，一处也取消不了就停。
+   *
+   * <p>取消是局部的：派车与不取消时相同，只从卷进去的交路里拿掉这一班（{@link DutyWithdrawal}），别的交路的车辆、班次与出入库不动。
+   * 那辆车在被取消那一班的起点上待命到下一班，接不上就在那里回库、后面的班次另出一辆车；因此另外截断的班次照常记为取消，一并计入上限。
+   * 端点串行与让车修复照常在整张表上重做（只改时刻、不换车）。不重新派车：重新派车会让一大片交路换车，端点上的冲突整片换一批。
+   */
+  private Cancellation cancelUnabsorbable(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      BuildInput input,
+      Instant builtAt,
+      Attempt target,
+      int limit) {
+    // 报告用目标间隔原表里的车次号：每取消一班就重新编号，取消时的车次号前后对不上。
+    Map<CancelSlot, String> targetCodes = new HashMap<>();
+    target.slotByCode().forEach((code, slot) -> targetCodes.put(slot, code));
+    Map<CancelSlot, Cancelled> cancelled = new LinkedHashMap<>();
+    Attempt current = target;
+    int count = 0;
+    while (!current.clean() && cancelled.size() < limit) {
+      Optional<Cancelled> found = nextCancel(current, cancelled.keySet());
+      if (found.isEmpty()) {
+        break;
+      }
+      Cancelled next =
+          new Cancelled(
+              found.get().slot(),
+              targetCodes.getOrDefault(found.get().slot(), found.get().tripCode()),
+              found.get().cause());
+      cancelled.put(next.slot(), next);
+      detail("严格模式取消让不掉的班次：第 " + cancelled.size() + " 班（上限 " + limit + "）");
+      if (relaxAllowed) {
+        progress.trial(TimetableBuildProgress.Trial.CANCEL_RETRY);
+      }
+      Attempt retried;
+      try {
+        retried =
+            attemptAtPhases(
+                prepared,
+                options,
+                input,
+                builtAt,
+                Optional.of(target.phases()),
+                groupShift,
+                Set.copyOf(cancelled.keySet()));
+      } catch (BuildFailure failure) {
+        cancelled.remove(next.slot());
+        break;
+      }
+      current = retried;
+      count = Math.max(cancelled.size(), current.dropped().size() - target.dropped().size());
+      if (count > limit) {
+        break;
+      }
+    }
+    return new Cancellation(current, List.copyOf(cancelled.values()), count);
+  }
+
+  /** 下一班取消谁：按残余的顺序，先后车、再对方；只取本表的运营班次，已经取消过的跳过。 */
+  private static Optional<Cancelled> nextCancel(Attempt attempt, Set<CancelSlot> done) {
+    for (ConflictAbsorption.Residual residual : attempt.unabsorbable()) {
+      TimetableConflictChecker.Conflict conflict = residual.conflict();
+      List<String> codes = new ArrayList<>(2);
+      codes.add(residual.mover());
+      if (residual.mover().equals(conflict.second()) && conflict.firstOwner().isEmpty()) {
+        codes.add(conflict.first());
+      } else if (residual.mover().equals(conflict.first()) && conflict.secondOwner().isEmpty()) {
+        codes.add(conflict.second());
+      }
+      for (String code : codes) {
+        CancelSlot slot = attempt.slotByCode().get(code);
+        if (slot != null && !done.contains(slot)) {
+          return Optional.of(new Cancelled(slot, code, residual));
+        }
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 取消了哪几班、各因哪一处：报告里一班一行。 */
+  private static List<String> describeCancelled(
+      List<Cancelled> cancelled, Prepared prepared, TimetableBuildOptions options) {
+    List<String> out = new ArrayList<>(cancelled.size());
+    for (Cancelled item : cancelled) {
+      out.add(
+          TimetableBuildReportText.describeCancelled(
+              item.tripCode(),
+              planOf(prepared.operationPlans(), item.slot().routeId()).routeCode(),
+              clock(secondOfDay(item.slot().nominalSeconds(), options)),
+              item.cause(),
+              options.serviceStartSecondOfDay()));
+    }
+    return out;
+  }
+
+  /** 取消上限的写法：给了 {@code --max-cancel} 就照写，没给时写明是按运营班次的比例算出来的。 */
+  private static String cancelLimitText(TimetableBuildOptions options, int limit, int trips) {
+    return options.maxCancelByShare()
+        ? "上限 "
+            + limit
+            + " 班，即运营班次 "
+            + trips
+            + " 班的 "
+            + TimetableBuildOptions.DEFAULT_MAX_CANCEL_PERCENT
+            + "%，可用 --max-cancel 改"
+        : "--max-cancel " + limit;
+  }
+
+  /** 目标间隔排不开的失败结果：带上目标间隔的冲突、残余与第三层的相位说明。 */
+  private static TimetableBuildResult targetFailure(
+      String reason, Prepared prepared, Attempt target) {
+    return TimetableBuildResult.failure(
+        reason,
+        prepared.infeasible(),
+        target.conflicts().conflicts(),
+        target.absorbable(),
+        target.unabsorbable(),
+        target.resourceNotes());
   }
 
   /** 按某种多停完整构建一次；干净就交回，否则把失败的间隔记进 {@code failed}。 */
@@ -2293,7 +3362,7 @@ public final class TimetableBuilder {
    * 车只能在终点原地折返的运营 route：{@link #mainlineTurnbackRoutes} 加上末站 TERMINATE、终点没有 RETURN 线路的那些（{@link
    * VehicleDutyPlanner.Legs#returnLegAt}，与派车器的"能不能回库"同一口径）。
    *
-   * <p>没有出入库线路的站台（例如 WS 的终点 NTA）车停着不挡人，但一辆车也调不走，只能等本端的下一班：周期余量若堆在那一端，
+   * <p>没有出入库线路的站台（例如某条线在别的线终点上折返、那里没有本线的车库）车停着不挡人，但一辆车也调不走，只能等本端的下一班：周期余量若堆在那一端，
    * 超出闲置上限就接不上。往返对因此锚在这一端（余量落在另一端）并整对平移，第三层不能单独动一边。
    */
   static Set<UUID> inPlaceTurnbackRoutes(
@@ -2394,11 +3463,12 @@ public final class TimetableBuilder {
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       List<TimetableBuildResult.InfeasibleRoute> infeasible,
       ServiceGroupClassifier.Classification classification,
-      Set<UUID> passengerReturns,
+      Set<UUID> passengerLegs,
       Map<UUID, Integer> runByRoute,
       BlockingTimes.Trajectories trajectories,
       Map<UUID, Map<String, UUID>> variants,
-      Map<UUID, UUID> baseByVariant) {
+      Map<UUID, UUID> baseByVariant,
+      CouplingPlanner.Analysis couplings) {
 
     /** route 按某个车型跑的变体 ID；不区分车型、或这个车型不能跑这条 route 时就是 route 本身。 */
     UUID variantOf(UUID routeId, Optional<String> consist) {
@@ -2430,11 +3500,12 @@ public final class TimetableBuilder {
           profiles,
           infeasible,
           classification,
-          passengerReturns,
+          passengerLegs,
           Map.copyOf(run),
           trajectories,
           variants,
-          baseByVariant);
+          baseByVariant,
+          couplings);
     }
   }
 
@@ -2510,7 +3581,7 @@ public final class TimetableBuilder {
       if (feeders.isEmpty()) {
         return out;
       }
-      int limit = Math.min(FEEDER_HOLD_LIMIT_SECONDS, minInterval(intervalsOf(base, at)) - 1);
+      int limit = Math.min(at.feederHoldLimitSeconds(), minInterval(intervalsOf(base, at)) - 1);
       int[] gap = new int[limit + 1];
       gap[0] = clearance.getAsInt();
       for (int h = 1; h <= limit; h++) {
@@ -2676,10 +3747,57 @@ public final class TimetableBuilder {
   }
 
   /** 按某个 headway 排出来的一份完整计划及其冲突报告。 */
+  /**
+   * 原表在目标间隔下选好相位的试排，只记第一份（原表那份）；错峰平移候选同一份准备、同一组参数时复用。
+   *
+   * <p>准备与试排的类型做成参数，只为包内测试能单独钉住参数比较（{@link #originalFor}），编表器里固定是 {@code Prepared}、{@code Attempt}。
+   *
+   * @param <P> 准备
+   * @param <A> 试排
+   */
+  static final class TargetMemo<P, A> {
+    private P prepared;
+    private TimetableBuildOptions options;
+    private A attempt;
+
+    synchronized Optional<A> find(P prepared, TimetableBuildOptions options) {
+      return this.prepared == prepared && options.equals(this.options)
+          ? Optional.of(attempt)
+          : Optional.empty();
+    }
+
+    /**
+     * 原表在选好的相位上的试排：参数相同（准备可以不同，如中途加停的候选）时给出，没有记下或参数不同时为空。
+     *
+     * <p>折返表也要相同：反向相位按它锚定，折返表变了（终到停站改了）原表的相位就不再是这组参数下的锚定。加长折返的候选因此在这里就认不到原表； 发起候选时它本来也不开热启动（{@link
+     * TimetableBuilder#stagger}）——两道闸有意重复，任一道被改松，另一道仍把加长折返挡在热启动之外。
+     */
+    synchronized Optional<A> originalFor(TimetableBuildOptions options) {
+      return attempt != null && options.equals(this.options)
+          ? Optional.of(attempt)
+          : Optional.empty();
+    }
+
+    synchronized void offer(P prepared, TimetableBuildOptions options, A attempt) {
+      if (this.prepared == null) {
+        this.prepared = prepared;
+        this.options = options;
+        this.attempt = attempt;
+      }
+    }
+  }
+
+  /**
+   * @param droppedAt 各取消班次的名义发车（相对秒），与 {@code dropped} 一一对应：相位候选按它剔除截短窗口末端的取消
+   * @param unabsorbableByDirection 方向键 → 它的班次卷进了几处不可吸收残余
+   * @param slotByCode 运营班次的车次号 → 名义格子（严格模式取消用）；出入库走行与带客回库班不在里面
+   * @param couplingNotes 加解编没能派生的主干班次（进编表报告）
+   */
   private record Attempt(
       int headwaySeconds,
       Timetable timetable,
       List<TimetableBuildResult.DroppedTrip> dropped,
+      List<Integer> droppedAt,
       List<WeightedTripAllocator.ShareReport> shares,
       TimetableConflictChecker.Report conflicts,
       List<ConflictAbsorption.Residual> residuals,
@@ -2691,7 +3809,69 @@ public final class TimetableBuilder {
       List<PhasePlanner.Interleave> interleaves,
       List<String> phaseNotes,
       List<String> resourceNotes,
-      List<PhasePlanner.Residue> residues) {
+      List<PhasePlanner.Residue> residues,
+      PhasePlanner.Phases phases,
+      Map<String, Integer> unabsorbableByDirection,
+      Map<String, CancelSlot> slotByCode,
+      List<String> couplingNotes) {
+
+    /** 完整窗口上的评分：取消全算。 */
+    ResourcePhasePlanner.CompletionScore completionScore() {
+      return completionScore(Integer.MAX_VALUE);
+    }
+
+    /**
+     * 偏移用同服务日最近的有符号差计算，跨零点晚发不会被误计成接近一天。
+     *
+     * @param tailFrom 名义发车不早于它的取消不计（截短窗口的末端，见 {@link #completionTailFrom}）
+     */
+    ResourcePhasePlanner.CompletionScore completionScore(int tailFrom) {
+      long displacement =
+          shifts.stream()
+              .mapToLong(
+                  shift -> {
+                    int delta =
+                        Math.floorMod(
+                                shift.actualSecondOfDay()
+                                    - shift.nominalSecondOfDay()
+                                    + TimetableTrip.SECONDS_PER_DAY / 2,
+                                TimetableTrip.SECONDS_PER_DAY)
+                            - TimetableTrip.SECONDS_PER_DAY / 2;
+                    return (long) delta * delta;
+                  })
+              .sum();
+      return new ResourcePhasePlanner.CompletionScore(
+          unabsorbable().size(),
+          droppedBefore(droppedAt, tailFrom),
+          displacement,
+          conflicts.conflicts().size(),
+          residuals.stream().mapToLong(ConflictAbsorption.Residual::waitSeconds).sum(),
+          unabsorbableByDirection);
+    }
+
+    Attempt withPhases(PhasePlanner.Phases selected) {
+      return new Attempt(
+          headwaySeconds,
+          timetable,
+          dropped,
+          droppedAt,
+          shares,
+          conflicts,
+          residuals,
+          shifts,
+          yields,
+          terminals,
+          throats,
+          intervals,
+          interleaves,
+          selected.notes(),
+          selected.resourceNotes(),
+          residues,
+          selected,
+          unabsorbableByDirection,
+          slotByCode,
+          couplingNotes);
+    }
 
     /** 成功判据：只看运行时让不掉的那些。可吸收残余照常发布，运行时会在让车点等一会儿。 */
     boolean clean() {
@@ -2736,6 +3916,39 @@ public final class TimetableBuilder {
   /** 一个格子连同它所属的方向：份额按方向报，主键与交路按全局候选下标找。 */
   private record Placed(GroupGrid.Slot slot, ServiceGroupClassifier.Direction direction) {}
 
+  /**
+   * 严格模式取消的名义格子：运营 route + 名义发车（相对计划窗口起点）。重排之后车次号与派车都会变，格子不变。
+   *
+   * @param routeId 运营 route（基础 route，不是车型变体）
+   * @param nominalSeconds 名义发车
+   */
+  private record CancelSlot(UUID routeId, int nominalSeconds) {}
+
+  /**
+   * 严格模式取消的一班。
+   *
+   * @param slot 名义格子
+   * @param tripCode 目标间隔原表（一班都没取消时）里的车次号
+   * @param cause 让它取消的那处残余
+   */
+  private record Cancelled(CancelSlot slot, String tripCode, ConflictAbsorption.Residual cause) {}
+
+  /**
+   * 严格模式取消的结果。
+   *
+   * @param attempt 最后一次试排
+   * @param cancelled 按先后取消的班次
+   * @param count 计入上限的取消数：取消的班次，加上交路因此接不上、截断而多取消的班次
+   */
+  private record Cancellation(Attempt attempt, List<Cancelled> cancelled, int count) {
+
+    /** "N 班"；因取消另外截断了班次时写明其中几班是截断的。 */
+    String countText() {
+      int induced = count - cancelled.size();
+      return count + " 班" + (induced > 0 ? "（其中因此另外截断 " + induced + " 班）" : "");
+    }
+  }
+
   /** 构建失败：只带原因，不可行 route 清单由调用方持有。 */
   private static final class BuildFailure extends RuntimeException {
     private static final long serialVersionUID = 1L;
@@ -2775,7 +3988,40 @@ public final class TimetableBuilder {
       Optional<String> notes,
       List<NeighborTimetable> neighbors,
       Map<UUID, UUID> lineByRoute,
-      ConsistFleet fleet) {
+      ConsistFleet fleet,
+      CouplingInputs couplings) {
+
+    /** 没有加解编输入的构建。 */
+    public BuildInput(
+        UUID timetableId,
+        UUID companyId,
+        UUID operatorId,
+        UUID lineId,
+        String code,
+        String name,
+        List<RouteInput> routes,
+        RailGraph graph,
+        RunTimeModel runTimeModel,
+        Optional<String> notes,
+        List<NeighborTimetable> neighbors,
+        Map<UUID, UUID> lineByRoute,
+        ConsistFleet fleet) {
+      this(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          routes,
+          graph,
+          runTimeModel,
+          notes,
+          neighbors,
+          lineByRoute,
+          fleet,
+          CouplingInputs.NONE);
+    }
 
     /** 不区分车型的构建。 */
     public BuildInput(
@@ -2817,6 +4063,7 @@ public final class TimetableBuilder {
       neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
       lineByRoute = lineByRoute == null ? Map.of() : Map.copyOf(lineByRoute);
       fleet = fleet == null ? ConsistFleet.none() : fleet;
+      couplings = couplings == null ? CouplingInputs.NONE : couplings;
     }
 
     /** 换一份 route 列表，其余不变。 */
@@ -2834,7 +4081,8 @@ public final class TimetableBuilder {
           notes,
           neighbors,
           lineByRoute,
-          fleet);
+          fleet,
+          couplings);
     }
 
     /** 换一组车型，其余不变。 */
@@ -2852,7 +4100,27 @@ public final class TimetableBuilder {
           notes,
           neighbors,
           lineByRoute,
-          nextFleet);
+          nextFleet,
+          couplings);
+    }
+
+    /** 换一份加解编输入，其余不变。 */
+    public BuildInput withCouplings(CouplingInputs nextCouplings) {
+      return new BuildInput(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          routes,
+          graph,
+          runTimeModel,
+          notes,
+          neighbors,
+          lineByRoute,
+          fleet,
+          nextCouplings);
     }
 
     /** 单线构建：所有 route 同一车池。 */
@@ -2938,7 +4206,7 @@ public final class TimetableBuilder {
    *
    * @param routeId Route UUID
    * @param routeCode Route code
-   * @param operationType route 类型；CREATE/RETURN 不进发车表，只提供出库/回库走行
+   * @param operationType route 类型；带客 CREATE 缺省独立发车，其余出入库提供交路辅助段
    * @param weight 目标服务比例权重（仅 OPERATION 有意义）
    * @param definition 已解析的交路定义
    * @param stops route 的停靠配置，索引与 waypoints 对齐
@@ -2948,6 +4216,7 @@ public final class TimetableBuilder {
    * @param external 属于别的 operator：进足迹、进交路，但不受本表管辖（见 {@link TimetableRoutePlan#external()}）
    * @param spawnGroup 交路组（route metadata 的 spawn_group）；空则进 {@link
    *     ServiceGroupClassifier#DEFAULT_GROUP}
+   * @param dispatchByOperation 出入库仅由运营交路驱动，保留停站，但不生成独立周期班次
    */
   public record RouteInput(
       UUID routeId,
@@ -2959,12 +4228,74 @@ public final class TimetableBuilder {
       Optional<String> depotNodeId,
       Optional<RouteOperationType> declaredAs,
       boolean external,
-      Optional<String> spawnGroup) {
+      Optional<String> spawnGroup,
+      boolean dispatchByOperation) {
+
+    /** 兼容既有输入：缺省仍按原来的客运班次分类。 */
+    public RouteInput(
+        UUID routeId,
+        String routeCode,
+        RouteOperationType operationType,
+        int weight,
+        RouteDefinition definition,
+        List<RouteStop> stops,
+        Optional<String> depotNodeId,
+        Optional<RouteOperationType> declaredAs,
+        boolean external,
+        Optional<String> spawnGroup) {
+      this(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          declaredAs,
+          external,
+          spawnGroup,
+          false);
+    }
+
+    /** 保持停站与带客属性，仅修改出入库需求来源。 */
+    public RouteInput withDispatchByOperation(boolean enabled) {
+      return new RouteInput(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          declaredAs,
+          external,
+          spawnGroup,
+          enabled);
+    }
+
+    /** 修改交路组并保留出入库需求来源；联合排班加线路前缀时不改变 route 的调度语义。 */
+    public RouteInput withSpawnGroup(Optional<String> nextGroup) {
+      return new RouteInput(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          declaredAs,
+          external,
+          nextGroup,
+          dispatchByOperation);
+    }
 
     public RouteInput {
       Objects.requireNonNull(routeId, "routeId");
       Objects.requireNonNull(definition, "definition");
       operationType = operationType == null ? RouteOperationType.OPERATION : operationType;
+      if (dispatchByOperation && operationType == RouteOperationType.OPERATION) {
+        throw new IllegalArgumentException("dispatchByOperation 仅允许 CREATE/RETURN");
+      }
       routeCode = routeCode == null ? "" : routeCode.trim();
       stops = stops == null ? List.of() : List.copyOf(stops);
       depotNodeId = depotNodeId == null ? Optional.empty() : depotNodeId;
@@ -2987,7 +4318,8 @@ public final class TimetableBuilder {
           depotNodeId,
           declaredAs,
           external,
-          spawnGroup);
+          spawnGroup,
+          dispatchByOperation);
     }
 
     /** 没有交路组信息的构造：进默认组。 */

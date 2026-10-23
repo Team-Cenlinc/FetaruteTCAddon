@@ -169,6 +169,115 @@ class TimetablePlatformPlannerTest {
     assertTrue(!plans.containsKey(key(d3, 0, 2)) && !plans.containsKey(key(d3, 1, 0)));
   }
 
+  /** 瞬时匹配可行但整段无固定股道时，受限交路必须在保存前失败。 */
+  @Test
+  void restrictedStayCannotSwitchTracksBetweenTwoAdjacentBookings() {
+    var result = planAroundAdjacentNeighborStays(DYNAMIC + ":[2]");
+    assertEquals(1, result.restrictedUnplaced());
+    var thrown =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            TimetablePlatformPlanner.RestrictedPlatformException.class,
+            result::requireFeasibleRestrictedAssignments);
+    assertEquals(Map.of("count", "1"), thrown.placeholders());
+    assertTrue(languageFile().isString(thrown.messageKey()), thrown.messageKey());
+    assertTrue(languageFile().isString("command.timetable.build.restricted-plan-failed"));
+  }
+
+  private static org.bukkit.configuration.file.YamlConfiguration languageFile() {
+    try (var reader =
+        new java.io.InputStreamReader(
+            TimetablePlatformPlannerTest.class
+                .getClassLoader()
+                .getResourceAsStream("lang/zh_CN.yml"),
+            StandardCharsets.UTF_8)) {
+      return org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(reader);
+    } catch (java.io.IOException ex) {
+      throw new java.io.UncheckedIOException(ex);
+    }
+  }
+
+  /** 显式集合覆盖了该站现有全部股道时与不限股道同一口径：排不下照常留给运行时选台，不拒绝编表。 */
+  @Test
+  void anExplicitSetCoveringEveryTrackIsNotRestricted() {
+    var result = planAroundAdjacentNeighborStays(DYNAMIC + ":[1,2]");
+    assertEquals(1, result.unplaced());
+    assertEquals(0, result.restrictedUnplaced());
+    result.requireFeasibleRestrictedAssignments();
+  }
+
+  /** 排程出错时只看本次编的表：邻表交路写了受限集合不应让本表编表失败。 */
+  @Test
+  void onlyTheTablesOwnRoutesDecideWhetherStopsAreRestricted() {
+    UUID neighborRoute = UUID.nameUUIDFromBytes("neighbor".getBytes(StandardCharsets.UTF_8));
+    Duty duty = new Duty("D001", List.of(new Run(OUT, 1000), new Run(BACK, 1300)));
+    var withNeighbor = new LinkedHashMap<>(stops);
+    withNeighbor.put(
+        neighborRoute, routeStops(neighborRoute, Optional.empty(), Optional.of(DYNAMIC + ":[1]")));
+    assertTrue(!TimetablePlatformPlanner.hasRestrictedStops(input(List.of(duty), withNeighbor)));
+
+    var restrictedOwn = new LinkedHashMap<>(stops);
+    restrictedOwn.put(OUT, routeStops(OUT, Optional.empty(), Optional.of(DYNAMIC + ":[1]")));
+    assertTrue(TimetablePlatformPlanner.hasRestrictedStops(input(List.of(duty), restrictedOwn)));
+  }
+
+  /** 邻表在 BBB:1、BBB:2 上前后相接各停一段，本车终到折返的整段停留没有一条股道始终空着。 */
+  private TimetablePlatformPlanner.Result planAroundAdjacentNeighborStays(String terminalNotes) {
+    Duty duty = new Duty("D001", List.of(new Run(OUT, 1000), new Run(BACK, 1300)));
+    var table = table(List.of(duty));
+    var neighbor =
+        new NeighborTimetable(
+            UUID.randomUUID(),
+            "NEIGHBOR",
+            Instant.EPOCH,
+            ZoneId.of("UTC"),
+            1,
+            false,
+            false,
+            Map.of(),
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay(
+                    "B",
+                    new TimetableConflictChecker.Platform(BBB1, "OP:S:BBB", false),
+                    1120,
+                    1210,
+                    Optional.of("NEIGHBOR")),
+                new TimetableConflictChecker.Stay(
+                    "C",
+                    new TimetableConflictChecker.Platform(BBB2, "OP:S:BBB", false),
+                    1210,
+                    1300,
+                    Optional.of("NEIGHBOR"))),
+            List.of());
+    var restrictedStops = new LinkedHashMap<>(stops);
+    restrictedStops.put(OUT, routeStops(OUT, Optional.empty(), Optional.of(terminalNotes)));
+    return TimetablePlatformPlanner.plan(
+        new TimetablePlatformPlanner.Input(
+            List.of(table),
+            Map.of(TABLE, Map.of(OUT, profile(OUT), BACK, profile(BACK))),
+            restrictedStops,
+            definitions,
+            graph,
+            index,
+            List.of(neighbor),
+            0,
+            0));
+  }
+
+  private TimetablePlatformPlanner.Input input(
+      List<Duty> duties, Map<UUID, List<RouteStop>> stopsByRoute) {
+    return new TimetablePlatformPlanner.Input(
+        List.of(table(duties)),
+        Map.of(TABLE, Map.of(OUT, profile(OUT), BACK, profile(BACK))),
+        stopsByRoute,
+        definitions,
+        graph,
+        index,
+        List.of(),
+        0,
+        0);
+  }
+
   // ------------------------------------------------------------------ 夹具
 
   private record Run(UUID routeId, int departure) {}

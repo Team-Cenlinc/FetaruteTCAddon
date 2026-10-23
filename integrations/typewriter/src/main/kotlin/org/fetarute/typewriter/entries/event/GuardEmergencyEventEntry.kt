@@ -14,13 +14,13 @@ import com.typewritermc.engine.paper.entry.triggerAllFor
 import org.fetarute.fetaruteTCAddon.api.event.GuardEmergencyStopEvent
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_emergency_event", "When a FetaruteTC guard pulls the emergency stop", Colors.YELLOW, "mdi:alarm-light")
+@Entry("fetarute_guard_emergency_event", "FTCA 车掌拉下紧急停车时", Colors.YELLOW, "mdi:alarm-light")
 @ContextKeys(GuardEmergencyContextKeys::class)
 /**
- * The `Guard Emergency Event` is triggered when the guard pulls the emergency stop while the train is moving.
+ * “车掌紧急停车”事件：车掌在列车行驶中拉下紧急停车时触发。
  *
- * ## How could this be used?
- * Ask the player in a dialogue why they stopped the train.
+ * ## 用法示例
+ * 在对话里问玩家为什么停车。
  */
 class GuardEmergencyEventEntry(
     override val id: String = "",

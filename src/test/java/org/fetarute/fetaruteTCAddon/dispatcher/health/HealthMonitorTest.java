@@ -45,6 +45,36 @@ class HealthMonitorTest {
   }
 
   @Test
+  void everyCheckSamplesTrainOverlapsAndSurvivesSamplerFailure() {
+    RuntimeDispatchService dispatchService = mock(RuntimeDispatchService.class);
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(dispatchService.cleanupOrphanOccupancyClaimsWithReport(any()))
+        .thenReturn(new RuntimeDispatchService.CleanupResult(Instant.now(), 0, 0, 0));
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    java.util.concurrent.atomic.AtomicInteger samples =
+        new java.util.concurrent.atomic.AtomicInteger();
+    HealthMonitor monitor =
+        new HealthMonitor(
+            dispatchService,
+            occupancyManager,
+            mock(DwellRegistry.class),
+            mock(ConfigManager.class),
+            message -> {},
+            Set::of,
+            () -> {
+              if (samples.incrementAndGet() == 1) {
+                throw new IllegalStateException("traincarts unavailable");
+              }
+              return List.of();
+            });
+
+    monitor.checkNow();
+    monitor.checkNow();
+
+    assertEquals(2, samples.get(), "每轮检查都要采样一次；第一次抛错不影响下一轮");
+  }
+
+  @Test
   void healthCleanupPreservesCurrentResolvedAndTaggedOwnersDuringRenameFailure() {
     RuntimeDispatchService dispatchService = mock(RuntimeDispatchService.class);
     OccupancyManager occupancyManager = mock(OccupancyManager.class);

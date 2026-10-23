@@ -16,6 +16,7 @@
 | `terminal-wait-seconds` | 60 | 叫来的车到终点后等多久；期间沿途有人叫车、这趟经过就接着跑，否则派回库。按表运行的交路不等 |
 | `default-max-trains` | 2 | 线路未写 `--call-max-trains` 时的上限 |
 | `follow-gap-seconds` | 60 | 叫来的车离前车不到这么多秒时按需降速（见“叫来的车”）；`0` 表示不降速 |
+| `turnback-hold-seconds` | 90 | 折返车在终点就绪后最多为这一单等这么多秒，票还没接走它就作废这一单、车回库；`0` 表示不设上限（等到叫车超时） |
 
 有表、无表的线路都能叫；叫来的车不进时刻表。
 
@@ -70,7 +71,8 @@
 车源是折返车时出两张票：这一单的票（叫车交路、不带入路，按首站待命车接车；票面时刻写折返车预计开出终点的时刻，站台屏按它估，发车侧照常随时可接），和折返车票（开进终点的交路、带入路，车次标识带 `~T`）。
 
 - 折返车派出时写叫车标签、`FTA_CALL_ROUTE` 与 `FTA_CALL_TURNBACK=<叫车 id>`；叫车不算派出（不删库、不通知玩家）。车还没进 TrainCarts 属性表、标签写不上时，每秒扫描补写，最多补 30 秒；补写期间不算折返车丢了。只有这一单的票能接它（`SimpleTicketAssigner#callMayTake`），排车源也不把它当别的单的待命车。这一单没了（取消、超时、作废）以后车上的标记不再算数（`CallService#reservationLive`，经 `SimpleTicketAssigner#setCallReservationLive`），别的叫车票照常可接。
-- 它开进终点后在待命池里等这一单的票：叫车服务不派它回库（按表运行的线路也不），回收不碰它（`ReclaimManager#setHeldForCall`，单股道车站、正线折返点的立即回收也不碰）。这一单的票接走它时摘掉 `FTA_CALL_TURNBACK`，这才算派出。就绪满 90 秒（`CallService.TURNBACK_HOLD`）这一单的票还没接走它（被拥堵闸门、车数、车型裁决拦下）时撤票作废这一单、告知玩家，车照常派回库，不长时间占着终点股道；正在交接的不算。
+- 它开进终点后在待命池里等这一单的票：叫车服务不派它回库（按表运行的线路也不），回收不碰它（`ReclaimManager#setHeldForCall`，单股道车站、正线折返点的立即回收也不碰）。这一单的票接走它时摘掉 `FTA_CALL_TURNBACK`，这才算派出。就绪满 `call.turnback-hold-seconds`（默认 90 秒，0 不设上限）这一单的票还没接走它（被拥堵闸门、车数、车型裁决拦下）时撤票作废这一单、告知玩家，车照常派回库，不长时间占着终点股道；正在交接的不算。
+- 车型：接车只认叫车交路编组方案里的车型，折返车票就照叫车交路的方案定车型（`ConsistDispatchArbiter#turnbackConsist`：与新车出库同一套排名，跳过档案不可用的、优先没到出车上限的），出车时按票上的车型出，挑生成点也按这个车型量车长。开进终点的交路自己也绑了方案时只挑它也认的车型；一个都挑不出，这条交路的折返车接不上，不拿它当车源（`/fta route validate` 也不算）。叫车交路没绑方案时照开进终点那条交路的编组出车。
 - 一单叫车只算一辆：还没派出的那一单已经算过，它的折返车不另算线路叫车车数。
 - 叫车取消、超时、作废时一并撤掉还没派出的折返车票；已经开出的折返车开进终点后没人接，照常派回库。折返车票没了车却没开出来（放弃、撤掉）时这一单作废并告知玩家。
 - 找回：折返车已经在路上（车上带着这一单的标记）时只重出这一单的票，不再出折返车。
@@ -117,5 +119,25 @@
   - 交路车长（量车长要解析编组与存档车）按交路记住，交路改了随走行时分一起作废；写了编组却量不出来（TrainCarts 还没读入存档车）时不记。
   - 开放叫车的线路表每 10 秒在后台重读（`CallService#reloadLines`，同一时刻只读一份），读完之前沿用上一份，读完有变化时提示缓存作废；读失败也记下时刻，过 10 秒再试，不是每次刷新都重试。插件未启用时当场读。
   - 右键站台屏开对话框：同一玩家 1 秒内只开一次（按住右键每秒触发好几次，每次都要把各方向排一遍）。
-- 叫来的车照常显示，状态格写“叫车 / On call”（与“正点 / On time”同一排法）。
-- 文案在 `lang/zh_CN.yml` 的 `pids.board.call-hint`、`pids.board.no-more-trains-call`、`pids.board.status.on-call` 与 `call.*`。
+- 叫来的车照常显示，状态格写“叫车 / On call”（与“正点 / On time”同一排法）；加开的车写“加开 / Extra”（见下节）。
+- 文案在 `lang/zh_CN.yml` 的 `pids.board.call-hint`、`pids.board.no-more-trains-call`、`pids.board.status.on-call`、`pids.board.status.extra` 与 `call.*`。
+
+## 公开 API 与事件
+
+- `FetaruteApi#call()`（`CallApi`，`api/internal/CallApiImpl` 转给 `CallService`）：`directionsAt` 列车站上能叫车的方向与此刻能不能叫（`CallService#options` 不带玩家，不看个人冷却，主线程）；`callOf`/`callsOf` 读叫车单快照（`CallService#snapshotOf`/`snapshotsOf`，任意线程）。不代玩家叫车。
+- 事件（`api/event/TrainCall*`）：叫车（`call` 出票成功后当场发）、没派出就结束（取消、撤票、作废，当场发）、派出（`onDispatched`）、到站（车站停靠观察者 `call` 转到 `CallService#onStationArrival`，按交路与停靠下标认车站——与叫车方向同一认法，交路查不到时按站台节点 `运营商:S:站码` 认；每张叫车单只发一次；首站待命车、折返车在叫车的车站接走时，派出时已停在这一站，到站事件跟着派出事件发）；后两种在调度主路径上，下一拍再发（`CallService#post`）。
+- 派出以后叫车的玩家只记在内存（`callers`，叫来的车不在了就忘掉）：重启后已派出的叫车查不到叫车的玩家。
+- 加开的车不是叫车：不在 `CallApi` 里，也不发叫车事件。
+
+## 加开（表外加开一班）
+
+管理员 `/fta depot spawn <company> <operator> <line> <route> <node> --extra [--at HH:MM]` 加开一班：有表、无表的线路都可以，不要求线路开了叫车。
+
+- 只从车库出车：交路首站须带 CRET，命令里的车库须是这条交路出库的车库（不看股道，DYNAMIC 写法按车库池，`CallService#sameYard`）；股道仍按交路的出库写法选，`--pattern` 不用（按交路车型）。
+- 不写 `--at` 时尽快出车；写了按服务器时区的今天这个时刻，已过就是次日，写的就是此刻这一分钟时按此刻（`ExtraTrips#departAt`）。票的 `notBefore` 就是计划时刻，到点才出车；站台屏照常按票显示这一班。
+- 发车已关闭（`spawn.enabled`）时不收（票不会被处理）。
+- 复用叫车的票与生命周期（`CallService#addExtra`）：一张 `ON_DEMAND` 票，车次标识照叫车写法再带加开标记 `~X`（`OnDemandTrip#formatExtra`，车站一栏是交路第一个停车的车站；派出时按票本身认加开，待派表里那一单不在了也不会当成玩家叫车）；派出的车带叫车标签，另写 `FTA_CALL_EXTRA=<编号>`——不进时刻表、进路排队排在最后、跑完全程回库，都与叫来的车相同；车库在表定出库前后照样让表定那一班先出。
+- 与玩家叫车分开：不占线路的叫车车数（`activeCallsByLine`），玩家叫车时把它当普通班次（算进下一班几分钟到，不算同方向已叫的车）；跑完后被玩家叫车接走跑的那一趟摘掉加开标记。
+- 还没派出的加开与叫车同一张表存库（`pending_calls`，表里没有类型一栏）：方向一栏写 `EXTRA:<交路>:<车库节点>`（`ExtraTrips.Key`），叫车时刻一栏写计划发车时刻；读库时按方向一栏认成加开（`PendingCall#fromRecord`，内存里的待派单带明确的 `extra` 标记）。重启后按原编号、原计划时刻重新出票；找回之前 `/fta depot extra list|cancel` 先读库，撤销直接从库里去掉。过了计划时刻 `ExtraTrips.TIMEOUT`（30 分钟）还没出车就撤票，告诉加开的人（控制台加开的发到控制台）。玩家取消叫车的入口撤不掉加开。
+- `/fta depot extra list` 列出还没派出的加开（编号前 8 位、交路、计划时刻、车库）与正在跑的加开的车；`/fta depot extra cancel <编号>` 撤销还没派出的（编号写前几位即可）。权限同 `fetarute.depot.spawn`。
+- 站台屏状态格写“加开 / Extra”（`PidsViewBuilder.Calls#extraTrains`，先认加开再认叫车）；车内 HUD 不另标。

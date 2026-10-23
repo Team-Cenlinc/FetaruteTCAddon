@@ -135,8 +135,8 @@ class EtaStopTimingTest {
                 stop(2, c, RouteStopPassType.PASS, 0),
                 stop(3, d, RouteStopPassType.STOP, 0)),
             graph);
-    // 180 格匀速 6 格/秒。
-    assertEquals(30, passing.getForTrain(TRAIN, new EtaTarget.PlatformNode(d)).travelSec());
+    // 180 格 6 格/秒，到 D 刹停（比匀速开到 D 多约 3 秒）。
+    assertEquals(33, passing.getForTrain(TRAIN, new EtaTarget.PlatformNode(d)).travelSec());
 
     EtaService stopping =
         service(
@@ -147,9 +147,9 @@ class EtaStopTimingTest {
                 stop(2, c, RouteStopPassType.STOP, 0),
                 stop(3, d, RouteStopPassType.STOP, 0)),
             graph);
-    // A→B 10 秒；B→C、C→D 各从静止按 S 形曲线起步，各约 13.7 秒（恒加速度时 13 秒），合计约 37.3 秒。
-    // 修复前当成不停车通过，同样是 30 秒。
-    assertEquals(37, stopping.getForTrain(TRAIN, new EtaTarget.PlatformNode(d)).travelSec());
+    // A→B 约 13.3 秒（匀速 10 秒，加到站刹停）；B→C、C→D 各从静止按 S 形曲线起步、到站刹停，各约 16.9 秒，合计约 47.1 秒。
+    // 修复前当成不停车通过，与上面同一个数。
+    assertEquals(47, stopping.getForTrain(TRAIN, new EtaTarget.PlatformNode(d)).travelSec());
   }
 
   @Test
@@ -207,15 +207,15 @@ class EtaStopTimingTest {
     Map<Integer, NodeId> allocated = new HashMap<>();
     service.attachEffectiveWaypoints((name, route) -> List.of(a, allocated.getOrDefault(1, b1), c));
 
-    // 未选台：车站级，取最早到达的 1 道（42 格 7 秒）。
-    assertEquals(7, service.getForTrain(TRAIN, new EtaTarget.StopIndex(1)).travelSec());
+    // 未选台：车站级，取最早到达的 1 道（42 格、到站刹停约 10 秒）。
+    assertEquals(10, service.getForTrain(TRAIN, new EtaTarget.StopIndex(1)).travelSec());
 
     allocated.put(1, b2);
     service.invalidateTrainEta(TRAIN);
-    // 选到 2 道：按 198 格 33 秒估算；拿占位的 1 道来问也落到 2 道。
-    assertEquals(33, service.getForTrain(TRAIN, new EtaTarget.StopIndex(1)).travelSec());
-    assertEquals(33, service.getForTrain(TRAIN, new EtaTarget.PlatformNode(b1)).travelSec());
-    assertEquals(33, service.getForTrain(TRAIN, EtaTarget.nextStop()).travelSec());
+    // 选到 2 道：按 198 格、到站刹停约 36 秒估算；拿占位的 1 道来问也落到 2 道。
+    assertEquals(36, service.getForTrain(TRAIN, new EtaTarget.StopIndex(1)).travelSec());
+    assertEquals(36, service.getForTrain(TRAIN, new EtaTarget.PlatformNode(b1)).travelSec());
+    assertEquals(36, service.getForTrain(TRAIN, EtaTarget.nextStop()).travelSec());
     assertEquals(Optional.of(b2), service.effectiveStopNode(TRAIN, 1));
   }
 
@@ -241,7 +241,7 @@ class EtaStopTimingTest {
 
     // 修复前按占位股道寻路：NO_PATH，站牌与预计晚点都是空的。
     assertFalse(result.reasons().contains(EtaReason.NO_PATH));
-    assertEquals(10, result.travelSec());
+    assertEquals(13, result.travelSec(), "60 格 6 格/秒、到站刹停");
     assertTrue(result.etaEpochMillis() > 0L);
   }
 

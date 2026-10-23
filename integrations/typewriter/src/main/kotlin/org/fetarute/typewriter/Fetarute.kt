@@ -35,7 +35,7 @@ private fun fetaruteApi(): FetaruteApi? {
         if (!warnedIncompatible) {
             warnedIncompatible = true
             logger.warning(
-                "[FetaruteTC] FetaruteTCAddon API ${api.version()} is too old; $REQUIRED_API or newer is required"
+                "[FetaruteTC] FetaruteTCAddon 公开 API ${api.version()} 版本过旧，需要 $REQUIRED_API 或更新版本"
             )
         }
         return null

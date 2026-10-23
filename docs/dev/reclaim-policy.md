@@ -23,6 +23,8 @@
 抢在回库班前面把车带走时车会开去别的车库，回库班的票则一直空等（`折返票据等待过久`），站牌照交路写的终点也成了错的。
 
 回收派票时**先试列车所绑交路的回库线路**（`ReclaimManager#setPreferredReturnRoute`，装的是 `TimetableService#returnRouteOf`），试不成再按原顺序试其它线路。
+
+回库线路按编组方案分流：从本站出发的回库线路里，方案接这辆车车型的（`TicketAssigner#acceptsConsist`，没绑方案的算接）就只派这些，顺序照上一条；一条都不接时照样派回库（日志 `回收: 没有接这个车型的回库线路，照样派回库`）。方案外的车——按整列出车的联挂主干、叫车的折返车——摘了交路以后要靠这一条回库，不然会一直搁在线上。强制分配（`SimpleTicketAssigner#forceAssign`）本身不再按车型拒。
 派车成功后通知时刻表结清交路（`ReclaimManager#setReclaimListener` → `TimetableService#reclaimed`）：沿交路自己的回库线路走的，算跑了带客回库班
 （绑上那一班，`TIMETABLE_RECLAIM_AS_RETURN_LEG`）；走别的线路的，车离开交路（交路还有班次时转空缺交给替补，跑完的那一趟照旧算跑完）。
 两种情况交路的回库票都不再等它，按时刻到期撤下，不再在站牌上挂着。

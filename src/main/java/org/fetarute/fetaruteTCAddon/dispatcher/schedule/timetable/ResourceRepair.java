@@ -376,11 +376,11 @@ public final class ResourceRepair {
           ConflictAbsorption.classifyWaits(
               internal,
               current,
-              TimetableOccupancyProjector.project(
-                  current, input.profiles(), input.zeroSecondOfDay()),
+              occupancyWithNeighbors(input, current),
               input.index(),
               input.separationSeconds(),
-              input.maxWaitSeconds());
+              input.maxWaitSeconds(),
+              rescanner.allProfiles);
       Map<UUID, List<TimetableConflictChecker.Conflict>> blockedTrips = new HashMap<>();
       for (ConflictAbsorption.Residual residual : residuals) {
         UUID tripId = state.tripIdOf(residual.mover());
@@ -433,6 +433,19 @@ public final class ResourceRepair {
       Input input,
       Map<UUID, TimetableConflictChecker.RouteProfile> allProfiles,
       Timetable current) {
+    TimetableOccupancyProjector.Occupancy occupancy = occupancyWithNeighbors(input, current);
+    return TimetableConflictChecker.check(
+        input.index(),
+        allProfiles,
+        occupancy.movements(),
+        occupancy.stays(),
+        input.separationSeconds(),
+        TimetableConflictChecker.vehicleOf(current));
+  }
+
+  /** 容量分类与冲突扫描共用全部占用，避免让车顺推漏掉邻表占位。 */
+  private static TimetableOccupancyProjector.Occupancy occupancyWithNeighbors(
+      Input input, Timetable current) {
     TimetableOccupancyProjector.Occupancy occupancy =
         TimetableOccupancyProjector.project(current, input.profiles(), input.zeroSecondOfDay());
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>(occupancy.movements());
@@ -441,13 +454,7 @@ public final class ResourceRepair {
       movements.addAll(neighbor.movements());
       stays.addAll(neighbor.stays());
     }
-    return TimetableConflictChecker.check(
-        input.index(),
-        allProfiles,
-        movements,
-        stays,
-        input.separationSeconds(),
-        TimetableConflictChecker.vehicleOf(current));
+    return new TimetableOccupancyProjector.Occupancy(movements, stays);
   }
 
   /**
@@ -694,7 +701,7 @@ public final class ResourceRepair {
     private final Map<UUID, TimetableConflictChecker.RouteProfile> allProfiles;
     private final Rescan mode;
     private final java.util.function.Function<String, String> vehicleOf;
-    private final Set<UUID> returnRouteIds;
+    private final Set<UUID> legRouteIds;
     private final int serviceStartSecondOfDay;
     private final Map<String, List<TimetableConflictChecker.Conflict>> byResource = new HashMap<>();
     private OccupationIndex occupations;
@@ -709,7 +716,7 @@ public final class ResourceRepair {
       this.allProfiles = allProfiles;
       this.mode = mode;
       this.vehicleOf = TimetableConflictChecker.vehicleOf(initial);
-      this.returnRouteIds = TimetableOccupancyProjector.returnRouteIdsOf(initial);
+      this.legRouteIds = TimetableOccupancyProjector.legRouteIdsOf(initial);
       this.serviceStartSecondOfDay = initial.serviceStartSecondOfDay();
       replaceAll(
           mode == Rescan.FULL ? scan(input, allProfiles, initial).conflicts() : rebuild(initial));
@@ -747,7 +754,7 @@ public final class ResourceRepair {
                 rewritten.duty(),
                 rewritten.trips(),
                 input.profiles(),
-                returnRouteIds,
+                legRouteIds,
                 serviceStartSecondOfDay,
                 input.zeroSecondOfDay());
         movements = occupancy.movements();
@@ -813,15 +820,10 @@ public final class ResourceRepair {
 
     /** 整表重建索引，交回全表冲突。 */
     private List<TimetableConflictChecker.Conflict> rebuild(Timetable current) {
-      TimetableOccupancyProjector.Occupancy occupancy =
-          TimetableOccupancyProjector.project(current, input.profiles(), input.zeroSecondOfDay());
-      List<TimetableConflictChecker.Movement> movements = new ArrayList<>(occupancy.movements());
-      List<TimetableConflictChecker.Stay> stays = new ArrayList<>(occupancy.stays());
-      for (NeighborTimetable neighbor : input.neighbors()) {
-        movements.addAll(neighbor.movements());
-        stays.addAll(neighbor.stays());
-      }
-      occupations = OccupationIndex.of(input.index(), allProfiles, movements, stays, vehicleOf);
+      TimetableOccupancyProjector.Occupancy occupancy = occupancyWithNeighbors(input, current);
+      occupations =
+          OccupationIndex.of(
+              input.index(), allProfiles, occupancy.movements(), occupancy.stays(), vehicleOf);
       return occupations.scanAll(input.separationSeconds()).conflicts();
     }
 
@@ -1160,7 +1162,10 @@ public final class ResourceRepair {
           create == null || create.stops().isEmpty()
               ? 0
               : create.stops().get(create.stops().size() - 1).arrivalOffsetSeconds();
-      int start = duty.plannedStartSecondOfDay() - input.zeroSecondOfDay() + startDelay[d];
+      // 与 TerminalSerializer.rewriteDuty 同一口径：出库跟着首班的延后一起走，再加出库自己的延后。
+      int firstDelta = firstDeparture - nominal.get(first.id());
+      int start =
+          duty.plannedStartSecondOfDay() - input.zeroSecondOfDay() + firstDelta + startDelay[d];
       return Math.min(start + run, firstDeparture);
     }
 
@@ -1184,10 +1189,14 @@ public final class ResourceRepair {
       if (returnDelay[d] + wait > input.toleranceSeconds()) {
         return false;
       }
-      VehicleDuty duty = table.duties().get(d);
-      int dutyStart = duty.plannedStartSecondOfDay() - input.zeroSecondOfDay() + startDelay[d];
-      int end = duty.plannedEndSecondOfDay() - input.zeroSecondOfDay() + returnDelay[d] + wait;
-      if (end - dutyStart > input.limits().maxDutyDurationSeconds()) {
+      // 时长按改写后的交路量：班次让车、出库晚发都已经挪过首末两端，拿原表的起讫会少算。
+      TerminalSerializer.RewrittenDuty rewritten = rewriteOne(d);
+      if (rewritten == null) {
+        return false;
+      }
+      VehicleDuty duty = rewritten.duty();
+      if ((long) duty.plannedEndSecondOfDay() + wait - duty.plannedStartSecondOfDay()
+          > input.limits().maxDutyDurationSeconds()) {
         return false;
       }
       returnDelay[d] += wait;

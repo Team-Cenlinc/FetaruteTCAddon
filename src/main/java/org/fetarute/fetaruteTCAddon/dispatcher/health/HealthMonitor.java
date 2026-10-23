@@ -6,6 +6,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -29,6 +30,9 @@ public final class HealthMonitor {
   private final ConfigManager configManager;
   private final Consumer<String> debugLogger;
   private final Supplier<Set<String>> activeTrainNamesSupplier;
+
+  /** 采样静止受管列车的实时足迹，用来找叠在一起的车。 */
+  private final Supplier<List<TrainOverlapDetector.Sample>> overlapSampler;
 
   private final HealthAlertBus alertBus;
   private final TrainHealthMonitor trainMonitor;
@@ -63,7 +67,14 @@ public final class HealthMonitor {
       DwellRegistry dwellRegistry,
       ConfigManager configManager,
       Consumer<String> debugLogger) {
-    this(dispatchService, occupancyManager, dwellRegistry, configManager, debugLogger, null);
+    this(
+        dispatchService,
+        occupancyManager,
+        dwellRegistry,
+        configManager,
+        debugLogger,
+        null,
+        new TrainOverlapSampler(dispatchService, debugLogger));
   }
 
   HealthMonitor(
@@ -73,11 +84,30 @@ public final class HealthMonitor {
       ConfigManager configManager,
       Consumer<String> debugLogger,
       Supplier<Set<String>> activeTrainNamesSupplier) {
+    this(
+        dispatchService,
+        occupancyManager,
+        dwellRegistry,
+        configManager,
+        debugLogger,
+        activeTrainNamesSupplier,
+        List::of);
+  }
+
+  HealthMonitor(
+      RuntimeDispatchService dispatchService,
+      OccupancyManager occupancyManager,
+      DwellRegistry dwellRegistry,
+      ConfigManager configManager,
+      Consumer<String> debugLogger,
+      Supplier<Set<String>> activeTrainNamesSupplier,
+      Supplier<List<TrainOverlapDetector.Sample>> overlapSampler) {
     this.dispatchService = Objects.requireNonNull(dispatchService, "dispatchService");
     this.occupancyManager = Objects.requireNonNull(occupancyManager, "occupancyManager");
     this.configManager = configManager;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
     this.activeTrainNamesSupplier = activeTrainNamesSupplier;
+    this.overlapSampler = overlapSampler != null ? overlapSampler : List::of;
 
     this.alertBus = new HealthAlertBus();
     this.trainMonitor =
@@ -227,13 +257,15 @@ public final class HealthMonitor {
     RuntimeDispatchService.CleanupResult runtimeCleanup =
         dispatchService.cleanupOrphanOccupancyClaimsWithReport(activeTrains);
     TrainHealthMonitor.CheckResult trainResult = trainMonitor.check(activeTrains, now);
+    int overlapFixed = checkTrainOverlaps(now);
     OccupancyHealer.HealResult occupancyResult = occupancyHealer.heal(activeTrains, now);
 
     int runtimeFixed =
         runtimeCleanup.removedProgress()
             + runtimeCleanup.releasedTrains()
             + runtimeCleanup.removedLayovers();
-    int totalFixed = trainResult.fixedCount() + occupancyResult.total() + runtimeFixed;
+    int totalFixed =
+        trainResult.fixedCount() + overlapFixed + occupancyResult.total() + runtimeFixed;
     if (totalFixed > 0) {
       fixCount.add(totalFixed);
     }
@@ -270,13 +302,15 @@ public final class HealthMonitor {
     RuntimeDispatchService.CleanupResult runtimeCleanup =
         dispatchService.cleanupOrphanOccupancyClaimsWithReport(activeTrains);
     TrainHealthMonitor.CheckResult trainResult = trainMonitor.check(activeTrains, now);
+    int overlapFixed = checkTrainOverlaps(now);
     OccupancyHealer.HealResult occupancyResult = occupancyHealer.heal(activeTrains, now);
 
     int runtimeFixed =
         runtimeCleanup.removedProgress()
             + runtimeCleanup.releasedTrains()
             + runtimeCleanup.removedLayovers();
-    int totalFixed = trainResult.fixedCount() + occupancyResult.total() + runtimeFixed;
+    int totalFixed =
+        trainResult.fixedCount() + overlapFixed + occupancyResult.total() + runtimeFixed;
     if (totalFixed > 0) {
       fixCount.add(totalFixed);
     }
@@ -304,6 +338,7 @@ public final class HealthMonitor {
     RuntimeDispatchService.CleanupResult runtimeCleanup =
         dispatchService.cleanupOrphanOccupancyClaimsWithReport(activeTrains);
     TrainHealthMonitor.CheckResult trainResult = trainMonitor.check(activeTrains, now);
+    int overlapFixed = checkTrainOverlaps(now);
     OccupancyHealer.HealResult occupancyResult = occupancyHealer.heal(activeTrains, now);
     int forcedUnlock = trainMonitor.forceUnlockNow(activeTrains, now);
 
@@ -312,7 +347,11 @@ public final class HealthMonitor {
             + runtimeCleanup.releasedTrains()
             + runtimeCleanup.removedLayovers();
     int totalFixed =
-        trainResult.fixedCount() + occupancyResult.total() + forcedUnlock + runtimeFixed;
+        trainResult.fixedCount()
+            + overlapFixed
+            + occupancyResult.total()
+            + forcedUnlock
+            + runtimeFixed;
     if (totalFixed > 0) {
       fixCount.add(totalFixed);
     }
@@ -337,6 +376,18 @@ public final class HealthMonitor {
     trainMonitor.clear();
     alertBus.clear();
     lastCheckTime = Instant.EPOCH;
+  }
+
+  /** 找叠在一起的车并交给列车健康检查处理；采样出错时本轮跳过。 */
+  private int checkTrainOverlaps(Instant now) {
+    List<TrainOverlapDetector.Sample> samples;
+    try {
+      samples = overlapSampler.get();
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept("HEALTH_TRAIN_OVERLAP_SAMPLE_FAILED error=" + failure);
+      return 0;
+    }
+    return trainMonitor.resolveTrainOverlaps(TrainOverlapDetector.overlappingPairs(samples), now);
   }
 
   private Set<String> collectActiveTrainNames() {

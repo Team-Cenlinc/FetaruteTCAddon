@@ -71,6 +71,7 @@ public final class DriverStationStop {
   private boolean doorsTakenOver;
   private boolean doorsHandedOver;
   private boolean skipped;
+  private boolean doorsByGuard;
 
   /** 列车中心对准停车点（车站牌子的默认对位）。 */
   public DriverStationStop(
@@ -191,6 +192,16 @@ public final class DriverStationStop {
   /** 结束这次停站。 */
   public void end() {
     phase = Phase.ENDED;
+  }
+
+  /** 这一站交给了车掌：车门由车掌开关，开错侧门、站台兜底代开都是车掌的事，不记给驾驶员。 */
+  public void markDoorsByGuard() {
+    doorsByGuard = true;
+  }
+
+  /** 这一站车门由车掌开关。 */
+  public boolean doorsByGuard() {
+    return doorsByGuard;
   }
 
   /** 越站：越过停车点太多，本站不停、不开门，停站就此结束。 */

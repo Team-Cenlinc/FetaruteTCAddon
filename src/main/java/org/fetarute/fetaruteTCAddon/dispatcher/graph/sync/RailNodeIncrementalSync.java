@@ -31,7 +31,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 /**
  * rail_nodes 增量同步：在建牌/拆牌时按单节点 upsert/delete 更新存储，并在节点集合变化时标记旧图失效。
  *
- * <p>注意：这里只同步“节点牌子类节点”（waypoint/autostation/depot）。轨道拓扑/边变化仍需运维执行 /fta graph build。
+ * <p>写入来自节点牌子（waypoint/autostation/depot）的建牌与拆牌；道岔节点只在建图时写入，这里只负责删除——道岔牌子改成写条件或 tag 的道岔时，由 {@link
+ * org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignChangeListener}
+ * 经此删掉库里的道岔节点。轨道拓扑/边变化仍需运维执行 /fta graph build 或 refresh。
  *
  * <p>失效分两级：变化的节点都没有交路在用（{@link GraphNodeUsage}）时只打标记、旧图继续在用；任何一个在用或判不了， 旧图移出内存。两种都会通知 {@link
  * GraphStaleListener}。

@@ -79,7 +79,7 @@ class TimetableBuilderTighteningTest {
     // 回退提示只列仍被放宽的组：最小的组间隔已不能代表"放宽到多少"。
     String fallback =
         result.warnings().stream()
-            .filter(text -> text.contains("已回退到最小可行间隔"))
+            .filter(text -> text.contains("已回退到搜索找到的可行间隔"))
             .findFirst()
             .orElseThrow();
     assertTrue(fallback.contains("tight 120→" + effective.get("tight") + "s"), fallback);
@@ -178,33 +178,50 @@ class TimetableBuilderTighteningTest {
     assertEquals(0, progress.snapshot().fullBuilds());
   }
 
+  /** 放宽搜索与逐组收紧里每次完整构建的相位候选并行评：结果与串行逐字段相同，完整构建次数也相同。 */
+  @Test
+  void aParallelBuildEqualsTheSerialOne() {
+    TimetableBuilder.BuildInput input = input();
+    TimetableBuildOptions options = options(Map.of("tight", 120, "free", 600));
+    TimetableBuildProgress serialProgress = new TimetableBuildProgress();
+    TimetableBuildResult serial =
+        new TimetableBuilder(serialProgress, 1).build(input, options, BUILT_AT);
+    TimetableBuildProgress parallelProgress = new TimetableBuildProgress();
+    TimetableBuildResult parallel =
+        new TimetableBuilder(parallelProgress, 4).build(input, options, BUILT_AT);
+
+    assertTrue(serial.success(), () -> serial.warnings().toString());
+    assertEquals(serial, parallel);
+    assertEquals(serialProgress.snapshot().fullBuilds(), parallelProgress.snapshot().fullBuilds());
+  }
+
   private TimetableBuildResult build(TimetableBuildOptions options) {
     return build(options, TimetableBuildProgress.untracked());
   }
 
   private TimetableBuildResult build(
       TimetableBuildOptions options, TimetableBuildProgress progress) {
-    return new TimetableBuilder(progress)
-        .build(
-            new TimetableBuilder.BuildInput(
-                UUID.randomUUID(),
-                UUID.randomUUID(),
-                UUID.randomUUID(),
-                UUID.randomUUID(),
-                "TT",
-                "收紧",
-                List.of(
-                    operation("RA", List.of(A, B, C), "tight"),
-                    leg("CRT", RouteOperationType.CREATE, List.of(DEP, A), DEP, "tight"),
-                    leg("RET", RouteOperationType.RETURN, List.of(C, DEP), DEP, "tight"),
-                    operation("RX", List.of(X, Y, Z), "free"),
-                    leg("CRQ", RouteOperationType.CREATE, List.of(DQ, X), DQ, "free"),
-                    leg("REQ", RouteOperationType.RETURN, List.of(Z, DQ), DQ, "free")),
-                graph,
-                TimetableTestFixtures.perEdgeSpeedModel(),
-                Optional.empty()),
-            options,
-            BUILT_AT);
+    return new TimetableBuilder(progress).build(input(), options, BUILT_AT);
+  }
+
+  private TimetableBuilder.BuildInput input() {
+    return new TimetableBuilder.BuildInput(
+        UUID.randomUUID(),
+        UUID.randomUUID(),
+        UUID.randomUUID(),
+        UUID.randomUUID(),
+        "TT",
+        "收紧",
+        List.of(
+            operation("RA", List.of(A, B, C), "tight"),
+            leg("CRT", RouteOperationType.CREATE, List.of(DEP, A), DEP, "tight"),
+            leg("RET", RouteOperationType.RETURN, List.of(C, DEP), DEP, "tight"),
+            operation("RX", List.of(X, Y, Z), "free"),
+            leg("CRQ", RouteOperationType.CREATE, List.of(DQ, X), DQ, "free"),
+            leg("REQ", RouteOperationType.RETURN, List.of(Z, DQ), DQ, "free")),
+        graph,
+        TimetableTestFixtures.perEdgeSpeedModel(),
+        Optional.empty());
   }
 
   private static TimetableBuildOptions options(Map<String, Integer> intervals) {

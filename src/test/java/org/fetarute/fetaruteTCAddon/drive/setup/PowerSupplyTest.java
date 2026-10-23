@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -19,6 +20,33 @@ class PowerSupplyTest {
     assertEquals(Optional.of(PowerSupply.SUPERCAP), PowerSupply.parse("super-capacitor"));
     assertTrue(PowerSupply.parse("steam").isEmpty());
     assertTrue(PowerSupply.parse(null).isEmpty());
+  }
+
+  /** 多模车的受电方式列表：逗号、加号、斜杠或空白分隔，按写的顺序去重；有一项认不出就整个认不出。 */
+  @Test
+  void parsesMultiModeLists() {
+    assertEquals(
+        Optional.of(List.of(PowerSupply.PTG6, PowerSupply.DIESEL)),
+        PowerSupply.parseList("ptg6, diesel"));
+    assertEquals(
+        Optional.of(List.of(PowerSupply.PTG5, PowerSupply.SUPERCAP)),
+        PowerSupply.parseList("ptg5+supercap"));
+    assertEquals(
+        Optional.of(List.of(PowerSupply.SHOE, PowerSupply.PTG5)),
+        PowerSupply.parseList("third-rail/ptg5 shoe"));
+    assertEquals(Optional.of(List.of(PowerSupply.PTG5)), PowerSupply.parseList("ptg5"));
+    assertTrue(PowerSupply.parseList("ptg5,steam").isEmpty());
+    assertTrue(PowerSupply.parseList(" ").isEmpty());
+    assertEquals("ptg6,diesel", PowerSupply.format(List.of(PowerSupply.PTG6, PowerSupply.DIESEL)));
+  }
+
+  /** 内燃、超级电容不靠接触网或第三轨，开进哪种供电区段都能走。 */
+  @Test
+  void onlyDieselAndSupercapAreSelfPowered() {
+    assertTrue(PowerSupply.DIESEL.selfPowered());
+    assertTrue(PowerSupply.SUPERCAP.selfPowered());
+    assertFalse(PowerSupply.PTG5.selfPowered());
+    assertFalse(PowerSupply.SHOE.selfPowered());
   }
 
   @Test

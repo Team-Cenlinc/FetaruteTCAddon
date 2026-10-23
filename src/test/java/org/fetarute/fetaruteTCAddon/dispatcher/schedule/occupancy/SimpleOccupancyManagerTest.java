@@ -1646,6 +1646,43 @@ class SimpleOccupancyManagerTest {
         "失败方仍须服从既有占用与队列顺序");
   }
 
+  /** 联挂进站：对方的占用 canEnter 已经放行，前瞻也不能把它当成前方风险，否则同一拍就把刚批下的进路回滚掉。 */
+  @Test
+  void coLocatedPartnerClaimIsNotAnAdvisoryRiskButOtherTrainsStillAre() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    manager.setCoLocationPolicy(
+        (request, resource, claim) ->
+            "trunk".equals(request.trainName()) && "feeder".equals(claim.trainName()));
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    OccupancyResource platform = OccupancyResource.forNode(NodeId.of("TEST:S:HHU:1"));
+    OccupancyResource beyond = OccupancyResource.forNode(NodeId.of("TEST:S:HHU:1:EXIT"));
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest("feeder", Optional.empty(), now, List.of(platform), Map.of()))
+            .allowed());
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest("other", Optional.empty(), now, List.of(beyond), Map.of()))
+            .allowed());
+    OccupancyRequest trunk =
+        new OccupancyRequest("trunk", Optional.empty(), now, List.of(platform, beyond), Map.of());
+
+    assertTrue(
+        manager
+            .canEnter(
+                new OccupancyRequest("trunk", Optional.empty(), now, List.of(platform), Map.of()))
+            .allowed());
+    List<AdvisoryRisk> risks = manager.scanAdvisoryRisks(trunk.asLookaheadPreview());
+
+    assertEquals(1, risks.size(), risks.toString());
+    assertEquals("other", risks.get(0).claim().trainName());
+    assertEquals(beyond, risks.get(0).resource());
+  }
+
   @Test
   void multipleSwitcherQueueLosersCannotBackBlockIncumbentAndRemainSerialized() {
     SimpleOccupancyManager manager =

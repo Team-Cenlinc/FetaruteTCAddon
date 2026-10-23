@@ -82,7 +82,7 @@ public final class CabFaults {
   private static final long TICKS_PER_SECOND = 20L;
 
   private final FaultConfig config;
-  private final boolean electric;
+  private boolean electric;
   private final RandomGenerator random;
   private final Set<CabFault> active = EnumSet.noneOf(CabFault.class);
   private final List<Event> events = new ArrayList<>();
@@ -105,6 +105,21 @@ public final class CabFaults {
   /** 使用默认随机数。 */
   public CabFaults(FaultConfig config, boolean electric) {
     this(config, electric, new SplittableRandom());
+  }
+
+  /** 多模车换了受电方式：换成非电力时只靠电力才有的故障（受电中断、主断跳闸）随之解除。 */
+  public void setElectric(boolean electric) {
+    this.electric = electric;
+    if (electric) {
+      return;
+    }
+    for (CabFault fault : List.copyOf(active)) {
+      if (fault.electricOnly()) {
+        active.remove(fault);
+        events.add(new Event(fault, Kind.CLEARED));
+      }
+    }
+    breakerStage = null;
   }
 
   /** 这列车会不会发生这个故障。 */

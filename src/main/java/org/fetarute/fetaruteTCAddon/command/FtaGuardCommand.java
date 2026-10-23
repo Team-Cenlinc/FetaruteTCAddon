@@ -126,6 +126,17 @@ public final class FtaGuardCommand {
         manager
             .commandBuilder("fta")
             .literal("guard")
+            .literal("split")
+            .permission(player)
+            .required(
+                "option",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings("keep", "switch", "end"))
+            .handler(ctx -> handleSplit(ctx.sender(), ((String) ctx.get("option")).trim())));
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("guard")
             .literal("stop")
             .required("player", StringParser.stringParser(), guardSuggestions)
             .permission(admin)
@@ -144,7 +155,7 @@ public final class FtaGuardCommand {
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(locale().component("drive.guard.command.help.header"));
     if (sender.hasPermission(DrivePermissions.GUARD)) {
-      for (String sub : List.of("on", "off", "seat", "status", "tasks", "task")) {
+      for (String sub : List.of("on", "off", "seat", "status", "tasks", "task", "split")) {
         sender.sendMessage(locale().component("drive.guard.command.help." + sub));
       }
     }
@@ -182,6 +193,19 @@ public final class FtaGuardCommand {
       return;
     }
     guards.get().stop(player.getUniqueId(), GuardSession.EndReason.COMMAND);
+  }
+
+  private void handleSplit(CommandSender sender, String option) {
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(locale().component("drive.guard.command.player-only"));
+      return;
+    }
+    Optional<GuardSessionManager> guards = guards();
+    if (guards.isEmpty()) {
+      player.sendMessage(locale().component("drive.guard.command.not-on-duty"));
+      return;
+    }
+    guards.get().chooseSplit(player, option);
   }
 
   private void handleSeat(CommandSender sender) {

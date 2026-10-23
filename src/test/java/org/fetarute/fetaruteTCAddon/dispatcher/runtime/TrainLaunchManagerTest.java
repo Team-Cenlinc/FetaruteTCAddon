@@ -876,6 +876,34 @@ class TrainLaunchManagerTest {
     assertTrue(speedCaptor.getValue() < 22.2 / 20.0, "不补牵引时速度上限仍按命令限幅逐步抬升");
   }
 
+  /**
+   * AutoStation 的停站刹车动作在走时，信号变化、降速都不再下发发车动作：它会排在刹车动作后面，TrainCarts 在刹车动作停住的同一 tick 就开始执行它，
+   * 车从停车点又开出去。
+   */
+  @Test
+  void noLaunchIsQueuedBehindTheStationStopCurve() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    for (double speedBps : new double[] {8.0, 15.0}) {
+      TagStore tags = slowTrainTags("train-stop-curve-" + speedBps);
+      RuntimeTrainHandle train = movingAt(speedBps, true);
+      when(train.stopCurveRemainingBlocks()).thenReturn(java.util.OptionalDouble.of(12.0));
+
+      manager.applyControl(
+          train,
+          tags.properties(),
+          SignalAspect.PROCEED,
+          10.0,
+          new TrainConfig(TrainType.EMU, 1.0, 2.0),
+          true,
+          OptionalLong.empty(),
+          Optional.empty(),
+          runtimeSettings(0.0, 1.0, 1.0));
+
+      verify(train, never()).accelerateTo(anyDouble(), anyDouble());
+      verify(tags.properties()).setSpeedLimit(anyDouble());
+    }
+  }
+
   /** 车速比限速只低 0.15 格/秒（不到 1%）也补牵引：牵引目标就是限速本身，否则车会一直比编表曲线慢一截。 */
   @Test
   void movingTrainSlightlyBelowItsLimitIsPulledUpToTheLimit() {

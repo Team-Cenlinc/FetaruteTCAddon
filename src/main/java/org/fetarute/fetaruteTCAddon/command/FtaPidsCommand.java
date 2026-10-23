@@ -25,6 +25,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStickMenu;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusViews;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -51,6 +52,9 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  * 公司里有管理类角色的成员只能管本公司车站的屏幕；改绑车站时新车站也须归其管理。
  */
 public final class FtaPidsCommand {
+
+  /** 按运营商轮播：清空清单（回到只显示本运营商）。 */
+  private static final String ROTATE_CLEAR = "clear";
 
   private static final int PAGE_SIZE = 10;
   private static final int SUGGESTION_LIMIT = 20;
@@ -140,6 +144,7 @@ public final class FtaPidsCommand {
             .handler(this::setOperator));
     registerSet(manager, screens, "platform", platformSuggestions(), this::togglePlatform);
     registerSet(manager, screens, "line", lineSuggestions(), this::toggleLine);
+    registerSet(manager, screens, "rotate", rotateSuggestions(), this::toggleRotate);
     registerSet(manager, screens, "layout", screenLayoutSuggestions(), this::changeLayout);
     registerSet(manager, screens, "page", pageSuggestions(), this::togglePage);
     registerSet(
@@ -372,7 +377,9 @@ public final class FtaPidsCommand {
           save(
               sender,
               service,
-              screen.withBinding(Optional.of(station), boundPlatforms, Set.of(), service.now()));
+              service.keepRotationInCompany(
+                  screen.withBinding(
+                      Optional.of(station), boundPlatforms, Set.of(), service.now())));
         });
   }
 
@@ -397,7 +404,11 @@ public final class FtaPidsCommand {
             sender.sendMessage(locale().component("pids.menu.no-permission"));
             return;
           }
-          save(sender, service, screen.withOperator(operator, Set.of(), service.now()));
+          save(
+              sender,
+              service,
+              service.keepRotationInCompany(
+                  screen.withOperator(operator, Set.of(), service.now())));
         });
   }
 
@@ -454,6 +465,52 @@ public final class FtaPidsCommand {
             screen.platforms(),
             PidsScreen.toggle(screen.lines(), value.trim().toUpperCase(Locale.ROOT)),
             service.now()));
+  }
+
+  /** 按运营商轮播的增删（见 {@link PidsScreen#toggleRotation}）：只能选同一公司的运营商；{@code clear} 回到只显示本运营商。 */
+  private Optional<PidsScreen> toggleRotate(
+      CommandSender sender, PidsService service, PidsScreen screen, String value) {
+    if (!service.hasLineStatus(screen)) {
+      sender.sendMessage(locale().component("command.pids.set.rotate-line-status-only"));
+      return Optional.empty();
+    }
+    Optional<String> own = screen.operatorCode();
+    if (own.isEmpty()) {
+      sender.sendMessage(locale().component("command.pids.set.rotate-need-operator"));
+      return Optional.empty();
+    }
+    String operator = value.trim().toUpperCase(Locale.ROOT);
+    if (ROTATE_CLEAR.equalsIgnoreCase(operator)) {
+      return Optional.of(screen.withRotation(List.of(), service.now()));
+    }
+    if (!service.rotationChoices(screen).contains(operator)) {
+      sender.sendMessage(
+          locale()
+              .component(
+                  service.directory().operatorName(operator).isEmpty()
+                      ? "command.pids.set.unknown-operator"
+                      : "command.pids.set.rotate-other-company",
+                  Map.of("operator", operator)));
+      return Optional.empty();
+    }
+    if (!service.canManageOperator(sender, operator)) {
+      sender.sendMessage(locale().component("pids.menu.no-permission"));
+      return Optional.empty();
+    }
+    return Optional.of(
+        screen.withRotation(
+            PidsScreen.toggleRotation(screen.rotation(), own.get(), operator), service.now()));
+  }
+
+  /** 轮播运营商补全：同一公司的运营商，以及清空。 */
+  private SuggestionProvider<CommandSender> rotateSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          List<String> suggestions = new ArrayList<>(List.of("<operator>", ROTATE_CLEAR));
+          screenOf(ctx)
+              .ifPresent(pair -> suggestions.addAll(pair.service().rotationChoices(pair.screen())));
+          return suggestions;
+        });
   }
 
   private Optional<PidsScreen> changeLayout(
@@ -816,10 +873,21 @@ public final class FtaPidsCommand {
           List<String> suggestions = new ArrayList<>(List.of("<line>", PidsScreen.ALL));
           screenOf(ctx)
               .ifPresent(
-                  pair ->
-                      pair.service().filterableLines(pair.screen()).stream()
-                          .map(line -> line.code())
-                          .forEach(suggestions::add));
+                  pair -> {
+                    pair.service().filterableLines(pair.screen()).stream()
+                        .map(line -> line.code())
+                        .forEach(suggestions::add);
+                    // 按运营商轮播的其他几家：写成“运营商:线路”只管那一家
+                    String own = pair.screen().operatorCode().orElse("");
+                    pair.screen().rotation().stream()
+                        .filter(operator -> !operator.equalsIgnoreCase(own))
+                        .forEach(
+                            operator ->
+                                PidsLineStatusViews.operatorLineChips(
+                                        pair.service().directory(), operator)
+                                    .forEach(
+                                        line -> suggestions.add(operator + ":" + line.code())));
+                  });
           return suggestions;
         });
   }

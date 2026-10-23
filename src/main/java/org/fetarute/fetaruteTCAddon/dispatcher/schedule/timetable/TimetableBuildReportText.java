@@ -192,6 +192,92 @@ public final class TimetableBuildReportText {
     return out;
   }
 
+  /**
+   * 严格模式取消的一班："车次 X（route R 名义 HH:mm:ss 发车）：[判决] 后车 等 Ns 于 让车点：冲突明细"。
+   *
+   * @param tripCode 目标间隔原表（一班都没取消时）里这一班的车次号
+   * @param routeCode 所属 route
+   * @param departureText 名义发车时刻
+   * @param cause 让它取消的那处残余
+   * @param serviceStartSecondOfDay 计划窗口起点（冲突时刻换算成当日时钟）
+   */
+  public static String describeCancelled(
+      String tripCode,
+      String routeCode,
+      String departureText,
+      ConflictAbsorption.Residual cause,
+      int serviceStartSecondOfDay) {
+    return String.format(
+        Locale.ROOT,
+        "  · 车次 %s（route %s 名义 %s 发车）：[%s] %s 等 %ds 于 %s：%s",
+        tripCode,
+        routeCode,
+        departureText,
+        describe(cause.verdict()),
+        cause.mover(),
+        cause.waitSeconds(),
+        waitingPointText(cause),
+        cause
+            .conflict()
+            .describe(seconds -> TimetableCsvExporter.clock(serviceStartSecondOfDay + seconds)));
+  }
+
+  /**
+   * 构建失败时的残余明细：只列让不掉的那些。先按判决、再按让车点汇总（同一判决里多的在前，同数按名字），然后给前几条明细。
+   *
+   * <p>可吸收的冲突运行时自己会让，列出来只会把真正卡住的那几处淹没。
+   */
+  public static List<String> describeUnabsorbable(
+      List<ConflictAbsorption.Residual> unabsorbable, int serviceStartSecondOfDay) {
+    List<String> out = new ArrayList<>();
+    if (unabsorbable == null || unabsorbable.isEmpty()) {
+      return out;
+    }
+    out.add("  让不掉的冲突按判决与让车点：");
+    Map<ConflictAbsorption.Verdict, Map<String, Integer>> byVerdict =
+        new java.util.EnumMap<>(ConflictAbsorption.Verdict.class);
+    for (ConflictAbsorption.Residual residual : unabsorbable) {
+      byVerdict
+          .computeIfAbsent(residual.verdict(), verdict -> new java.util.TreeMap<>())
+          .merge(waitingPointText(residual), 1, Integer::sum);
+    }
+    byVerdict.forEach(
+        (verdict, byPoint) -> {
+          List<Map.Entry<String, Integer>> points = new ArrayList<>(byPoint.entrySet());
+          points.sort(Map.Entry.<String, Integer>comparingByValue().reversed());
+          StringBuilder text = new StringBuilder();
+          int total = 0;
+          for (Map.Entry<String, Integer> point : points) {
+            if (text.length() > 0) {
+              text.append("、");
+            }
+            text.append(point.getKey()).append(' ').append(point.getValue());
+            total += point.getValue();
+          }
+          out.add("  · " + describe(verdict) + " " + total + " 处：" + text);
+        });
+    int shown = Math.min(unabsorbable.size(), TimetableBuildResult.CONFLICT_DETAIL_LIMIT);
+    for (int i = 0; i < shown; i++) {
+      ConflictAbsorption.Residual residual = unabsorbable.get(i);
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "  · [%s] %s 等 %ds 于 %s：%s",
+              describe(residual.verdict()),
+              residual.mover(),
+              residual.waitSeconds(),
+              waitingPointText(residual),
+              residual
+                  .conflict()
+                  .describe(
+                      seconds -> TimetableCsvExporter.clock(serviceStartSecondOfDay + seconds))));
+    }
+    if (unabsorbable.size() > shown) {
+      out.add("  · … 另有 " + (unabsorbable.size() - shown) + " 处");
+    }
+    return out;
+  }
+
   /** 取消的班次按 route + 原因归组，每组列出前几个时刻。 */
   public static List<String> describeDropped(List<TimetableBuildResult.DroppedTrip> dropped) {
     Map<String, List<TimetableBuildResult.DroppedTrip>> groups = new LinkedHashMap<>();
@@ -225,6 +311,44 @@ public final class TimetableBuildReportText {
     return out;
   }
 
+  /**
+   * 报告里"取消班次"一行的计数：总数后按原因分类写，原因按枚举顺序，缺的原因不写。
+   *
+   * @return 如 {@code "5（起终点缺出库/回库线路 2、严格模式取消让不掉的 3，详见下方警告）"}
+   */
+  public static String describeDroppedCount(List<TimetableBuildResult.DroppedTrip> dropped) {
+    Map<VehicleDutyPlanner.UnassignedReason, Integer> byReason =
+        new java.util.EnumMap<>(VehicleDutyPlanner.UnassignedReason.class);
+    for (TimetableBuildResult.DroppedTrip trip : dropped) {
+      byReason.merge(trip.reason(), 1, Integer::sum);
+    }
+    // 起点缺出库、终点缺回库两种合在一起写，与从前的说法一致。
+    int access =
+        byReason.getOrDefault(VehicleDutyPlanner.UnassignedReason.NO_CREATE_ACCESS, 0)
+            + byReason.getOrDefault(VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS, 0);
+    List<String> parts = new ArrayList<>();
+    if (access > 0) {
+      parts.add("起终点缺出库/回库线路 " + access);
+    }
+    byReason.forEach(
+        (reason, count) -> {
+          String label =
+              switch (reason) {
+                case NO_CREATE_ACCESS, NO_RETURN_ACCESS -> null;
+                case EXCEEDS_DUTY_LIMITS -> "单班超出交路时长上限";
+                case STUB_SATURATED -> "端点排队或让车累计超限";
+                case CONSIST_MISMATCH -> "车型不许跑";
+                case CONFLICT_CANCELLED -> "严格模式取消让不掉的";
+                case DECOUPLE_NO_VEHICLE -> "解编派生却没有解下的车";
+                case DECOUPLE_STRANDED -> "解下的车回不了库";
+              };
+          if (label != null) {
+            parts.add(label + " " + count);
+          }
+        });
+    return dropped.size() + "（" + String.join("、", parts) + "，详见下方警告）";
+  }
+
   public static String describe(TimetableConflictChecker.Kind kind) {
     return switch (kind) {
       case TRACK -> "区间";
@@ -241,6 +365,9 @@ public final class TimetableBuildReportText {
       case EXCEEDS_DUTY_LIMITS -> "单独一班连同出库、回库走行就超过交路时长上限";
       case STUB_SATURATED -> "端点排队或让车累计超限，等到能发车时交路已超上限或越过计划窗口";
       case CONSIST_MISMATCH -> "起点有车在等，但车型都不许跑这一班，也没有能出许可车型的出库线路";
+      case CONFLICT_CANCELLED -> "严格模式下这一班卷进让不掉的冲突，按 --max-cancel 取消";
+      case DECOUPLE_NO_VEHICLE -> "解编派生的班次：解编它的那一班主干没派上车，或解下的车赶不上";
+      case DECOUPLE_STRANDED -> "解编：切下的车就地待命或回库，但解编站没有能回库的线路、也没有班次接它（须改写法）";
     };
   }
 
@@ -534,8 +661,10 @@ public final class TimetableBuildReportText {
   }
 
   /**
-   * 搜索失败的文案：端点利用率超过 100% 时说"结构上不可能"，否则说"范围内没找到"并点名剩余冲突最多的资源。
+   * 搜索失败的文案：端点利用率超过 100% 时说"结构上不可能"，否则说"范围内没找到"并点名让不掉的冲突最多的资源。
    * 两种情况下运营者要做的事不同：前者改折返/权重/股道，后者改裕量或等下一轮把咽喉也串行。
+   *
+   * @param conflictsAtTarget 目标间隔下让不掉的那些冲突（可吸收的运行时自己会让，点名它们会指错地方）
    */
   public static String describeSearchFailure(
       int targetHeadway,
@@ -560,7 +689,7 @@ public final class TimetableBuildReportText {
         + targetHeadway
         + "s 在放宽到 "
         + limitHeadway
-        + "s 的范围内没有找到无冲突的间隔；剩余冲突集中在 "
+        + "s 的范围内没有找到无冲突的间隔；让不掉的冲突集中在 "
         + String.join("、", conflictsAtTarget.topResources(3))
         + "。检查单线区段、站台数量与折返时间";
   }

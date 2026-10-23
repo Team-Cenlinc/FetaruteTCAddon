@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph.explore;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 
 /** 轨道方块访问抽象，用于在“区间探索”阶段计算边与距离。 */
 public interface RailBlockAccess {
@@ -48,13 +49,12 @@ public interface RailBlockAccess {
   }
 
   /**
-   * 返回 predecessor 链中的每个位置是否足以覆盖相邻位置之间的全部实体轨迹方块。
+   * 解析节点所属轨道；生产访问器应使用轨道系统的牌子关联。
    *
-   * <p>默认 fail-closed。实现只有在 {@link #neighbors(RailBlockPos)} 保证逐方块相邻时才可返回 true；例如 TrainCarts/TCC
-   * junction 可能一步跨越长曲线，不能用两个端点冒充完整足迹。
+   * <p>默认实现供没有牌子关联概念的抽象轨道网络使用，沿用几何锚点。TrainCarts 实现必须覆盖，避免把平行股道合并。
    */
-  default boolean supportsExactBlockFootprint() {
-    return false;
+  default Set<RailBlockPos> findNodeRailAnchors(RailBlockPos center, NodeType type, int radius) {
+    return findNearestRailBlocks(center, radius);
   }
 
   /**
