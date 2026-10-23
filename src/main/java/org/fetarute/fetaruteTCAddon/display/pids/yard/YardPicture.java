@@ -65,17 +65,30 @@ public record YardPicture(
   /**
    * 站场内的一列车。
    *
+   * @param name 列车名（信号员控制台按它认选中的车、点车次窗时回传）
    * @param label 车次窗文字：车次号，没有时为列车名
    * @param lineColor 线路色；查不到时为空
    * @param lateness 晚点程度
    * @param runs 连续落在站场图上的车厢，按编组顺序分段：段内相邻车厢连成车身，不在图上的车厢处断开；第一段的第一节是车次窗的锚点
    */
   public record TrainMark(
+      String name,
       String label,
       Optional<Integer> lineColor,
       Lateness lateness,
       List<List<YardGeometry.Point>> runs) {
+
+    /** 列车名与车次窗文字相同（不按表运行的车）。 */
+    public TrainMark(
+        String label,
+        Optional<Integer> lineColor,
+        Lateness lateness,
+        List<List<YardGeometry.Point>> runs) {
+      this(label, label, lineColor, lateness, runs);
+    }
+
     public TrainMark {
+      Objects.requireNonNull(name, "name");
       Objects.requireNonNull(label, "label");
       lineColor = lineColor == null ? Optional.empty() : lineColor;
       Objects.requireNonNull(lateness, "lateness");

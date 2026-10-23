@@ -36,6 +36,9 @@ public final class PidsLayoutParser {
   /** 单块屏幕最多的地图行数或列数。 */
   static final int MAX_TILES = 8;
 
+  /** 信号员控制台点击区的最小边长（像素）。 */
+  static final int SIGNALBOX_MIN_TARGET = 16;
+
   /** 线路运行状况屏大行的默认样式（内置 3×5：一页 3 条）。 */
   private static final PidsLayout.StatusRow ROOMY =
       new PidsLayout.StatusRow(
@@ -184,12 +187,40 @@ public final class PidsLayoutParser {
               node.requireInt("height"),
               textStyle(node.child("label"), 12, 10, 6),
               node.optInt("note", 10)));
+      case "train-list" -> Optional.of(trainList(node));
+      case "signal-buttons" -> Optional.of(
+          new PidsLayout.SignalButtons(
+              node.requireInt("x"),
+              node.requireInt("y"),
+              node.requireInt("width"),
+              node.requireInt("height"),
+              node.child("gap").optInt("x", 8),
+              node.child("gap").optInt("y", 6),
+              textStyle(node.child("label"), 12, 10, 2)));
       case "" -> Optional.empty();
       default -> {
         node.problem("type", "未知组件类型 " + type);
         yield Optional.empty();
       }
     };
+  }
+
+  private static PidsLayout.TrainList trainList(Node node) {
+    Node header = node.child("header");
+    Node rows = node.child("rows");
+    Node columns = node.child("columns");
+    return new PidsLayout.TrainList(
+        node.requireInt("x"),
+        node.requireInt("y"),
+        node.requireInt("width"),
+        header.optInt("height", 14),
+        header.optInt("size", 10),
+        rows.optInt("count", 4),
+        rows.optInt("height", 24),
+        rows.optInt("size", 12),
+        columns.optInt("destination", 76),
+        columns.optInt("status", 180),
+        columns.optInt("delay", 352));
   }
 
   private static PidsLayout.LineStrip lineStrip(Node node) {
@@ -611,12 +642,18 @@ public final class PidsLayoutParser {
         if (widget instanceof PidsLayout.YardLegend && !yard) {
           problems.add("widgets[" + i + "]: 站场图例要与站场图组件放在同一个布局里");
         }
+        if ((widget instanceof PidsLayout.TrainList || widget instanceof PidsLayout.SignalButtons)
+            && !yard) {
+          problems.add("widgets[" + i + "]: 列车表与操作按钮要与站场图组件放在同一个布局里");
+        }
         if (yard) {
           if (!(widget instanceof PidsLayout.Clock
               || widget instanceof PidsLayout.StationTitle
               || widget instanceof PidsLayout.Yard
-              || widget instanceof PidsLayout.YardLegend)) {
-            problems.add("widgets[" + i + "]: 站场图屏只画站名、时钟、站场图与图例，不支持这个组件");
+              || widget instanceof PidsLayout.YardLegend
+              || widget instanceof PidsLayout.TrainList
+              || widget instanceof PidsLayout.SignalButtons)) {
+            problems.add("widgets[" + i + "]: 站场图屏只画站名、时钟、站场图、图例、列车表与操作按钮，不支持这个组件");
           }
         } else if (lineStatus) {
           if (!(widget instanceof PidsLayout.Clock || widget instanceof PidsLayout.LineStatus)) {
@@ -675,7 +712,46 @@ public final class PidsLayoutParser {
       } else if (widget instanceof PidsLayout.YardLegend l) {
         within(path, l.x(), l.y(), l.width(), l.height());
         sizes(path, l.label().size(), l.label().secondarySize(), l.noteSize());
+      } else if (widget instanceof PidsLayout.TrainList l) {
+        checkTrainList(path, l);
+      } else if (widget instanceof PidsLayout.SignalButtons b) {
+        checkSignalButtons(path, b);
       }
+    }
+
+    private void checkTrainList(String path, PidsLayout.TrainList l) {
+      within(path, l.x(), l.y(), l.width(), l.height());
+      if (l.rows() < 1) {
+        problems.add(path + ".rows.count: 至少为 1");
+      }
+      if (l.headerHeight() < l.headerSize()) {
+        problems.add(path + ".header: 表头高不足字号");
+      }
+      // 行底留 2 像素画进度条；点击区不小于 16 像素
+      if (l.rowHeight() < Math.max(SIGNALBOX_MIN_TARGET, l.textSize() + 4)) {
+        problems.add(path + ".rows.height: 行高至少为 16，且比字号多 4 像素");
+      }
+      if (!(0 < l.destinationX()
+          && l.destinationX() < l.statusX()
+          && l.statusX() < l.delayX()
+          && l.delayX() < l.width())) {
+        problems.add(path + ".columns: 列须从左到右排开（0 < destination < status < delay < width）");
+      }
+      sizes(path, l.headerSize(), l.textSize());
+    }
+
+    private void checkSignalButtons(String path, PidsLayout.SignalButtons b) {
+      within(path, b.x(), b.y(), b.width(), b.height());
+      if (b.gapX() < 0 || b.gapY() < 0) {
+        problems.add(path + ".gap: 间距不能为负数");
+      }
+      // 平时 2×3 的按钮与回复呼叫时 1×4 的回复都要不小于 16×16，站在墙前才点得准
+      if (b.buttonWidth() < SIGNALBOX_MIN_TARGET
+          || b.buttonHeight() < SIGNALBOX_MIN_TARGET
+          || b.replyHeight() < SIGNALBOX_MIN_TARGET) {
+        problems.add(path + ": 按钮与回复的点击区不足 16×16");
+      }
+      sizes(path, b.label().size(), b.label().secondarySize());
     }
 
     private void checkLineStatus(String path, PidsLayout.LineStatus l) {

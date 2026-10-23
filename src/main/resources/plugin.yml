@@ -59,6 +59,7 @@ permissions:
       fetarute.drive.tutorial: true
       fetarute.drive.guard: true
       fetarute.drive.player: true
+      fetarute.signal.signaller: true
       fetarute.license: true
       fetarute.license.admin: true
       fetarute.template: true
@@ -95,7 +96,7 @@ permissions:
     description: 编成、发布与删除时刻表（/fta timetable build|publish|delete）
     default: op
   fetarute.drive.player:
-    description: 打包授予全部玩家驾驶功能（基本命令、驾驶非调度列车、驾驶任务、ATO、自选仿真等级、驾驶记录、排行、新手教程、车掌）
+    description: 打包授予全部玩家驾驶功能（基本命令、驾驶非调度列车、驾驶任务、ATO、自选仿真等级、驾驶记录、排行、新手教程、车掌、信号员）
     default: op
     children:
       fetarute.drive: true
@@ -107,8 +108,9 @@ permissions:
       fetarute.drive.top: true
       fetarute.drive.tutorial: true
       fetarute.drive.guard: true
+      fetarute.signal.signaller: true
   fetarute.drive:
-    description: 驾驶的基本命令（/fta drive on|off|status|reverser|cab）；子节点含驾驶非调度列车与新手教程
+    description: 驾驶的基本命令（/fta drive on|off|status|reverser|cab|call）；子节点含驾驶非调度列车与新手教程
     default: op
     children:
       fetarute.drive.free: true
@@ -148,6 +150,9 @@ permissions:
     default: op
   fetarute.drive.guard:
     description: 在调度列车上当车掌（/fta guard on|off|status）：坐车尾驾驶室开关门、监视、确认出发信号、按发车铃
+    default: op
+  fetarute.signal.signaller:
+    description: 当车站信号员（/fta signal on|off|status）：在信号楼控制台上排列进路、扣车、改停股道、回复驾驶员呼叫
     default: op
   fetarute.license:
     description: 驾驶证：查看自己的驾驶证、报名考试、补发（/fta license）；考过后插件按驾驶证替玩家挂上驾驶权限

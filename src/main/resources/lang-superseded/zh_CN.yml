@@ -531,6 +531,7 @@ drive:
       unavailable: ["<prefix> <red>手动驾驶当前不可用，请查看控制台日志</red>"]
       train-in-use: ["<prefix> <red>该列车正在被驾驶或正在制动停车</red>"]
       not-stopped-at-station: ["<prefix> <red>只能在列车停站期间接管调度列车</red>"]
+      guard-on-duty: ["<prefix> <red>你正在当车掌，不能同时驾驶</red>"]
     unavailable: ["<prefix> <red>手动驾驶功能尚未就绪</red>"]
     fault:
       not-simulation: ["<prefix> <red><player> 的驾驶会话不是 simulation 级，不能注入故障</red>"]
@@ -577,6 +578,10 @@ drive:
       announced: ["<gold>下一趟由第 <white><car></white> 节驾驶室开出</gold> <gray>请先到那一端就座</gray>"]
   seat-exit:
     moving: ["<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座</yellow>"]
+  guard:
+    command:
+      start:
+        driving: ["<prefix> <red>你正在驾驶，不能同时当车掌</red>"]
 sign:
   stopmark:
     invalid: ["<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"]

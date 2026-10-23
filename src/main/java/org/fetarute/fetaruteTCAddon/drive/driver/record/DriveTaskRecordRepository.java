@@ -21,7 +21,7 @@ public interface DriveTaskRecordRepository {
   List<DriveTaskRecord> listByPlayerAndMode(UUID playerId, String mode, int limit);
 
   /**
-   * 排行：统计期内完成的任务按驾驶员汇总，总分高的在前。
+   * 排行：统计期内完成的任务按驾驶员汇总，总分高的在前。车掌值乘与信号员班次不进排行。
    *
    * @param since 统计期开始；为 {@code null} 时统计全部
    */
@@ -34,7 +34,7 @@ public interface DriveTaskRecordRepository {
    */
   int deleteFinishedBefore(Instant cutoff);
 
-  /** 一名驾驶员的累计成绩（在库里汇总，不读明细）。 */
+  /** 一名驾驶员的累计成绩（在库里汇总，不读明细）；不算车掌值乘与信号员班次。 */
   PlayerTotals totalsByPlayer(UUID playerId);
 
   /**

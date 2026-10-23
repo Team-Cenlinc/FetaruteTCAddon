@@ -6,6 +6,7 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.controller.MinecartMemberStore;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayOutSetSlotHandle;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -27,6 +28,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.title.Title;
@@ -79,6 +81,10 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabVehicle;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
+import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCalls;
+import org.fetarute.fetaruteTCAddon.drive.crew.SignallerLink;
+import org.fetarute.fetaruteTCAddon.drive.crew.SignallerShift;
 import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriveRewards;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCongestion;
@@ -187,8 +193,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     RESERVED_BY_OTHER,
     /** {@code /fta drive on cab}：发车端驾驶室没有空座位，或离列车太远，没能送进去。 */
     CAB_SEAT_UNAVAILABLE,
-    /** 玩家正在当车掌。 */
-    GUARD_ON_DUTY
+    /** 玩家正在当车掌，或领了还没结束的车掌任务。 */
+    GUARD_ON_DUTY,
+    /** 玩家正在值守信号楼。 */
+    SIGNALLER_ON_DUTY
   }
 
   /** 领取驾驶任务、驾驶调度列车。 */
@@ -352,6 +360,18 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 车掌值乘；没有接上时为空。 */
   private org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager guards;
 
+  /** 在岗登记：驾驶员、车掌与信号员同一时间只当一个，开始当班或领任务前统一问它。 */
+  private final CrewDuty crewDuty = new CrewDuty();
+
+  /** 驾驶员呼叫信号员的去处；信号员模块没有接上时无人接。 */
+  private volatile SignallerLink signallerLink = SignallerLink.NONE;
+
+  /** 车上没有车掌时两短铃转为呼叫信号员，以及重复呼叫的合并。 */
+  private final SignallerCalls signallerCalls;
+
+  /** 信号员班次结算。 */
+  private final SignallerSettlement signallerSettlement;
+
   private final DriverTaskManager tasks;
   private final DriveTutorials tutorials;
   private final DriveLevelPreference levels;
@@ -383,6 +403,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     tasks.setListener(new TaskEvents());
     this.tutorials = new DriveTutorials(plugin, plugin::getLocaleManager, sounds);
     this.levels = new DriveLevelPreference(plugin);
+    this.signallerCalls = new SignallerCalls(message -> plugin.getLogger().warning(message));
+    this.signallerSettlement = new SignallerSettlement(new SignallerHost(), ZoneId.systemDefault());
     applyDriverConfig(config);
     this.guards =
         new org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager(
@@ -393,7 +415,105 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             this::config,
             () -> plugin.getConfigManager().current().autoStationSettings(),
             driverSide(),
-            clientClock);
+            clientClock,
+            crewDuty);
+    registerCrew(crewDuty, active::containsKey, tasks, () -> guards);
+  }
+
+  /**
+   * 在岗登记里登记驾驶员与车掌。驾驶员：在驾驶，或领了还没结束的驾驶任务；车掌：在值乘，或领了还没结束的车掌任务。已领、尚未开始的任务也算在岗，免得领着一个角色的任务又去当另一个角色。
+   *
+   * @param driving 玩家是否在驾驶
+   * @param guards 当前接上的车掌值乘；没有接上时给 {@code null}
+   */
+  static void registerCrew(
+      CrewDuty crew,
+      Predicate<UUID> driving,
+      DriverTaskManager tasks,
+      Supplier<org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager> guards) {
+    crew.register(
+        CrewDuty.Role.DRIVER, id -> driving.test(id) || tasks.activeTaskOf(id).isPresent());
+    crew.register(
+        CrewDuty.Role.GUARD,
+        id -> {
+          org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager current = guards.get();
+          return current != null
+              && (current.isOnDuty(id) || current.tasks().activeTaskOf(id).isPresent());
+        });
+  }
+
+  /** 玩家在担任驾驶员以外的角色时，开始驾驶被拒的结果；没有时为 {@code null}。 */
+  static StartOutcome crewRefusal(CrewDuty crew, UUID playerId) {
+    return crew.busyOtherThan(playerId, CrewDuty.Role.DRIVER)
+        .map(
+            role ->
+                role == CrewDuty.Role.SIGNALLER
+                    ? StartOutcome.SIGNALLER_ON_DUTY
+                    : StartOutcome.GUARD_ON_DUTY)
+        .orElse(null);
+  }
+
+  /** 玩家在担任驾驶员以外的角色时，领驾驶任务被拒的提示语言键；没有时为 {@code null}。 */
+  static String claimRefusalKey(CrewDuty crew, UUID playerId) {
+    return crew.busyOtherThan(playerId, CrewDuty.Role.DRIVER)
+        .map(
+            role ->
+                role == CrewDuty.Role.SIGNALLER
+                    ? "drive.task.claim.signaller-busy"
+                    : "drive.task.claim.guard-busy")
+        .orElse(null);
+  }
+
+  /** 在岗登记：信号员模块在这里登记 {@link CrewDuty.Role#SIGNALLER}。 */
+  public CrewDuty crewDuty() {
+    return crewDuty;
+  }
+
+  /** 接上信号员模块：驾驶员呼叫信号员时转给它；传 {@code null} 时恢复为无人接。 */
+  public void setSignallerLink(SignallerLink link) {
+    this.signallerLink = link == null ? SignallerLink.NONE : link;
+  }
+
+  /** 信号员班次结算（成绩、奖励、记录），交给信号员模块在下岗时调用。 */
+  @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "故意交出结算器本体：信号员模块下岗时调用它，结算器无可变的对外状态。")
+  public SignallerShift.Settlement signallerSettlement() {
+    return signallerSettlement;
+  }
+
+  /** 信号员班次结算用到的服务器操作。 */
+  private final class SignallerHost implements SignallerSettlement.Host {
+    @Override
+    public org.fetarute.fetaruteTCAddon.drive.driver.DriveRewardConfig rewards() {
+      return config.rewards();
+    }
+
+    @Override
+    public DriveRewardPayer.Paid pay(UUID playerId, String playerName, DriveRewards.Reward reward) {
+      return rewardPayer.pay(playerId, playerName, reward, config.rewards());
+    }
+
+    @Override
+    public void saveRecord(DriveTaskRecord record) {
+      DriveSessionManager.this.saveRecord(record);
+    }
+
+    @Override
+    public void tell(UUID playerId, String key, Map<String, String> values) {
+      Player player = Bukkit.getPlayer(playerId);
+      if (player != null && player.isOnline()) {
+        player.sendMessage(plugin.getLocaleManager().component(key, values));
+      }
+    }
+
+    @Override
+    public String serverId() {
+      return ServerIdentity.id().orElse(null);
+    }
+
+    @Override
+    public void warn(String message) {
+      plugin.getLogger().warning(message);
+    }
   }
 
   /** 驾驶任务。 */
@@ -596,10 +716,16 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             .isPresent();
   }
 
-  /** 玩家正在驾驶或值乘车掌：用的是驾驶员侧边栏，乘客的计分板要让位。 */
+  /**
+   * 玩家正在驾驶、值乘车掌或值守信号楼：乘客的计分板要让位。
+   *
+   * <p>驾驶员与车掌只算正在当班的：领了任务还没开始时照常看乘客计分板（在岗登记里这两种也算在岗，所以不直接问登记）。信号员没有“已领未开始”，登记里的在岗就是在值守。
+   */
   public boolean usesCrewSidebar(UUID playerId) {
     org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
-    return active.containsKey(playerId) || (crew != null && crew.isOnDuty(playerId));
+    return active.containsKey(playerId)
+        || (crew != null && crew.isOnDuty(playerId))
+        || crewDuty.busy(playerId).filter(role -> role == CrewDuty.Role.SIGNALLER).isPresent();
   }
 
   /** 玩家的快捷栏被驾驶物品或车掌按钮占着：驾驶员与车掌的物品一样要保护。 */
@@ -648,11 +774,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         if (cue != null) {
           sounds.play(driver, cue);
         }
-      }
-
-      @Override
-      public boolean isDriving(UUID playerId) {
-        return active.containsKey(playerId);
       }
 
       @Override
@@ -792,11 +913,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
 
       @Override
-      public boolean hasDriverTask(UUID playerId) {
-        return tasks.activeTaskOf(playerId).isPresent();
-      }
-
-      @Override
       public Optional<org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.TripTrain>
           trainForTrip(TaskKey key) {
         return tasks
@@ -895,19 +1011,73 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /**
-   * 驾驶员按了铃：车上有车掌时一短收到、两短呼叫；没有车掌时只重发背包（丢弃键本来的处理）。
+   * 驾驶员按了铃：车上有车掌时一短收到、两短呼叫车掌；没有车掌时，调度列车的两短转为呼叫信号员，其余不作数（非调度列车只重发背包，即丢弃键本来的处理）。
    *
    * @param at 按下的时刻（客户端时钟的读数）
    */
   private void driverBuzzer(Player player, long at) {
     DriveSession session = active.get(player.getUniqueId());
-    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
-    if (session == null || crew == null) {
+    if (session == null) {
       return;
     }
     DriverLink link = session.driverLink();
     String train = link != null ? link.currentTrainName() : session.trainName();
-    crew.driverBuzzer(player, train, at);
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew != null && crew.driverBuzzer(player, train, at)) {
+      return;
+    }
+    if (link != null) {
+      org.fetarute.fetaruteTCAddon.drive.guard.GuardConfig buzzer = config.guard();
+      signallerCalls.press(
+          player.getUniqueId(), at, buzzer.buzzerLongTicks(), buzzer.buzzerDoubleTicks());
+    }
+  }
+
+  /** 车上没有车掌时按成两短的驾驶员：转给信号员，在动作栏告诉驾驶员有没有人接。 */
+  private void tickSignallerCalls() {
+    for (UUID driverId :
+        signallerCalls.tick(clientClock::now, active::containsKey, monotonicMillis())) {
+      DriveSession session = active.get(driverId);
+      Player player = Bukkit.getPlayer(driverId);
+      if (session == null || session.driverLink() == null || player == null) {
+        continue;
+      }
+      SignallerCalls.Outcome outcome =
+          signallerCalls.call(
+              driverId, session.driverLink().currentTrainName(), monotonicMillis(), signallerLink);
+      notice(
+          player,
+          outcome.reached() ? "drive.driver.signaller.called" : "drive.driver.signaller.none",
+          Map.of());
+      if (outcome.reached() && !outcome.repeated()) {
+        sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
+      }
+    }
+  }
+
+  /**
+   * {@code /fta drive call}：正在驾驶调度列车的驾驶员呼叫信号员（不论车上有没有车掌）。
+   *
+   * @return 给驾驶员的提示语言键
+   */
+  public String callSignaller(Player player) {
+    DriveSession session = active.get(player.getUniqueId());
+    if (session == null) {
+      return "drive.command.stop.not-driving";
+    }
+    DriverLink link = session.driverLink();
+    if (link == null) {
+      return "drive.command.call.not-dispatch";
+    }
+    SignallerCalls.Outcome outcome =
+        signallerCalls.call(
+            player.getUniqueId(), link.currentTrainName(), monotonicMillis(), signallerLink);
+    return outcome.reached() ? "drive.command.call.called" : "drive.command.call.none";
+  }
+
+  /** 呼叫冷却用的单调时钟（毫秒）：不受改系统时间影响。 */
+  private static long monotonicMillis() {
+    return java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime());
   }
 
   public Optional<DriveSession> sessionOf(UUID playerId) {
@@ -968,7 +1138,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return;
     }
     if (signal == InputSignal.DROP) {
-      // 丢弃键是驾驶员的铃：一短收到，两短呼叫车掌（车上有车掌时）。按下的时刻在收到时按客户端时钟读。
+      // 丢弃键是驾驶员的铃：一短收到，两短呼叫车掌（车上有车掌时）或信号员（调度列车上没有车掌时）。按下的时刻在收到时按客户端时钟读。
       long at = clientClock.now(id);
       Bukkit.getScheduler().runTask(plugin, () -> driverBuzzer(player, at));
     }
@@ -1277,9 +1447,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (!isGameModeAllowed(player.getGameMode())) {
       return StartOutcome.BAD_GAME_MODE;
     }
-    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
-    if (crew != null && crew.isOnDuty(player.getUniqueId())) {
-      return StartOutcome.GUARD_ON_DUTY;
+    StartOutcome otherRole = crewRefusal(crewDuty, player.getUniqueId());
+    if (otherRole != null) {
+      return otherRole;
     }
     DriveSession running = active.get(player.getUniqueId());
     if (running != null) {
@@ -3093,6 +3263,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     tickHorns(now);
     try {
+      tickSignallerCalls();
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("呼叫信号员处理失败: " + ex);
+    }
+    try {
       stopMarker.tick(now);
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("停车标沿轨道采样失败: " + ex);
@@ -4802,12 +4977,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   // ---- 始发站与车库接班 ----
 
-  /** 玩家在当车掌、或领了还没结束的车掌任务：同一时间只能当一个角色。 */
-  private boolean guardBusy(UUID playerId) {
-    return guards != null
-        && (guards.isOnDuty(playerId) || guards.tasks().activeTaskOf(playerId).isPresent());
-  }
-
   /** 有没有可能要等驾驶员或车掌接车：没有驾驶任务、也没有等着上岗的车掌任务时派车侧不必逐张票去查车次。 */
   public boolean hasDriverPickupInterest() {
     return tasks.hasActiveTasks()
@@ -6041,7 +6210,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   public DriverTaskManager.ClaimOutcome assignTask(
       Player player, DriverTaskManager.TaskSpec spec, DrivingMode mode, boolean notify) {
-    if (continuations.containsKey(player.getUniqueId()) || guardBusy(player.getUniqueId())) {
+    if (continuations.containsKey(player.getUniqueId())
+        || crewDuty.busyOtherThan(player.getUniqueId(), CrewDuty.Role.DRIVER).isPresent()) {
       return DriverTaskManager.ClaimOutcome.ALREADY_HAS_TASK;
     }
     DriverTaskManager.ClaimOutcome outcome =
@@ -6196,8 +6366,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       // 正在等接续本车的下一趟：先结束驾驶再领别的车次，免得开出后这一趟记不成任务。
       return "drive.task.claim.continuing";
     }
-    if (guardBusy(player.getUniqueId())) {
-      return "drive.task.claim.guard-busy";
+    String otherRole = claimRefusalKey(crewDuty, player.getUniqueId());
+    if (otherRole != null) {
+      return otherRole;
     }
     DriveConfig current = config;
     DriverTaskManager.ClaimOutcome outcome =

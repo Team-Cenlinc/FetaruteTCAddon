@@ -17,7 +17,7 @@ import java.util.UUID;
  * @param serviceDate 运营日
  * @param routeCode 交路代码
  * @param trainName 列车
- * @param mode 驾驶方式（MANUAL / ATO），车掌值乘为 {@link #MODE_GUARD}
+ * @param mode 驾驶方式（MANUAL / ATO），车掌值乘为 {@link #MODE_GUARD}，信号员班次为 {@link #MODE_SIGNALLER}
  * @param state 任务终态
  * @param points 得分 0–100
  * @param grade 评级
@@ -45,6 +45,11 @@ public record DriveTaskRecord(
 
   /** 车掌值乘的记录：不进驾驶排行与驾驶员的汇总。 */
   public static final String MODE_GUARD = "GUARD";
+
+  /**
+   * 信号员班次的记录：不进驾驶排行与驾驶员的汇总。按班次记，时刻表与运营日用哨兵值，交路代码一栏是控制区代码，终态一栏是下岗原因（见 {@code SignallerRecordCodec}）。
+   */
+  public static final String MODE_SIGNALLER = "SIGNALLER";
 
   public DriveTaskRecord {
     Objects.requireNonNull(id, "id");

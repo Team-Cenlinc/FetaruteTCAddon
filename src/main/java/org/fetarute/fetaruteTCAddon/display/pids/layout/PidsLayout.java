@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.display.pids.layout;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -8,7 +9,8 @@ import java.util.Optional;
  * 站台屏布局：画布尺寸与一组内置组件的摆放。
  *
  * <p>坐标与尺寸均为地图像素，原点在左上角；一块地图 {@value #TILE}×{@value
- * #TILE}。组件种类是固定的（站台号、时钟、线路色带、站名、换乘条、到发表、停站表、线路运行状况、站场图与图例）， 布局只决定它们的位置、尺寸、字号与行数；新的视觉形式需要新增组件类型。
+ * #TILE}。组件种类是固定的（站台号、时钟、线路色带、站名、换乘条、到发表、停站表、线路运行状况、站场图与图例、信号员控制台的列车表与操作按钮），
+ * 布局只决定它们的位置、尺寸、字号与行数；新的视觉形式需要新增组件类型。
  *
  * @param id 布局 ID（文件名去掉扩展名）
  * @param name 显示名
@@ -118,6 +120,27 @@ public record PidsLayout(
     return widgets.stream().filter(Yard.class::isInstance).map(Yard.class::cast).findFirst();
   }
 
+  /** 信号员控制台的列车表；不是控制台时为空。 */
+  public Optional<TrainList> trainList() {
+    return widgets.stream()
+        .filter(TrainList.class::isInstance)
+        .map(TrainList.class::cast)
+        .findFirst();
+  }
+
+  /** 信号员控制台的操作按钮；不是控制台时为空。 */
+  public Optional<SignalButtons> signalButtons() {
+    return widgets.stream()
+        .filter(SignalButtons.class::isInstance)
+        .map(SignalButtons.class::cast)
+        .findFirst();
+  }
+
+  /** 信号员控制台（{@code signalbox-*}）：带列车表或操作按钮的站场图屏，响应玩家点击。 */
+  public boolean signalbox() {
+    return trainList().isPresent() || signalButtons().isPresent();
+  }
+
   /** 组件。 */
   public sealed interface Widget
       permits Platform,
@@ -129,7 +152,9 @@ public record PidsLayout(
           StopList,
           LineStatus,
           Yard,
-          YardLegend {}
+          YardLegend,
+          TrainList,
+          SignalButtons {}
 
   /**
    * 站场图：本站站场的轨道按真实走向投影成横向示意图，按占用着色，车身与车次窗叠在上面。
@@ -179,6 +204,82 @@ public record PidsLayout(
    */
   public record YardLegend(int x, int y, int width, int height, TextStyle label, int noteSize)
       implements Widget {}
+
+  /**
+   * 信号员控制台的列车表：表头一行，下面每列车一行（车次、去向、状态、晚点）；在入口等许可的车行底画一条进度条。
+   *
+   * <p>车次一列左缘画 2 像素线路色条；各列位置相对本组件左缘。
+   *
+   * @param x 左
+   * @param y 上（表头顶边）
+   * @param width 宽
+   * @param headerHeight 表头高
+   * @param headerSize 表头字号
+   * @param rows 行数
+   * @param rowHeight 行高（含底部 2 像素的进度条）
+   * @param textSize 行内文字字号
+   * @param destinationX 去向一列的左缘
+   * @param statusX 状态一列的左缘
+   * @param delayX 晚点一列的左缘
+   */
+  public record TrainList(
+      int x,
+      int y,
+      int width,
+      int headerHeight,
+      int headerSize,
+      int rows,
+      int rowHeight,
+      int textSize,
+      int destinationX,
+      int statusX,
+      int delayX)
+      implements Widget {
+
+    /** 整个列车表的高。 */
+    public int height() {
+      return headerHeight + rows * rowHeight;
+    }
+
+    /** 第 {@code index} 行（0 起）的顶边。 */
+    public int rowTop(int index) {
+      return y + headerHeight + index * rowHeight;
+    }
+  }
+
+  /**
+   * 信号员控制台的操作按钮：平时 2 列 × 3 行，回复驾驶员呼叫时换成 1 列 × 4 行的四条固定回复。按钮里中英文上下叠放、居中。
+   *
+   * @param x 左
+   * @param y 上
+   * @param width 宽
+   * @param height 高
+   * @param gapX 两列按钮之间的间距
+   * @param gapY 上下两个按钮之间的间距
+   * @param label 按钮文字（上下叠放）
+   */
+  public record SignalButtons(
+      int x, int y, int width, int height, int gapX, int gapY, TextStyle label) implements Widget {
+
+    public SignalButtons {
+      Objects.requireNonNull(label, "label");
+    }
+
+    /** 按钮宽。 */
+    public int buttonWidth() {
+      return (width - gapX) / 2;
+    }
+
+    /** 按钮高。 */
+    public int buttonHeight() {
+      return (height - 2 * gapY) / 3;
+    }
+
+    /** 回复呼叫时每条回复的高。 */
+    public int replyHeight() {
+      return (height - 3 * gapY) / 4;
+    }
+  }
 
   /**
    * 一组中英文字的字号。
@@ -273,6 +374,14 @@ public record PidsLayout(
 
     public StationTitle {
       sizes = List.copyOf(sizes);
+    }
+
+    @Override
+    @SuppressFBWarnings(
+        value = "EI_EXPOSE_REP",
+        justification = "构造器已用 List.copyOf 复制成不可修改的列表，原样交出不会被改。")
+    public List<Integer> sizes() {
+      return sizes;
     }
   }
 

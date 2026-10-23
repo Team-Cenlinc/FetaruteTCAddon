@@ -184,7 +184,9 @@ class PidsLayoutParserTest {
             """);
 
     assertEquals(
-        List.of("widgets[1]: 站场图屏只画站名、时钟、站场图与图例，不支持这个组件"), withDepartures.problems(), "时钟可以，到发表不行");
+        List.of("widgets[1]: 站场图屏只画站名、时钟、站场图、图例、列车表与操作按钮，不支持这个组件"),
+        withDepartures.problems(),
+        "时钟可以，到发表不行");
     assertEquals(List.of("widgets[0]: 站场图例要与站场图组件放在同一个布局里"), loneLegend.problems());
     assertEquals(List.of("widgets[0]: 去掉留白后画轨道的区域不足 32×32"), cramped.problems());
   }

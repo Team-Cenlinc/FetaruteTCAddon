@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
  * @param currencyName 钱币的名称，用在提示里（不传给经济插件）
  * @param awayAfterTimeouts ATO 下连续多少站超时未确认发车就判定驾驶员不在，不在的那段不计奖励；0 表示不判定
  * @param crewBonus 同车加成：驾驶员人工驾驶、车上同时有车掌在岗的那段（停站与里程），驾驶员与车掌的奖励都多发这个比例（0.5 即 +50%）；0 表示不加
+ * @param signallerTrainRatio 信号员每经手一列车（超时代排的不计）的奖励是驾驶员人工停站单价的几倍
  */
 public record DriveRewardConfig(
     boolean enabled,
@@ -35,7 +36,8 @@ public record DriveRewardConfig(
     String moneyCommand,
     String currencyName,
     int awayAfterTimeouts,
-    double crewBonus) {
+    double crewBonus,
+    double signallerTrainRatio) {
 
   public DriveRewardConfig {
     experiencePerKm = Math.max(0.0, experiencePerKm);
@@ -49,10 +51,45 @@ public record DriveRewardConfig(
         currencyName == null || currencyName.isBlank() ? DEFAULT_CURRENCY : currencyName.trim();
     awayAfterTimeouts = Math.max(0, awayAfterTimeouts);
     crewBonus = Double.isFinite(crewBonus) ? Math.max(0.0, crewBonus) : 0.0;
+    signallerTrainRatio =
+        Double.isFinite(signallerTrainRatio)
+            ? Math.max(0.0, signallerTrainRatio)
+            : DEFAULT_SIGNALLER_TRAIN_RATIO;
+  }
+
+  /** 不写信号员单价比例时按默认值（1 倍）。 */
+  public DriveRewardConfig(
+      boolean enabled,
+      double experiencePerKm,
+      double experiencePerStop,
+      double moneyPerKm,
+      double moneyPerStop,
+      double atoMultiplier,
+      Map<ScoreRules.Grade, Double> gradeMultipliers,
+      String moneyCommand,
+      String currencyName,
+      int awayAfterTimeouts,
+      double crewBonus) {
+    this(
+        enabled,
+        experiencePerKm,
+        experiencePerStop,
+        moneyPerKm,
+        moneyPerStop,
+        atoMultiplier,
+        gradeMultipliers,
+        moneyCommand,
+        currencyName,
+        awayAfterTimeouts,
+        crewBonus,
+        DEFAULT_SIGNALLER_TRAIN_RATIO);
   }
 
   /** 默认的钱币名称。 */
   static final String DEFAULT_CURRENCY = "FRD";
+
+  /** 信号员每列车单价比例的默认值。 */
+  static final double DEFAULT_SIGNALLER_TRAIN_RATIO = 1.0;
 
   /** 内置默认值。 */
   public static DriveRewardConfig defaults() {
@@ -73,7 +110,8 @@ public record DriveRewardConfig(
         "eco give {player} {amount}",
         DEFAULT_CURRENCY,
         3,
-        0.5);
+        0.5,
+        DEFAULT_SIGNALLER_TRAIN_RATIO);
   }
 
   /** 这个评级乘的系数；没写的按 1。 */
@@ -123,7 +161,8 @@ public record DriveRewardConfig(
         section.getString("money-command", d.moneyCommand),
         section.getString("currency-name", d.currencyName),
         (int) Math.round(nonNegative(section, "away-after-timeouts", d.awayAfterTimeouts, sink)),
-        nonNegative(section, "crew-bonus", d.crewBonus, sink));
+        nonNegative(section, "crew-bonus", d.crewBonus, sink),
+        nonNegative(section, "signaller-per-train-ratio", d.signallerTrainRatio, sink));
   }
 
   private static double nonNegative(

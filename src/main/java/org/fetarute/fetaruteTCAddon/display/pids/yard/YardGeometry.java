@@ -252,12 +252,29 @@ public final class YardGeometry {
    */
   public record DepotTrack(String number, Point end, boolean buffer, int outward) {}
 
+  /**
+   * 出口区间（一端在站场内、一端在站场外）在图上的起头：信号员控制台把控制区的入口信号画在区内那一端。
+   *
+   * @param edge 出口区间
+   * @param inner 区内那一端在图上的位置
+   * @param toward 从区内那一端朝外画的下一个点（拐点或出口末端），据此知道出口朝哪边
+   */
+  public record Stub(EdgeId edge, Point inner, Point toward) {
+    public Stub {
+      Objects.requireNonNull(edge, "edge");
+      Objects.requireNonNull(inner, "inner");
+      Objects.requireNonNull(toward, "toward");
+    }
+  }
+
   private final List<Path> paths;
   private final List<Platform> platforms;
   private final List<Label> exits;
   private final List<Depot> depots;
   private final Map<RailFootprintCell, Point> cells;
   private final boolean partial;
+  private final List<Stub> stubs;
+  private final Map<String, Point> nodes;
 
   private YardGeometry(
       List<Path> paths,
@@ -265,13 +282,27 @@ public final class YardGeometry {
       List<Label> exits,
       List<Depot> depots,
       Map<RailFootprintCell, Point> cells,
-      boolean partial) {
+      boolean partial,
+      List<Stub> stubs,
+      Map<String, Point> nodes) {
     this.paths = List.copyOf(paths);
     this.platforms = List.copyOf(platforms);
     this.exits = List.copyOf(exits);
     this.depots = List.copyOf(depots);
     this.cells = Map.copyOf(cells);
     this.partial = partial;
+    this.stubs = List.copyOf(stubs);
+    this.nodes = Map.copyOf(nodes);
+  }
+
+  /** 各条出口区间的起头，与 {@link #paths()} 里出口的先后相同。 */
+  public List<Stub> stubs() {
+    return stubs;
+  }
+
+  /** 站场内节点在图上的位置（股道节点即站台股道所在的行）；不在站场图上时为空。 */
+  public Optional<Point> nodeAt(NodeId node) {
+    return Optional.ofNullable(nodes.get(node.value()));
   }
 
   /** 控制区里的车库。 */
@@ -1146,11 +1177,25 @@ public final class YardGeometry {
                             text + (right ? "|R" : "|L"),
                             new Label(at, text, right, Optional.of(code)));
                       }));
+      List<Stub> stubs = new ArrayList<>();
+      Map<String, Point> nodes = new HashMap<>();
+      for (Link link : links) {
+        if (exitOf.containsKey(link.b())) {
+          List<Point> route = routes.get(link);
+          stubs.add(new Stub(link.edge(), route.get(0), route.get(1)));
+        }
+      }
+      points.forEach(
+          (key, at) -> {
+            if (!key.startsWith(EXIT_PREFIX) && !key.startsWith(DEPOT_PREFIX)) {
+              nodes.put(key, at);
+            }
+          });
       List<Depot> depots = new ArrayList<>(depots(points, stationName));
       collapsed.forEach(
           (key, depot) -> depots.add(panel(key, depot, points, stationName, paths, cells)));
       return new YardGeometry(
-          paths, platforms, List.copyOf(exits.values()), depots, cells, partial);
+          paths, platforms, List.copyOf(exits.values()), depots, cells, partial, stubs, nodes);
     }
 
     /** 照画库线的车库：库线、紧挨库线的库内咽喉点，以及有两条以上区间连进来的分岔道岔，按彼此相连分片，每片一个范围。 库名只写在库线最多的那片上（另几片名字为空）。 */

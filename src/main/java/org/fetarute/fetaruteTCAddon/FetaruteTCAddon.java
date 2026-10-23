@@ -37,6 +37,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaPidsCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSignalCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaSignallerCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpawnCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpeedCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStationCommand;
@@ -88,6 +89,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarkIndex;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -123,16 +125,21 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsFrameListener;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsSettings;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
+import org.fetarute.fetaruteTCAddon.display.pids.view.ApiPidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfigFile;
+import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseService;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.integration.traincarts.TransferFunctionInputPlayerNearby;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
+import org.fetarute.fetaruteTCAddon.signaller.SignallerModule;
+import org.fetarute.fetaruteTCAddon.signaller.SignallerService;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
@@ -228,6 +235,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private PidsConfigManager pidsConfigManager;
   private PidsLayoutRegistry pidsLayoutRegistry;
   private volatile PidsService pidsService;
+  private SignallerModule signallerModule;
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
   private DriveSessionManager driveSessionManager;
   private LicenseService licenseService;
@@ -301,6 +309,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
       driveSessionManager = null;
     }
 
+    initSignaller();
+
     registerCommands();
     getServer()
         .getConsoleSender()
@@ -317,6 +327,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
    */
   @Override
   public void onDisable() {
+    // 信号员先下岗：结算要用驾驶模块（写记录、发奖励）；它出错不能拖住后面的关闭
+    if (signallerModule != null) {
+      try {
+        signallerModule.stop();
+        unwireSignaller();
+      } catch (RuntimeException | LinkageError ex) {
+        getLogger().severe("信号员停用失败: " + ex);
+      }
+      signallerModule = null;
+    }
     if (licenseService != null) {
       licenseService.shutdown();
       licenseService = null;
@@ -487,6 +507,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 重新初始化公开 API，确保外部插件引用有效
     initApi();
     initPidsService();
+    // 重载一律回到自动：值守的信号员下岗结算，人工控制不跨重载
+    initSignaller();
     scheduleRuntimeOccupancyReconstruction(1L);
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
@@ -617,6 +639,110 @@ public final class FetaruteTCAddon extends JavaPlugin {
   /** 返回站台屏布局目录（内置布局与 {@code pids/layouts/}）；插件未完成初始化时为空。 */
   public Optional<PidsLayoutRegistry> getPidsLayoutRegistry() {
     return Optional.ofNullable(pidsLayoutRegistry);
+  }
+
+  /** 车站信号员服务；插件未完成初始化时为空。 */
+  public Optional<SignallerService> getSignallerService() {
+    return Optional.ofNullable(signallerModule).map(SignallerModule::service);
+  }
+
+  /** 车站信号员：值守、进路许可闸、扣车、改停股道与呼叫。只在内存里，重启与重载一律回到自动。信号员是附加功能，初始化失败只停用它。 */
+  private void initSignaller() {
+    if (signallerModule != null) {
+      try {
+        signallerModule.stop();
+        unwireSignaller();
+      } catch (RuntimeException | LinkageError ex) {
+        getLogger().severe("信号员停用失败: " + ex);
+      }
+      signallerModule = null;
+    }
+    SignallerModule module = null;
+    try {
+      ApiPidsDirectory directory =
+          FetaruteApi.get()
+              .map(
+                  found ->
+                      new ApiPidsDirectory(
+                          found.operators(),
+                          found.lines(),
+                          found.stations(),
+                          found.routes(),
+                          message -> getLogger().fine(message)))
+              .orElse(null);
+      module =
+          new SignallerModule(
+              this,
+              (operator, line) ->
+                  directory == null
+                      ? Optional.empty()
+                      : directory.line(operator, line).map(PidsDirectory.LineStyle::color),
+              () ->
+                  getRuntimeDispatchService()
+                      .<SignallerPlatformDesk>map(
+                          dispatch -> dispatch.stationStops().signallerPlatforms())
+                      .orElse(SignallerPlatformDesk.NONE));
+      module.start();
+      signallerModule = module;
+      wireSignaller();
+    } catch (RuntimeException | LinkageError ex) {
+      getLogger().severe("信号员初始化失败，已禁用: " + ex);
+      if (module != null) {
+        try {
+          module.stop();
+          unwireSignaller();
+        } catch (RuntimeException | LinkageError stopFailure) {
+          getLogger().severe("信号员停用失败: " + stopFailure);
+        }
+      }
+      signallerModule = null;
+    }
+  }
+
+  /** 把信号员接到驾驶模块（在岗登记、呼叫、班次结算）、调度（许可闸、扣车）与站台屏（控制台）。各方重建后再调一次；接线都是替换式的，重复调用无副作用。 */
+  private void wireSignaller() {
+    SignallerModule module = signallerModule;
+    if (module == null) {
+      return;
+    }
+    SignallerService service = module.service();
+    DriveSessionManager drive = driveSessionManager;
+    if (drive != null) {
+      CrewDuty crew = drive.crewDuty();
+      crew.register(CrewDuty.Role.SIGNALLER, service::onDuty);
+      service.setCrewBusy(player -> crew.busyOtherThan(player, CrewDuty.Role.SIGNALLER));
+      drive.setSignallerLink(service);
+      service.setSettlement(drive.signallerSettlement());
+    }
+    PidsService pids = pidsService;
+    if (pids != null) {
+      pids.setSignalboxConsole(service);
+    }
+    RuntimeDispatchService dispatch = runtimeDispatchService;
+    if (dispatch != null) {
+      dispatch.signallerGates().setGate(service);
+      dispatch.signallerGates().setZoneMembership(service::zoneContains);
+      dispatch.stationStops().setSignallerHold(service::holdTarget);
+    }
+  }
+
+  /** 信号员停用前撤掉接到别处的线：别的模块不再问一个已停的服务。 */
+  private void unwireSignaller() {
+    DriveSessionManager drive = driveSessionManager;
+    if (drive != null) {
+      drive.crewDuty().unregister(CrewDuty.Role.SIGNALLER);
+      drive.setSignallerLink(null);
+    }
+    PidsService pids = pidsService;
+    if (pids != null) {
+      pids.setSignalboxConsole(null);
+    }
+    RuntimeDispatchService dispatch = runtimeDispatchService;
+    if (dispatch != null) {
+      dispatch.signallerGates().setGate(null);
+      dispatch.signallerGates().setZoneMembership(null);
+      dispatch.stationStops().setSignallerHold(null);
+    }
   }
 
   /** 返回站台屏服务；{@code pids.yml} 关闭、公开 API 未就绪或插件未完成初始化时为空。 */
@@ -890,6 +1016,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaStationCommand(this).register(commandManager);
     new FtaStationGroupCommand(this).register(commandManager);
     new FtaSignalCommand(this).register(commandManager);
+    new FtaSignallerCommand(this).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
     new FtaEtaCommand(this).register(commandManager);
     new FtaOccupancyCommand(this).register(commandManager);

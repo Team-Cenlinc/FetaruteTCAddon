@@ -39,6 +39,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop.Phase;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
+import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriveRewards;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
@@ -89,12 +90,6 @@ public final class GuardSessionManager {
 
     /** 给驾驶员一条动作栏提示（停留一会儿，不被驾驶 HUD 覆盖），可带提示音。 */
     void notifyDriver(UUID driverId, String key, Map<String, String> values, DriveCue cue);
-
-    /** 玩家是否在驾驶（驾驶员不能同时当车掌）。 */
-    boolean isDriving(UUID playerId);
-
-    /** 玩家是否领了还没结束的驾驶任务（同一时间只能当一个角色）。 */
-    boolean hasDriverTask(UUID playerId);
 
     /** 快捷栏数据包改写已就绪（BKCommonLib 监听注册成功）。 */
     boolean hotbarReady();
@@ -192,7 +187,10 @@ public final class GuardSessionManager {
     DISABLED,
     UNAVAILABLE,
     ALREADY_ON_DUTY,
+    /** 玩家在驾驶，或领了还没结束的驾驶任务。 */
     DRIVING,
+    /** 玩家正在值守信号楼。 */
+    SIGNALLER_ON_DUTY,
     BAD_GAME_MODE,
     NOT_SEATED,
     NOT_MANAGED,
@@ -253,6 +251,9 @@ public final class GuardSessionManager {
   private final GuardSeatReach reach;
   private final ClientClock clock;
 
+  /** 在岗登记：开始值乘或领任务前问玩家是否在担任别的角色。 */
+  private final CrewDuty crew;
+
   /** 给公开 API 的快照：任务、值乘、按车名找车掌（车名小写）。主线程刷新，任意线程读。 */
   private volatile Map<UUID, GuardApi.TaskView> taskViews = Map.of();
 
@@ -270,7 +271,8 @@ public final class GuardSessionManager {
       Supplier<DriveConfig> config,
       Supplier<ConfigManager.AutoStationSettings> chime,
       DriverSide drivers,
-      ClientClock clock) {
+      ClientClock clock,
+      CrewDuty crew) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.registry = Objects.requireNonNull(registry, "registry");
     this.sounds = Objects.requireNonNull(sounds, "sounds");
@@ -279,6 +281,7 @@ public final class GuardSessionManager {
     this.chime = Objects.requireNonNull(chime, "chime");
     this.drivers = Objects.requireNonNull(drivers, "drivers");
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.crew = Objects.requireNonNull(crew, "crew");
     this.sidebar = new DriveSidebar(locale);
     this.tips = new GuardTips(plugin, locale, sounds);
     this.reach = new GuardSeatReach(plugin);
@@ -406,8 +409,11 @@ public final class GuardSessionManager {
     if (sessions.containsKey(id)) {
       return StartOutcome.ALREADY_ON_DUTY;
     }
-    if (drivers.isDriving(id)) {
-      return StartOutcome.DRIVING;
+    Optional<CrewDuty.Role> other = crew.busyOtherThan(id, CrewDuty.Role.GUARD);
+    if (other.isPresent()) {
+      return other.get() == CrewDuty.Role.SIGNALLER
+          ? StartOutcome.SIGNALLER_ON_DUTY
+          : StartOutcome.DRIVING;
     }
     if (!gameModeAllowed(player.getGameMode(), current)) {
       return StartOutcome.BAD_GAME_MODE;
@@ -2780,7 +2786,7 @@ public final class GuardSessionManager {
   }
 
   /**
-   * 领取或派出一班车掌（任务板与插件共用）：车掌功能可用、不在值乘、不在驾驶；一个车次一名车掌、一名玩家一个未结束的任务。
+   * 领取或派出一班车掌（任务板与插件共用）：车掌功能可用、不在值乘、不在担任别的角色（驾驶、已领驾驶任务、值守信号楼）；一个车次一名车掌、一名玩家一个未结束的任务。
    *
    * @param unavailable 车次已取消或在接班站终到
    */
@@ -2793,8 +2799,11 @@ public final class GuardSessionManager {
     if (sessions.containsKey(id)) {
       return GuardTasks.ClaimOutcome.ON_DUTY;
     }
-    if (drivers.isDriving(id) || drivers.hasDriverTask(id)) {
-      return GuardTasks.ClaimOutcome.DRIVING;
+    Optional<CrewDuty.Role> other = crew.busyOtherThan(id, CrewDuty.Role.GUARD);
+    if (other.isPresent()) {
+      return other.get() == CrewDuty.Role.SIGNALLER
+          ? GuardTasks.ClaimOutcome.SIGNALLER_ON_DUTY
+          : GuardTasks.ClaimOutcome.DRIVING;
     }
     GuardTasks.ClaimOutcome outcome =
         tasks.register(id, player.getName(), spec, unavailable, Instant.now());
@@ -2874,7 +2883,7 @@ public final class GuardSessionManager {
       }
       return;
     }
-    if (drivers.isDriving(task.playerId())) {
+    if (crew.busyOtherThan(task.playerId(), CrewDuty.Role.GUARD).isPresent()) {
       player.sendActionBar(locale.component("drive.guard.task.busy", values));
       return;
     }
@@ -3001,13 +3010,14 @@ public final class GuardSessionManager {
     }
     GuardTask task = found.get();
     Player player = Bukkit.getPlayer(task.playerId());
-    // 车掌正在别的车上值乘或在驾驶：上不了这列车，扣着只会让这一班白白晚点。
+    // 车掌正在别的车上值乘或在担任别的角色：上不了这列车，扣着只会让这一班白白晚点。
     boolean online =
         player != null
             && player.isOnline()
             && available()
             && (task.state() != GuardTask.State.CLAIMED
-                || (!sessions.containsKey(task.playerId()) && !drivers.isDriving(task.playerId())));
+                || (!sessions.containsKey(task.playerId())
+                    && crew.busyOtherThan(task.playerId(), CrewDuty.Role.GUARD).isEmpty()));
     switch (GuardTasks.layover(task, trainName, online, now)) {
       case HOLD -> {
         return false;

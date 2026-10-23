@@ -37,6 +37,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  *       setFixed}：固定的展示框连交互事件都不触发，配置棍就没法用了。保护在最高优先级取消，其他插件的放行不会生效。
  *   <li>服务不可用时（{@code pids.yml} 关闭、启动失败）仍按框里的地图物品认出屏幕展示框并保护，只是不安装、不响应配置棍。
  *   <li>配置棍：右键打开配置菜单，左键查看信息，潜行左键请求拆除（再点确认）；都须能管理这块屏幕。
+ *   <li>不拿配置棍、有叫车权限时右键站台屏叫车；信号员控制台的点击由 {@code PidsDisplay} 交给信号员模块，这里不叫车。
  *   <li>安装纸：右键一个空展示框，在那面墙上按布局尺寸找矩形铺满。在最高优先级判断，领地保护等插件已取消的交互不安装。
  *   <li>区块加载时还原本次运行中已拆除的屏幕的展示框（拆除时区块未加载）。
  * </ul>
@@ -123,13 +124,14 @@ public final class PidsFrameListener implements Listener {
     plugin.getPidsService().ifPresent(service -> service.cleanOrphans(event.getEntities()));
   }
 
-  /** 右键站台屏叫车：按屏幕绑定的车站与站台列方向；测试卡、未绑车站、线路运行状况屏不叫车。 */
+  /** 右键站台屏叫车：按屏幕绑定的车站与站台列方向；测试卡、未绑车站、线路运行状况屏不叫车。信号员控制台上的右键是按控制台（{@code PidsDisplay} 处理），也不叫车。 */
   private void openCall(Player player, PidsService service, UUID screenId) {
     Optional<PidsScreen> screen = service.find(screenId);
     if (screen.isEmpty()
         || screen.get().mode() != PidsScreen.Mode.LIVE
         || screen.get().station().isEmpty()
-        || service.isLineStatus(screen.get())) {
+        || service.isLineStatus(screen.get())
+        || service.isSignalbox(screen.get())) {
       return;
     }
     // 按住右键每秒触发好几次：同一玩家间隔太短的不再开，免得每次都把各方向的车源排一遍。

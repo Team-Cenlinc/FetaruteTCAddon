@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 47
+config-version: 48
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -361,6 +361,24 @@ web-api:
   port: 8780
   # 共享令牌：非空时请求须带请求头 Authorization: Bearer <令牌>（或 X-Fetarute-Token: <令牌>），否则回 401
   token: ""
+
+signaller:
+  # 车站信号员：有权限（fetarute.signal.signaller）的玩家右键信号楼控制台（布局为 signalbox-* 的站台屏，绑定控制区）上岗，
+  # 控制区转为人工：进入控制区的列车须由信号员排列进路，已在区内的列车不受影响。下岗、下线或离开控制台过久即回到自动。
+  # 人工控制只在内存里，重启与重载一律回到自动。关闭后控制台只读
+  enabled: true
+  # 列车在控制区入口等候许可超过该秒数，由系统代为排列进路（记一笔代排，计入信号员成绩）；限 5–300 秒，等待一定有上限
+  auto-route-seconds: 20
+  # 离控制台该格数以内算在岗
+  console-range-blocks: 32
+  # 离开控制台范围后该秒数内未返回即下岗
+  grace-seconds: 30
+  # 扣车最长秒数，到时自动放行；不超过 150 秒（发车锁从到站起最长 180 秒，到站后过了一阵才扣的车可能被它提前放走）
+  max-hold-seconds: 150
+  # 驾驶员呼叫该秒数内未回复算漏接
+  call-timeout-seconds: 60
+  # 控制台临时提示（例如“进路被某车占用”）显示的秒数
+  notice-seconds: 3
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

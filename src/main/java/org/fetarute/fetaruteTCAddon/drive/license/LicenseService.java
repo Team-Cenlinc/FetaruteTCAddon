@@ -17,6 +17,7 @@ import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
@@ -40,6 +41,7 @@ import org.fetarute.fetaruteTCAddon.api.event.GuardTaskFinishedEvent;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
+import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
@@ -557,22 +559,39 @@ public final class LicenseService implements Listener, GuardExaminer {
                     true));
   }
 
-  /** 报名路考、车掌考试或练习前：不能正在驾驶、值乘，也不能领着驾驶或车掌任务。 */
+  /** 报名路考、车掌考试或练习前：不能在担任任何角色（驾驶、值乘、值守信号楼），也不能领着驾驶或车掌任务。 */
   private static Reply crewBusy(DriveSessionManager manager, UUID id) {
-    if (manager.sessionOf(id).isPresent()) {
-      return Reply.of("drive.license.exam.driving");
+    String key =
+        crewBusyKey(
+            manager.crewDuty(),
+            id,
+            player -> manager.sessionOf(player).isPresent(),
+            player -> manager.guards().map(found -> found.isOnDuty(player)).orElse(false));
+    return key == null ? null : Reply.of(key);
+  }
+
+  /**
+   * 按在岗登记判断能否报名，再按是正在当班还是只领了任务给出说法。
+   *
+   * @param driving 玩家是否正在驾驶（否则是领了驾驶任务）
+   * @param guardOnDuty 玩家是否正在值乘车掌（否则是领了车掌任务）
+   * @return 不能报名时的提示语言键；能报名时为 {@code null}
+   */
+  static String crewBusyKey(
+      CrewDuty crew, UUID id, Predicate<UUID> driving, Predicate<UUID> guardOnDuty) {
+    Optional<CrewDuty.Role> role = crew.busy(id);
+    if (role.isEmpty()) {
+      return null;
     }
-    if (manager.tasks().activeTaskOf(id).isPresent()) {
-      return Reply.of("drive.license.exam.has-task");
-    }
-    Optional<GuardSessionManager> guards = manager.guards();
-    if (guards.map(found -> found.isOnDuty(id)).orElse(false)) {
-      return Reply.of("drive.license.exam.guard-on-duty");
-    }
-    if (guards.flatMap(found -> found.tasks().activeTaskOf(id)).isPresent()) {
-      return Reply.of("drive.license.exam.has-guard-task");
-    }
-    return null;
+    return switch (role.get()) {
+      case DRIVER -> driving.test(id)
+          ? "drive.license.exam.driving"
+          : "drive.license.exam.has-task";
+      case GUARD -> guardOnDuty.test(id)
+          ? "drive.license.exam.guard-on-duty"
+          : "drive.license.exam.has-guard-task";
+      case SIGNALLER -> "drive.license.exam.signaller-on-duty";
+    };
   }
 
   /** 这名在线玩家这一级完整开完了几次练习。 */

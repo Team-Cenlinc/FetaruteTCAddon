@@ -19,6 +19,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
@@ -67,6 +68,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.yard.TrainCartsYardTrains;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardProvider;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardScope;
+import org.fetarute.fetaruteTCAddon.signaller.console.ConsoleTarget;
+import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxConsole;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -152,6 +155,9 @@ public final class PidsService {
 
   /** 本次运行中拆除的屏幕：区块加载时只自动还原这些屏幕的展示框。 */
   private final Set<UUID> removedThisRun = ConcurrentHashMap.newKeySet();
+
+  /** 信号员控制台的数据与点击的去处；信号员模块未接入时为 {@link SignalboxConsole#NONE}。 */
+  private volatile SignalboxConsole signalboxConsole = SignalboxConsole.NONE;
 
   private volatile boolean loaded;
   private volatile boolean directoryFailing;
@@ -384,8 +390,10 @@ public final class PidsService {
    * @return 只读的帧，长度为 {@code width × height}；渲染尺寸不符时为空数组
    */
   public byte[] frame(PidsContent content, int width, int height) {
-    // 站场图车一动就是新帧、以后不会再用：不进共享缓存，免得把各站台屏可复用的帧挤掉
-    if (content.key() instanceof PidsComposer.YardKey) {
+    // 站场图车一动就是新帧、以后不会再用：不进共享缓存，免得把各站台屏可复用的帧挤掉。
+    // 控制台的选中与按钮状态随点击当拍变化，也不进共享缓存，免得串屏或滞后
+    if (content.key() instanceof PidsComposer.YardKey
+        || content.key() instanceof PidsComposer.SignalboxKey) {
       return convert(content, width, height);
     }
     return frameCache.frame(content.key(), width, height, () -> convert(content, width, height));
@@ -819,6 +827,68 @@ public final class PidsService {
   /** 主布局是站场图（只有一页，不能组合翻页）。 */
   public boolean isYard(PidsScreen screen) {
     return layoutOf(screen).flatMap(PidsLayout::yard).isPresent();
+  }
+
+  /** 主布局是信号员控制台（{@code signalbox-*}）：右键是按、左键是取消选择，不叫车。 */
+  public boolean isSignalbox(PidsScreen screen) {
+    return layoutOf(screen).map(PidsLayout::signalbox).orElse(false);
+  }
+
+  /**
+   * 接入信号员控制台：控制台每秒最多取一次控制区的数据，玩家点击时把点到的东西交回去。
+   *
+   * @param console 信号员模块；null 恢复默认（控制台写“控制台未就绪”，点击无效）
+   */
+  public void setSignalboxConsole(SignalboxConsole console) {
+    SignalboxConsole shown = console == null ? SignalboxConsole.NONE : console;
+    this.signalboxConsole = shown;
+    composer.setSignalboxConsole(shown);
+  }
+
+  /** 当前接入的信号员控制台（未接入时为 {@link SignalboxConsole#NONE}）。 */
+  public SignalboxConsole signalboxConsole() {
+    return signalboxConsole;
+  }
+
+  /** 见 {@link PidsComposer#signalboxTarget}。 */
+  public ConsoleTarget signalboxTarget(PidsComposer.SignalboxKey key, int x, int y) {
+    return composer.signalboxTarget(key, x, y);
+  }
+
+  /**
+   * 玩家在控制台上点了一下：交给信号员模块（控制台位置取屏幕中间那块地图所在方块的中心）。
+   *
+   * @param player 点击的玩家
+   * @param screenId 被点的屏幕
+   * @param target 点到的东西（左键一律是取消选择）
+   * @return 交出去了（屏幕应当拍重画）；屏幕不存在、不在运行显示、不是控制台、没绑控制区或世界未加载时为 false
+   */
+  public boolean pressSignalbox(Player player, UUID screenId, ConsoleTarget target) {
+    Optional<PidsScreen> found = registry.find(screenId);
+    if (found.isEmpty()) {
+      return false;
+    }
+    PidsScreen screen = found.get();
+    if (screen.mode() != PidsScreen.Mode.LIVE
+        || screen.zone().isEmpty()
+        || screen.operatorCode().isEmpty()
+        || !isSignalbox(screen)) {
+      return false;
+    }
+    World world = Bukkit.getWorld(screen.worldId());
+    if (world == null) {
+      return false;
+    }
+    PidsScreen.Position center = screen.center();
+    Location console = new Location(world, center.x() + 0.5, center.y() + 0.5, center.z() + 0.5);
+    try {
+      signalboxConsole.press(
+          player, console, screen.operatorCode().get(), screen.zone().get(), target);
+    } catch (RuntimeException ex) {
+      logger.warn("信号员控制台处理点击失败: " + ex);
+      return false;
+    }
+    return true;
   }
 
   /** 屏幕所属运营商名下的控制区，按代码排序；屏幕没有所属运营商时为空。 */

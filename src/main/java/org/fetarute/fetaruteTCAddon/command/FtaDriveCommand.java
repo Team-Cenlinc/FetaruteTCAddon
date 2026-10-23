@@ -220,6 +220,14 @@ public final class FtaDriveCommand {
         manager
             .commandBuilder("fta")
             .literal("drive")
+            .literal("call")
+            .permission(permissionOf("call"))
+            .handler(ctx -> handleCall(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
             .literal("reverser")
             .permission(permissionOf("reverser"))
             .required("direction", StringParser.stringParser(), directionSuggestions)
@@ -560,6 +568,19 @@ public final class FtaDriveCommand {
     drive.chooseSplit(player, option, outcome -> sendStartOutcome(player, drive, outcome));
   }
 
+  /** 呼叫信号员：只有正在驾驶调度列车的驾驶员能用，不论车上有没有车掌。 */
+  private void handleCall(CommandSender sender) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    sender.sendMessage(plugin.getLocaleManager().component(drive.callSignaller(player)));
+  }
+
   private void handleReverser(CommandSender sender, String direction) {
     Player player = requirePlayer(sender);
     if (player == null) {
@@ -897,7 +918,7 @@ public final class FtaDriveCommand {
                         "mode",
                         record.mode(),
                         "state",
-                        locale.text("drive.task.state." + record.state().toLowerCase(Locale.ROOT)),
+                        recordState(locale, record),
                         "points",
                         String.valueOf(record.points()),
                         "grade",
@@ -906,6 +927,14 @@ public final class FtaDriveCommand {
                             : record.grade())));
           }
         });
+  }
+
+  /** 记录的终态文字：信号员班次记的是下岗原因，其余是任务终态。 */
+  private static String recordState(LocaleManager locale, DriveTaskRecord record) {
+    String state = record.state().toLowerCase(Locale.ROOT);
+    return DriveTaskRecord.MODE_SIGNALLER.equals(record.mode())
+        ? locale.text("drive.signaller.end." + state.replace('_', '-'))
+        : locale.text("drive.task.state." + state);
   }
 
   /** 排行：本周（近 7 天）或全部完成的任务按总分。 */

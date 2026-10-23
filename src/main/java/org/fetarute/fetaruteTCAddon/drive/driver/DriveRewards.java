@@ -127,6 +127,22 @@ public final class DriveRewards {
                 crewBlocks));
   }
 
+  /**
+   * 信号员一个班次的奖励：每列车按驾驶员人工停站的单价乘 {@code trainRatio}（经验与钱币各一份），再乘评级系数。按班次结算，不按值守时长计；ATO 折扣与同车加成都不适用。
+   *
+   * @param trainRatio 每列车的单价是驾驶员人工停站单价的几倍
+   * @param trains 计奖励的车数：经手的车里去掉超时代排的（调用方算好）
+   */
+  public static Reward signaller(
+      DriveRewardConfig config, double trainRatio, int trains, ScoreRules.Grade grade) {
+    if (config == null || !config.enabled()) {
+      return Reward.NONE;
+    }
+    double ratio = Double.isFinite(trainRatio) ? Math.max(0.0, trainRatio) : 0.0;
+    double units = Math.max(0, trains) * ratio * config.gradeMultiplier(grade);
+    return rounded(units * config.experiencePerStop(), units * config.moneyPerStop(), 0.0, 0.0);
+  }
+
   /** 车掌按站数与里程的数额（未乘评级系数）。 */
   private static double guardAmount(
       double perStop, double perKm, double stopRatio, double kmRatio, int stops, double blocks) {

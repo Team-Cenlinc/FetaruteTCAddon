@@ -71,6 +71,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostic
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.MovementAuthorityService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShortestPathDistanceCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.CanonicalForwardPathEvidence;
@@ -269,6 +270,9 @@ public final class RuntimeDispatchService {
    * <p>这两件事都不读占用、不改授权、不碰信号，因此整体放在协作者里；本类只负责在正确的时刻调用它。
    */
   private final StationStopCoordinator stationStopCoordinator;
+
+  /** 信号员进路许可闸：各放行入口在内核本来会放行时问它；没有接上信号员模块时一律放行。 */
+  private final SignallerGateCoordinator signallerGates;
 
   /** 拆分/联挂：插件自己发起的操作登记，与操作后按现场车身重新认列车的入口。 */
   private final org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime
@@ -1631,6 +1635,7 @@ public final class RuntimeDispatchService {
             this::resolveTrackedTrainName,
             this::resolveRouteDefinition,
             this::readRouteUuid);
+    this.signallerGates = new SignallerGateCoordinator(this.debugLogger, occupancyManager);
     this.couplingRuntime =
         new org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime(
             this::forgetPhysicalHydration);
@@ -1654,6 +1659,17 @@ public final class RuntimeDispatchService {
     // 计划站台跟着停靠协调器的计划源走，站牌经协调器读暂定站台：方法引用不占本类方法数。
     this.dynamicAllocator.setPreference(this.stationStopCoordinator::plannedPlatform);
     this.stationStopCoordinator.attachPlatforms(this.dynamicAllocator);
+    // 信号员改停股道：撤选台缓存要动有效节点覆盖，唤醒走闸协作者的下一 tick 重评估。
+    this.stationStopCoordinator.attachSignallerPlatforms(
+        new SignallerPlatforms(
+            this.debugLogger,
+            routeDefinitions,
+            this.progressRegistry,
+            railGraphService,
+            occupancyManager,
+            this.dynamicAllocator,
+            effectiveNodeOverrides,
+            this.signallerGates::wake));
     this.dynamicDestinationResolver =
         new DynamicDestinationResolver(dynamicAllocator, railGraphService, this.debugLogger);
     this.shortestPathDistanceCache =
@@ -1726,6 +1742,18 @@ public final class RuntimeDispatchService {
     return stationStopCoordinator;
   }
 
+  /**
+   * 返回信号员进路许可闸的协作者：接闸（{@link SignallerGateCoordinator#setGate}）与发许可后的唤醒都在它上面。
+   *
+   * <p>与 {@link #stationStops()} 同理只留这一个访问器：本类方法数贴着 SpotBugs 单类分析上限。
+   */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP",
+      justification = "故意交出协作者本体：主类要接闸，车库出车与健康层要问同一个闸；不能为此再摊 setter。")
+  public SignallerGateCoordinator signallerGates() {
+    return signallerGates;
+  }
+
   /** 返回拆分/联挂协作者：插件自己发起的操作登记，与操作后按现场车身重新认列车。 */
   public org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime coupling() {
     return couplingRuntime;
@@ -1757,6 +1785,8 @@ public final class RuntimeDispatchService {
             : trainName -> {
               throw new IllegalStateException("signal-reevaluation-requester-not-configured");
             };
+    // 信号员发许可、改停股道后的唤醒走同一个下一 tick 入口；撤销时闸协作者退回不唤醒，不沿用上面的失效关闭占位。
+    signallerGates.setWakeRequester(requester);
   }
 
   /**
@@ -5423,6 +5453,44 @@ public final class RuntimeDispatchService {
               + " localOnlyHold=true destinationMutated=false tokenInvalidated=false");
       return false;
     }
+    // 信号员闸（出站许可）：Smart 准入之后、释放与授权之前问；车掌看到的“出站信号开放”因此已包含信号员的许可。
+    Optional<SignallerGate.Hold> signallerHold =
+        signallerGates.admit(trainName, authorizationRequest, now);
+    if (signallerHold.isPresent()) {
+      NodeId departureNext = resolveEffectiveNode(trainName, route, currentIndex + 1);
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(
+              trainName, train, graph, authorizationRequest, definition.nodeId(), departureNext);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          definition.nodeId(),
+          Optional.of(SignallerGateCoordinator.withoutQueuePosition(authorizationRequest)),
+          graph,
+          now,
+          train,
+          braking.retainedResources());
+      String waitDetail = signallerHold.get().detail(now);
+      applyNonInvalidatingBlockedStop(
+          train,
+          properties,
+          trainName,
+          SignallerGateCoordinator.STOP_REASON,
+          waitDetail,
+          route,
+          definition.nodeId(),
+          departureNext,
+          graph,
+          SignallerGateCoordinator.blockedDecision(now),
+          authorizationRequest,
+          stationAdmissionAuthorityEnd,
+          braking);
+      rememberDepartureGateBlockers(
+          trainName, SignallerGateCoordinator.DECISION_REASON + " " + waitDetail, now);
+      signallerGates.withdrawQueuedEntries(trainName, signallerHold.get());
+      return false;
+    }
     Optional<NodeId> nextNode =
         currentIndex + 1 < route.waypoints().size()
             ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
@@ -6527,6 +6595,38 @@ public final class RuntimeDispatchService {
     OccupancyRequest request =
         prepareRuntimeAuthorizationRequest(
             authorizationContext, graph, SignalComputationTrace.Source.PROGRESS_TRIGGER);
+    // 信号员闸：在释放与申请之前问；被拦按普通占用等待停车，不走会作废令牌的硬停车。
+    Optional<SignallerGate.Hold> signallerHold = signallerGates.admit(trainName, request, now);
+    if (signallerHold.isPresent()) {
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(trainName, train, graph, request, currentNode, nextNode);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNode,
+          Optional.of(SignallerGateCoordinator.withoutQueuePosition(request)),
+          graph,
+          now,
+          train,
+          braking.retainedResources());
+      applyNonInvalidatingBlockedStop(
+          train,
+          properties,
+          trainName,
+          SignallerGateCoordinator.STOP_REASON,
+          signallerHold.get().detail(now),
+          route,
+          currentNode,
+          nextNode,
+          graph,
+          SignallerGateCoordinator.blockedDecision(now),
+          request,
+          AuthorityEnd.none(),
+          braking);
+      signallerGates.withdrawQueuedEntries(trainName, signallerHold.get());
+      return;
+    }
     List<OccupancyResource> keepResources =
         mergeKeepResourcesWithCurrentPosition(
             context.request().resourceList(),
@@ -9006,6 +9106,8 @@ public final class RuntimeDispatchService {
     hydratedPhysicalOwnerIdentities.remove(key);
     expectedMaterializedSpawns.remove(key);
     liveRailFootprintDiagnosticStates.remove(key);
+    signallerGates.forget(trainName);
+    stationStopCoordinator.signallerPlatforms().discard(trainName);
   }
 
   /**
@@ -12486,10 +12588,12 @@ public final class RuntimeDispatchService {
     boolean depotRelated =
         routeOpt.map(route -> isDepotRelated(entry, route, operationType)).orElse(false);
     boolean nearRouteEnd = routeSize > 0 && entry.currentIndex() >= Math.max(0, routeSize - 2);
+    // 停在控制区入口等信号员也算人工扣车：受控停车、卡住清理与阻挡状态显示都按计划内静止对待。
     boolean manualHold =
         TrainTagHelper.readTagValue(properties, "FTA_MANUAL_HOLD").isPresent()
             || TrainTagHelper.readTagValue(properties, "FTA_MAINTENANCE_HOLD").isPresent()
-            || runtimeTrainController.hasDriver(entry.trainName());
+            || runtimeTrainController.hasDriver(entry.trainName())
+            || signallerGates.waiting(entry.trainName());
     return Optional.of(
         new DeadlockTrainContext(
             entry.trainName(),
@@ -13114,6 +13218,15 @@ public final class RuntimeDispatchService {
     if (trainName == null || trainName.isBlank()) {
       return false;
     }
+    // 已停在控制区入口等信号员的车不重发目的地；还没等的车在下面申请进路前照样问闸。
+    if (signallerGates.waiting(trainName)) {
+      debugLogger.accept(
+          "HealthMonitor reissueDestination blocked: train="
+              + trainName
+              + " reason="
+              + SignallerGateCoordinator.DECISION_REASON);
+      return false;
+    }
     TrainProperties properties = resolveTrainPropertiesByName(trainName).orElse(null);
     if (properties == null) {
       return false;
@@ -13240,6 +13353,19 @@ public final class RuntimeDispatchService {
               + trainName
               + " reason="
               + reissueAdmission.reason());
+      return false;
+    }
+    // 恢复层同样过信号员闸，否则重发目的地会绕过人工控制区的许可。
+    Optional<SignallerGate.Hold> signallerHold =
+        signallerGates.admit(trainName, authorizationRequest, recoveryNow);
+    if (signallerHold.isPresent()) {
+      debugLogger.accept(
+          "HealthMonitor reissueDestination blocked: train="
+              + trainName
+              + " reason="
+              + SignallerGateCoordinator.DECISION_REASON
+              + " "
+              + signallerHold.get().detail(recoveryNow));
       return false;
     }
     if (occupancyManager == null) {
@@ -13419,6 +13545,15 @@ public final class RuntimeDispatchService {
    */
   public boolean forceRelaunchByName(String trainName) {
     if (trainName == null || trainName.isBlank()) {
+      return false;
+    }
+    // 停在控制区入口等信号员的车不重发：重发会绕过人工闸，等待有超时自动排列兜底。
+    if (signallerGates.waiting(trainName)) {
+      debugLogger.accept(
+          "HealthMonitor forceRelaunch blocked: train="
+              + trainName
+              + " reason=blocked:"
+              + SignallerGateCoordinator.DECISION_REASON);
       return false;
     }
     TrainProperties properties = resolveTrainPropertiesByName(trainName).orElse(null);
@@ -14834,6 +14969,46 @@ public final class RuntimeDispatchService {
           authorizationRequest,
           authorityEnd,
           braking);
+      return;
+    }
+    // 信号员闸放在 canEnter 之前：没有许可的车停在控制区外，不进控制区资源的排队，次序由信号员定。
+    // 停车保持只借本次申请的行车计划、不带资源，免得替它在区内刷新排队位次。
+    Optional<SignallerGate.Hold> signallerHold =
+        signallerGates.admit(trainName, authorizationRequest, now);
+    if (signallerHold.isPresent()) {
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(
+              trainName,
+              train,
+              graph,
+              authorizationRequest,
+              currentNodeForSignal,
+              nextNode.orElse(null));
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          Optional.of(SignallerGateCoordinator.withoutQueuePosition(authorizationRequest)),
+          graph,
+          now,
+          train,
+          braking.retainedResources());
+      applyNonInvalidatingBlockedStop(
+          train,
+          properties,
+          trainName,
+          SignallerGateCoordinator.STOP_REASON,
+          signallerHold.get().detail(now),
+          route,
+          currentNodeOpt.orElse(null),
+          nextNode.orElse(null),
+          graph,
+          SignallerGateCoordinator.blockedDecision(now),
+          authorizationRequest,
+          authorityEnd,
+          braking);
+      signallerGates.withdrawQueuedEntries(trainName, signallerHold.get());
       return;
     }
     // 本拍开始时生效的令牌。本拍 acquire 成功后会签新令牌，之后再回滚时要沿已持有授权刹车，依据只能是这一张。
@@ -16557,6 +16732,8 @@ public final class RuntimeDispatchService {
     }
     // 新任务开始前清理旧的“有效节点覆盖”，避免跨线路遗留导致寻路/占用异常。
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
+    // 信号员给上一趟选的股道同样不带进新任务：同一交路再跑一趟时停站下标会撞上。
+    stationStopCoordinator.signallerPlatforms().discard(trainName);
     dynamicCapacityWaits.remove(trainName);
     blockerSnapshots.remove(normalizeTrainKey(trainName));
     // 车体指纹与采样时刻同样按车名键：不随任务重置清掉，就会随 layover 改名无界增长，
@@ -16698,6 +16875,19 @@ public final class RuntimeDispatchService {
       ctx = ctxOpt.get();
     }
     OccupancyRequest request = ctx.request();
+    // 信号员闸：认领票据之前问；被拦就本次不接续，候选与票据原样留着等下一次重试。
+    Optional<SignallerGate.Hold> signallerHold = signallerGates.admit(trainName, request, now);
+    if (signallerHold.isPresent()) {
+      debugLogger.accept(
+          "Layover 发车等待: train="
+              + trainName
+              + " reason="
+              + SignallerGateCoordinator.DECISION_REASON
+              + " "
+              + signallerHold.get().detail(now));
+      signallerGates.withdrawQueuedEntries(trainName, signallerHold.get());
+      return LayoverDispatchResult.failed(trainName, SignallerGateCoordinator.DECISION_REASON);
+    }
     Optional<LayoverRegistry.DispatchAttempt> dispatchAttempt =
         layoverRegistry.claimDispatch(
             trainName,
@@ -21540,6 +21730,9 @@ public final class RuntimeDispatchService {
         }
       }
     }
+    // 信号员的许可、等待与改停股道同样按名记：随车迁到新名，迁完唤醒新名重评估（拆分出的新车不经这里，没有许可）。
+    stationStopCoordinator.signallerPlatforms().renamed(previousKey, currentKey);
+    signallerGates.renamed(previousKey, currentKey);
   }
 
   private void rollbackRuntimeOwnerRegistries(
@@ -29627,7 +29820,10 @@ public final class RuntimeDispatchService {
           releasedResources);
     }
     OccupancyDecision decision = occupancyManager.acquire(request);
-    retainForwardQueuePositionAtStop(canonicalRequest, now, priority);
+    // 停在控制区入口等信号员的车不刷新前方排队位次：它进不了控制区，替它排队只会挡住拿到许可的车（区外站台等出站许可时同样如此）。
+    if (!signallerGates.waiting(trainName)) {
+      retainForwardQueuePositionAtStop(canonicalRequest, now, priority);
+    }
     return decision != null && decision.allowed();
   }
 

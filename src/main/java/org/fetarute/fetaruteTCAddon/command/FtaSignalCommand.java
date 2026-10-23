@@ -151,7 +151,7 @@ public final class FtaSignalCommand {
   private void help(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     for (String key :
-        List.of("header", "create", "list", "info", "rename", "add", "delete", "bind")) {
+        List.of("header", "create", "list", "info", "rename", "add", "delete", "bind", "duty")) {
       sender.sendMessage(locale.component("command.signal.help." + key));
     }
   }
@@ -408,6 +408,13 @@ public final class FtaSignalCommand {
                 return;
               }
               plugin.refreshControlZones();
+              // 值守这片控制区的信号员随之下岗
+              plugin
+                  .getSignallerService()
+                  .ifPresent(
+                      service ->
+                          service.zoneRemoved(
+                              found.target().operator().code(), found.zone().code()));
               ctx.sender()
                   .sendMessage(
                       locale.component(

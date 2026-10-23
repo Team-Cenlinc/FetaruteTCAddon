@@ -1221,6 +1221,7 @@ command:
       add: "<gray>/fta signal zone add|remove <white><公司> <运营商> <控制区> station|depot <代码></white></gray> <white>-</white> <dark_aqua>加入或移出车站、车库</dark_aqua>"
       delete: "<gray>/fta signal zone delete <white><公司> <运营商> <控制区></white> --confirm</gray> <white>-</white> <dark_aqua>删除控制区</dark_aqua>"
       bind: "<gray>/fta pids set <white><屏幕></white> zone <white><控制区>|none</white></gray> <white>-</white> <dark_aqua>站场图屏绑定控制区（屏幕须先绑定车站或运营商）</dark_aqua>"
+      duty: "<gray>/fta signal on|off|status</gray> <white>-</white> <dark_aqua>信号员上岗（先右键点击控制台）、下岗、查看各信号楼；控制台为布局 signalbox-3x5 且绑定控制区的站台屏</dark_aqua>"
     zone:
       not-found: "<prefix> <red>未找到控制区</red> <gray>(operator=<white><operator></white>, zone=<white><zone></white>)</gray>"
       create:
@@ -1662,6 +1663,58 @@ coupler:
     rear: "后"
     idle: "本站待命"
     return: "回库"
+# 车站信号员：控制台（signalbox 布局的站台屏）上岗、下岗、呼叫与回复
+signaller:
+  mode:
+    manual: "人工"
+    auto: "自动"
+  command:
+    player-only: "<prefix> <red>该命令只能由玩家执行</red>"
+    unavailable: "<prefix> <red>信号员功能未就绪</red>"
+    not-on-duty: "<prefix> <gray>当前未在值守信号楼</gray>"
+    status:
+      header: "<prefix> <dark_aqua>信号楼</dark_aqua>"
+      line: "<gray>-</gray> <white><name></white> <gray>(<operator>:<zone>)</gray> <aqua><mode></aqua> <gray>值守：</gray><white><signaller></white> <gray>入口等候 <white><waiting></white> · 许可 <white><permits></white> · 扣车 <white><holds></white></gray>"
+      empty: "<prefix> <gray>暂无信号楼在用</gray>"
+      nobody: "无人"
+  duty:
+    prompt: "<prefix> <white>控制区 <aqua><zone></aqua> 无人值守。</white> <click:run_command:'/fta signal on'><hover:show_text:'<gray>点击执行：</gray> <white>/fta signal on</white>'><green>[上岗]</green></hover></click>"
+    occupied: "<prefix> <yellow>控制区 <white><zone></white> 由 <white><signaller></white> 值守</yellow>"
+    started: "<prefix> <green>已在 <aqua><zone></aqua> 上岗，控制区转为人工。</green> <gray>进入控制区的列车须由信号员排列进路；离开控制台 <white><range></white> 格以外超过 <white><grace></white> 秒即下岗，控制区回到自动。/fta signal off 下岗</gray>"
+    started-auto: "<prefix> <yellow>已在 <aqua><zone></aqua> 上岗；调度图未就绪，控制区暂为自动，就绪后可在控制台转为人工</yellow>"
+    start:
+      disabled: "<prefix> <red>信号员功能已关闭</red>"
+      no-permission: "<prefix> <red>当前操作者不具备信号员权限</red>"
+      no-request: "<prefix> <red>请先右键点击信号楼控制台，再确认上岗</red>"
+      zone-not-found: "<prefix> <red>控制台绑定的控制区已不存在</red>"
+      already-on-duty: "<prefix> <yellow>已在 <white><zone></white> 值守</yellow>"
+      zone-taken: "<prefix> <red>控制区 <white><zone></white> 已由 <white><signaller></white> 值守</red>"
+      busy-driver: "<prefix> <red>当前正在驾驶或已领取驾驶任务，不能同时值守信号楼</red>"
+      busy-guard: "<prefix> <red>当前正在值乘车掌或已领取车掌任务，不能同时值守信号楼</red>"
+    away: "<prefix> <yellow>已离开 <white><zone></white> 控制台，<white><grace></white> 秒内未返回即下岗</yellow>"
+    away-bar: "<yellow>已离开控制台，<white><grace></white> 秒后下岗</yellow>"
+    back: "<prefix> <green>已返回 <white><zone></white> 控制台</green>"
+    back-bar: "<green>已返回控制台</green>"
+    ended:
+      off-duty: "<prefix> <gray>已在 <white><zone></white> 下岗，控制区回到自动</gray>"
+      left-console: "<prefix> <yellow>离开控制台过久，已在 <white><zone></white> 下岗，控制区回到自动</yellow>"
+      quit: "<prefix> <gray>已在 <white><zone></white> 下岗</gray>"
+      incapacitated: "<prefix> <yellow>状态变化，已在 <white><zone></white> 下岗，控制区回到自动</yellow>"
+      revoked: "<prefix> <yellow>控制区 <white><zone></white> 已变更，值守结束</yellow>"
+      shutdown: "<prefix> <gray>信号员功能停止，已在 <white><zone></white> 下岗</gray>"
+  call:
+    incoming: "<prefix> <gold>列车 <white><train></white> 呼叫信号楼</gold> <gray>请在控制台点击呼叫牌回复</gray>"
+    incoming-bar: "<gold>列车 <white><train></white> 呼叫信号楼</gold>"
+    unanswered: "<prefix> <yellow><white><zone></white> 信号楼未回复呼叫</yellow>"
+  reply:
+    wait: "<prefix> <aqua><zone></aqua> <white>信号楼：前方有车，请等待</white>"
+    wait-bar: "<aqua>信号楼：</aqua><white>前方有车，请等待</white>"
+    route-setting: "<prefix> <aqua><zone></aqua> <white>信号楼：进路正在排列</white>"
+    route-setting-bar: "<aqua>信号楼：</aqua><white>进路正在排列</white>"
+    caution: "<prefix> <aqua><zone></aqua> <white>信号楼：请以注意速度运行</white>"
+    caution-bar: "<aqua>信号楼：</aqua><white>请以注意速度运行</white>"
+    ack: "<prefix> <aqua><zone></aqua> <white>信号楼：已收到</white>"
+    ack-bar: "<aqua>信号楼：</aqua><white>已收到</white>"
 pids:
   # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
   board:
@@ -1901,6 +1954,76 @@ pids:
       building-secondary: "Drawing the yard"
       partial: "部分区间缺少轨道几何，列车位置可能显示不全；重建调度图后可修正"
       partial-secondary: "Some trains may be missing; rebuild the rail graph"
+    # 信号员控制台（signalbox-3x5）：标题栏、列车表、操作按钮与临时提示
+    signalbox:
+      # 标题栏：模式牌、值守者（<name> 为信号员名）、呼叫牌（<train> 为车次）
+      mode:
+        manual: "人工"
+        auto: "自动"
+      signaller: "值守：<name>"
+      unattended: "无人值守"
+      call: "<train> 呼叫"
+      # 列车表表头
+      header:
+        train: "车次"
+        destination: "去向"
+        status: "状态"
+        delay: "晚点"
+      # 列车表的状态；<seconds> 为处在该状态的秒数
+      status:
+        approaching: "接近"
+        waiting: "入口等待 <seconds> 秒"
+        route-pending: "进路排列中"
+        route-set: "进路已锁闭"
+        in-zone: "区内运行"
+        dwelling: "停站"
+        held: "扣车 <seconds> 秒"
+      on-time: "正点"
+      no-trains: "控制区内暂无列车"
+      # 操作按钮：中文 12 号、英文 10 号上下叠放，按钮宽 100 像素
+      button:
+        set-route: "排列进路"
+        set-route-secondary: "Set route"
+        cancel-route: "取消进路"
+        cancel-route-secondary: "Cancel route"
+        hold: "扣车"
+        hold-secondary: "Hold"
+        release: "放行"
+        release-secondary: "Release"
+        auto-pass: "自动通过"
+        auto-pass-secondary: "Auto pass"
+        to-auto: "转为自动"
+        to-auto-secondary: "Switch to auto"
+        to-manual: "转为人工"
+        to-manual-secondary: "Switch to manual"
+      # 回复驾驶员呼叫的四条固定回复
+      reply:
+        wait: "前方有车，请等待"
+        wait-secondary: "Train ahead, please wait"
+        route-setting: "进路正在排列"
+        route-setting-secondary: "Route is being set"
+        caution: "请以注意速度运行"
+        caution-secondary: "Proceed at caution speed"
+        ack: "已收到"
+        ack-secondary: "Acknowledged"
+      # 标题栏右侧的临时提示（数秒后消失）；route-blocked-by 的 <train> 为占用进路的车次
+      notice:
+        route-blocked: "进路被占用，许可排列中"
+        route-blocked-by: "进路被 <train> 占用"
+        route-locked: "进路已锁闭，不能取消"
+        not-dwelling: "该列车未在站内停车，不能扣车"
+        not-dynamic: "该站不是动态站台，不能改股道"
+        auto-pass-on: "已设置自动通过"
+        auto-pass-off: "已取消自动通过"
+        reply-sent: "回复已发送"
+        hold-expired: "扣车已达上限，已自动放行"
+        no-route: "无法确定该列车的入口，不能设置自动通过"
+        graph-not-ready: "调度图未就绪，不能转为人工"
+      # 没有控制台数据时写在列车表位置的说明
+      not-ready: "控制台未就绪"
+      not-ready-secondary: "Signal box console not ready"
+      no-zone: "未绑定控制区，请以 /fta pids set <屏幕> zone <控制区> 绑定"
+      no-zone-secondary: "Bind a control zone to use the console"
     # 宣传页（乘车礼仪）与安全提示页（通过列车临近时显示）
     # 1×3 与 2×1 上中文标题最多 4 字、英文标题约 18 个字母；说明中文最多 9 字、英文最多两行
     notice:
@@ -2598,6 +2721,7 @@ drive:
         disabled: "<prefix> <red>车掌功能当前未开放</red>"
         on-duty: "<prefix> <red>值乘中不能领取车掌任务，请先离岗</red>"
         driving: "<prefix> <red>驾驶中或已领驾驶任务时不能领取车掌任务</red>"
+        signaller-on-duty: "<prefix> <red>值守信号楼期间不能领取车掌任务，请先下岗（/fta signal off）</red>"
         already-has-task: "<prefix> <red>你已领取一班车掌，请先完成或放弃（/fta guard task abandon）</red>"
         taken: "<prefix> <red>该车次的车掌已被领取</red>"
         unavailable: "<prefix> <red>该车次已取消或在本站终到，不能领取</red>"
@@ -2913,7 +3037,8 @@ drive:
         disabled: "<prefix> <red>车掌功能已关闭</red>"
         unavailable: "<prefix> <red>车掌功能当前不可用，请查看控制台日志</red>"
         already-on-duty: "<prefix> <yellow>你已经在值乘中</yellow>"
-        driving: "<prefix> <red>你正在驾驶，不能同时当车掌</red>"
+        driving: "<prefix> <red>驾驶中或已领驾驶任务时不能当车掌</red>"
+        signaller-on-duty: "<prefix> <red>当前正在值守信号楼，不能同时当车掌，请先下岗（/fta signal off）</red>"
         bad-game-mode: "<prefix> <red>当前游戏模式不允许值乘</red>"
         not-seated: "<prefix> <red>请先坐在列车车尾驾驶室的座位上</red>"
         not-managed: "<prefix> <red>只有调度列车才设车掌</red>"
@@ -2934,6 +3059,10 @@ drive:
       confirmed: "<green>已确认发车</green>"
     signal:
       acknowledged: "<green>信号已确认</green>"
+    # 车上无车掌时，驾驶员按两短铃即呼叫信号员（动作栏提示）
+    signaller:
+      called: "<aqua>已呼叫信号员，请等候回复</aqua>"
+      none: "<yellow>当前无信号员值守</yellow>"
     rescue:
       warn: "<prefix> <yellow>列车已停留 <white><seconds></white> 秒未能前进，请尽快恢复运行；继续停留将转为 ATO</yellow>"
       ato: "<prefix> <yellow>列车停留过久，已转为 ATO 运行</yellow>"
@@ -2945,6 +3074,18 @@ drive:
     protection:
       tripped: "<prefix> <red>线路拥堵保护已启动：<white><reason></white>；已将 <white><count></white> 列人工驾驶的列车交还自动运行，暂停接班</red>"
     skip-handback: "<prefix> <red>本趟已越站 <white><count></white> 次，列车停车后交还自动运行，本趟任务判为未完成，不发奖励</red>"
+  # 信号员班次的结算与记录（驾驶记录里的终态一栏按下岗原因显示）
+  signaller:
+    result:
+      summary: "<prefix> <white>信号员班次结束：控制区 <aqua><zone></aqua>，得分 <yellow><points></yellow>，评级 <gold><grade></gold>；经手列车 <white><trains></white> 列，其中超时代排 <white><auto></white> 列</white>"
+      no-trains: "<prefix> <gray>控制区 <white><zone></white> 本班次未经手列车，不计成绩与奖励</gray>"
+    end:
+      off-duty: "下岗"
+      left-console: "离开控制台"
+      quit: "下线"
+      incapacitated: "无法值守"
+      revoked: "被撤下"
+      shutdown: "插件关闭"
   task:
     board:
       title: "<dark_gray>任务板 · </dark_gray><black><station></black>"
@@ -2994,6 +3135,7 @@ drive:
       cancelled: "<prefix> <red>当前不能领取该车次</red>"
       continuing: "<prefix> <red>你正在等待接续驾驶本车的下一趟，结束驾驶后才能领取其他车次</red>"
       guard-busy: "<prefix> <red>当车掌或已领车掌任务时不能领取驾驶任务（/fta guard task abandon 放弃车掌任务）</red>"
+      signaller-busy: "<prefix> <red>值守信号楼期间不能领取驾驶任务，请先下岗（/fta signal off）</red>"
       assigned: "<prefix> <green>你接到驾驶任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 接班，开到终点站</green>"
       assigned-interval: "<prefix> <green>你接到驾驶任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 接班，开到 <white><handover></white></green>"
       already-has-task: "<prefix> <red>你已有未完成的任务，请先完成或放弃（/fta drive task abandon）</red>"
@@ -3240,6 +3382,7 @@ drive:
       guard-unavailable: "<prefix> <red>车掌功能当前未开放，暂不能报名<white><name></white>考试或练习</red>"
       guard-on-duty: "<prefix> <red>值乘中不能报名考试或练习，请先离岗（/fta guard off）</red>"
       has-guard-task: "<prefix> <red>你已领取车掌任务，请先完成或放弃（/fta guard task abandon）再报名考试或练习</red>"
+      signaller-on-duty: "<prefix> <red>值守信号楼期间不能报名考试或练习，请先下岗（/fta signal off）</red>"
       platform: " <platform> 站台"
       in-progress-guard: "<prefix> <yellow>你正在参加<white><name></white>考试，请先完成本次考试</yellow> <click:run_command:'/fta guard task abandon'><hover:show_text:'<gray>放弃本次考试（不计成绩）</gray>'><gray>[放弃本次考试]</gray></hover></click>"
       need-training-guard: "<prefix> <yellow>报考<white><name></white>前，须先完成 <white><required></white> 次车掌练习（已完成 <white><done></white> 次）：坐上要练习的调度列车后输入 <white>/fta license practice <class></white></yellow>"
@@ -3577,6 +3720,7 @@ drive:
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- 查看当前驾驶状态</gray>"
       entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- 停稳后设置换向手柄</gray>"
       entry-split: "  <gray>•</gray> <white>/fta drive split <keep|switch|end></white> <gray>- 列车分行后选择继续驾驶留下的一段、改驾解下的一段或结束驾驶</gray>"
+      entry-call: "  <gray>•</gray> <white>/fta drive call</white> <gray>- 驾驶调度列车时呼叫信号员（车上无车掌时也可按两短铃）</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- 列出全部驾驶会话</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [玩家]</white> <gray>- 强制结束某名玩家的驾驶</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- 开关驾驶输入诊断日志</gray>"
@@ -3616,10 +3760,15 @@ drive:
       reserved-by-other-revoke: "<prefix> <red>该列车担当的车次已由 <white><player></white> 领取，正等候其接班；须先收回其任务才能接管</red> <click:suggest_command:'/fta drive revoke <player>'><hover:show_text:'<gray>点击填入：</gray> <white>/fta drive revoke <player></white>'><yellow>[收回任务]</yellow></hover></click>"
       cab-seat-unavailable: "<prefix> <red>无法传送到驾驶座：驾驶座已被占用，或距离列车过远</red>"
       cab-offer: "<prefix> <click:run_command:'/fta drive on cab'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive on cab</white>'><aqua>[传送到驾驶座并开始驾驶]</aqua></hover></click>"
-      guard-on-duty: "<prefix> <red>你正在当车掌，不能同时驾驶</red>"
+      guard-on-duty: "<prefix> <red>值乘车掌或已领车掌任务时不能驾驶，请先离岗（/fta guard off）或放弃车掌任务（/fta guard task abandon）</red>"
+      signaller-on-duty: "<prefix> <red>当前正在值守信号楼，不能同时驾驶，请先下岗（/fta signal off）</red>"
     stop:
       stopped: "<prefix> <yellow>已结束驾驶</yellow>"
       not-driving: "<prefix> <red>你当前没有在驾驶</red>"
+    call:
+      called: "<prefix> <aqua>已呼叫信号员，请等候回复</aqua>"
+      none: "<prefix> <yellow>当前无信号员值守</yellow>"
+      not-dispatch: "<prefix> <red>只有驾驶调度列车时才能呼叫信号员</red>"
     status: "<prefix> <white><train></white> <gray>|</gray> 档位 <yellow><notch></yellow> <gray>|</gray> 速度 <white><speed_kmh></white> km/h <gray>(限速 <limit_kmh>)</gray> <gray>|</gray> <mode> 加速 <accel> 减速 <decel> 米/秒² <gray>|</gray> <direction> <gray>|</gray> <phase>"
     reverser:
       set: "<prefix> 换向手柄：<aqua><direction></aqua>"

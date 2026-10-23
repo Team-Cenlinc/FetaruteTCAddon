@@ -625,6 +625,7 @@ drive:
         disabled: "<prefix> <red>Guards are not available right now</red>"
         on-duty: "<prefix> <red>You are on duty; go off duty first</red>"
         driving: "<prefix> <red>You cannot take guard duty while driving or holding a driving task</red>"
+        signaller-on-duty: "<prefix> <red>You cannot take guard duty while staffing a signal box; go off duty first (/fta signal off)</red>"
         already-has-task: "<prefix> <red>You already have a guard duty; finish or abandon it first (/fta guard task abandon)</red>"
         taken: "<prefix> <red>This trip already has a guard</red>"
         unavailable: "<prefix> <red>This trip is cancelled or terminates here</red>"
@@ -940,7 +941,8 @@ drive:
         disabled: "<prefix> <red>Guard duty is disabled</red>"
         unavailable: "<prefix> <red>Guard duty is unavailable, check the console log</red>"
         already-on-duty: "<prefix> <yellow>You are already on duty</yellow>"
-        driving: "<prefix> <red>You are driving and cannot be the guard at the same time</red>"
+        driving: "<prefix> <red>You cannot be the guard while driving or holding a driving task</red>"
+        signaller-on-duty: "<prefix> <red>You are staffing a signal box and cannot be the guard at the same time; go off duty first (/fta signal off)</red>"
         bad-game-mode: "<prefix> <red>Your game mode does not allow guard duty</red>"
         not-seated: "<prefix> <red>Sit in a seat in the rear cab of the train first</red>"
         not-managed: "<prefix> <red>Only dispatched trains carry a guard</red>"
@@ -961,6 +963,10 @@ drive:
       confirmed: "<green>Departure confirmed</green>"
     signal:
       acknowledged: "<green>Signal acknowledged</green>"
+    # With no guard on board, two short rings call the signaller (action bar)
+    signaller:
+      called: "<aqua>Signaller called; please wait for a reply</aqua>"
+      none: "<yellow>No signaller is on duty</yellow>"
     rescue:
       warn: "<prefix> <yellow>The train has not moved for <white><seconds></white> s; resume running soon or it will switch to ATO</yellow>"
       ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
@@ -972,6 +978,18 @@ drive:
     protection:
       tripped: "<prefix> <red>Congestion protection: <white><reason></white>; handed back <white><count></white> player-driven train(s); takeovers are paused</red>"
     skip-handback: "<prefix> <red>This trip has skipped <white><count></white> station(s); the train will stop and return to automatic operation, and the trip is marked incomplete with no reward</red>"
+  # Signaller shift settlement and records (the state column of driving records shows why the shift ended)
+  signaller:
+    result:
+      summary: "<prefix> <white>Signaller shift ended: zone <aqua><zone></aqua>, score <yellow><points></yellow>, grade <gold><grade></gold>; handled <white><trains></white> train(s), <white><auto></white> of them routed automatically after timing out</white>"
+      no-trains: "<prefix> <gray>No trains passed through zone <white><zone></white> during this shift; no score or reward</gray>"
+    end:
+      off-duty: "Off duty"
+      left-console: "Left the console"
+      quit: "Logged out"
+      incapacitated: "Unable to continue"
+      revoked: "Removed from duty"
+      shutdown: "Plugin stopped"
   task:
     board:
       title: "<dark_gray>Task board · </dark_gray><black><station></black>"
@@ -1021,6 +1039,7 @@ drive:
       cancelled: "<prefix> <red>This trip cannot be taken right now</red>"
       continuing: "<prefix> <red>You are waiting to continue with this train's next trip; end driving before taking another trip</red>"
       guard-busy: "<prefix> <red>You cannot take a driving task while on guard duty or holding one (/fta guard task abandon to give it up)</red>"
+      signaller-busy: "<prefix> <red>You cannot take a driving task while staffing a signal box; go off duty first (/fta signal off)</red>"
       assigned: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to the terminus</green>"
       assigned-interval: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to <white><handover></white></green>"
       already-has-task: "<prefix> <red>You already have a task; finish or abandon it first (/fta drive task abandon)</red>"
@@ -1267,6 +1286,7 @@ drive:
       guard-unavailable: "<prefix> <red>Guard duty is not available right now, so the <white><name></white> exam or practice cannot be taken</red>"
       guard-on-duty: "<prefix> <red>You cannot sign up for an exam or practice while on guard duty; go off duty first (/fta guard off)</red>"
       has-guard-task: "<prefix> <red>You have a guard duty claimed; finish or abandon it (/fta guard task abandon) before signing up for an exam or practice</red>"
+      signaller-on-duty: "<prefix> <red>You cannot sign up for an exam or practice while staffing a signal box; go off duty first (/fta signal off)</red>"
       platform: ", platform <platform>"
       in-progress-guard: "<prefix> <yellow>You are taking the <white><name></white> exam; finish it first</yellow> <click:run_command:'/fta guard task abandon'><hover:show_text:'<gray>Abandon this exam (it does not count)</gray>'><gray>[Abandon exam]</gray></hover></click>"
       need-training-guard: "<prefix> <yellow>Before the <white><name></white> exam, complete <white><required></white> guard practice run(s) (done: <white><done></white>): board the dispatched train you want to practise on and run <white>/fta license practice <class></white></yellow>"
@@ -1604,6 +1624,7 @@ drive:
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- Show the current driving state</gray>"
       entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- Set the reverser while stopped</gray>"
       entry-split: "  <gray>•</gray> <white>/fta drive split <keep|switch|end></white> <gray>- After the train divides: keep driving the part that stays, switch to the detached part, or end driving</gray>"
+      entry-call: "  <gray>•</gray> <white>/fta drive call</white> <gray>- Call the signaller while driving a dispatched train (with no guard on board, two short rings do the same)</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- List all driving sessions</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [player]</white> <gray>- Force a player to stop driving</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"
@@ -1643,10 +1664,15 @@ drive:
       reserved-by-other-revoke: "<prefix> <red>A trip of this train has been taken by <white><player></white>, who is due to take it over; revoke their task before taking it over</red> <click:suggest_command:'/fta drive revoke <player>'><hover:show_text:'<gray>Click to fill in:</gray> <white>/fta drive revoke <player></white>'><yellow>[Revoke task]</yellow></hover></click>"
       cab-seat-unavailable: "<prefix> <red>Cannot move you to the driver's seat: it is taken, or you are too far from the train</red>"
       cab-offer: "<prefix> <click:run_command:'/fta drive on cab'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive on cab</white>'><aqua>[Move to the driver's seat and start driving]</aqua></hover></click>"
-      guard-on-duty: "<prefix> <red>You are on guard duty and cannot drive at the same time</red>"
+      guard-on-duty: "<prefix> <red>You cannot drive while on guard duty or holding a guard duty; go off duty (/fta guard off) or abandon it (/fta guard task abandon) first</red>"
+      signaller-on-duty: "<prefix> <red>You are staffing a signal box and cannot drive at the same time; go off duty first (/fta signal off)</red>"
     stop:
       stopped: "<prefix> <yellow>Driving ended</yellow>"
       not-driving: "<prefix> <red>You are not driving</red>"
+    call:
+      called: "<prefix> <aqua>Signaller called; please wait for a reply</aqua>"
+      none: "<prefix> <yellow>No signaller is on duty</yellow>"
+      not-dispatch: "<prefix> <red>You can only call the signaller while driving a dispatched train</red>"
     status: "<prefix> <white><train></white> <gray>|</gray> Notch <yellow><notch></yellow> <gray>|</gray> Speed <white><speed_kmh></white> km/h <gray>(limit <limit_kmh>)</gray> <gray>|</gray> <mode> accel <accel> decel <decel> m/s² <gray>|</gray> <direction> <gray>|</gray> <phase>"
     reverser:
       set: "<prefix> Reverser: <aqua><direction></aqua>"
@@ -1714,6 +1740,58 @@ drive:
     confirm: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; this trip will then count as abandoned</yellow>"
     confirm-handback: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; driving then ends and the train returns to automatic operation</yellow>"
     confirm-terminal: "<prefix> <yellow>You are at the terminus: open the doors first to score this trip, then leave the seat to change ends; leaving now abandons the trip. Press Shift again within 2 seconds to leave</yellow>"
+# Station signaller: console (PIDS screen with a signalbox layout), duty, calls and replies
+signaller:
+  mode:
+    manual: "Manual"
+    auto: "Auto"
+  command:
+    player-only: "<prefix> <red>Only players can run this command</red>"
+    unavailable: "<prefix> <red>The signaller feature is not ready</red>"
+    not-on-duty: "<prefix> <gray>You are not on duty at a signal box</gray>"
+    status:
+      header: "<prefix> <dark_aqua>Signal boxes</dark_aqua>"
+      line: "<gray>-</gray> <white><name></white> <gray>(<operator>:<zone>)</gray> <aqua><mode></aqua> <gray>Signaller:</gray> <white><signaller></white> <gray>waiting <white><waiting></white> · permits <white><permits></white> · held <white><holds></white></gray>"
+      empty: "<prefix> <gray>No signal box is in use</gray>"
+      nobody: "nobody"
+  duty:
+    prompt: "<prefix> <white>Control zone <aqua><zone></aqua> is unstaffed.</white> <click:run_command:'/fta signal on'><hover:show_text:'<gray>Click to run:</gray> <white>/fta signal on</white>'><green>[Go on duty]</green></hover></click>"
+    occupied: "<prefix> <yellow>Control zone <white><zone></white> is staffed by <white><signaller></white></yellow>"
+    started: "<prefix> <green>On duty at <aqua><zone></aqua>; the zone is now manual.</green> <gray>Trains entering the zone need a route set by the signaller. Staying more than <white><range></white> blocks from the console for over <white><grace></white> seconds ends the duty and returns the zone to auto. /fta signal off to go off duty</gray>"
+    started-auto: "<prefix> <yellow>On duty at <aqua><zone></aqua>; the dispatch graph is not ready, so the zone stays in auto for now. Switch to manual on the console once it is ready</yellow>"
+    start:
+      disabled: "<prefix> <red>The signaller feature is disabled</red>"
+      no-permission: "<prefix> <red>You do not have the signaller permission</red>"
+      no-request: "<prefix> <red>Right-click a signal box console first, then confirm</red>"
+      zone-not-found: "<prefix> <red>The console's control zone no longer exists</red>"
+      already-on-duty: "<prefix> <yellow>Already on duty at <white><zone></white></yellow>"
+      zone-taken: "<prefix> <red>Control zone <white><zone></white> is already staffed by <white><signaller></white></red>"
+      busy-driver: "<prefix> <red>You are driving or hold a driving task, so you cannot staff a signal box at the same time</red>"
+      busy-guard: "<prefix> <red>You are working as a guard or hold a guard task, so you cannot staff a signal box at the same time</red>"
+    away: "<prefix> <yellow>You left the <white><zone></white> console; return within <white><grace></white> seconds or the duty ends</yellow>"
+    away-bar: "<yellow>Away from the console; duty ends in <white><grace></white> s</yellow>"
+    back: "<prefix> <green>Back at the <white><zone></white> console</green>"
+    back-bar: "<green>Back at the console</green>"
+    ended:
+      off-duty: "<prefix> <gray>Off duty at <white><zone></white>; the zone is back to auto</gray>"
+      left-console: "<prefix> <yellow>Away from the console too long; off duty at <white><zone></white>, the zone is back to auto</yellow>"
+      quit: "<prefix> <gray>Off duty at <white><zone></white></gray>"
+      incapacitated: "<prefix> <yellow>Your state changed; off duty at <white><zone></white>, the zone is back to auto</yellow>"
+      revoked: "<prefix> <yellow>Control zone <white><zone></white> was changed; the duty ends</yellow>"
+      shutdown: "<prefix> <gray>The signaller feature stopped; off duty at <white><zone></white></gray>"
+  call:
+    incoming: "<prefix> <gold>Train <white><train></white> is calling the signal box</gold> <gray>Click the call badge on the console to reply</gray>"
+    incoming-bar: "<gold>Train <white><train></white> is calling</gold>"
+    unanswered: "<prefix> <yellow>The <white><zone></white> signal box did not answer the call</yellow>"
+  reply:
+    wait: "<prefix> <aqua><zone></aqua> <white>signal box: train ahead, please wait</white>"
+    wait-bar: "<aqua>Signal box:</aqua> <white>train ahead, please wait</white>"
+    route-setting: "<prefix> <aqua><zone></aqua> <white>signal box: route is being set</white>"
+    route-setting-bar: "<aqua>Signal box:</aqua> <white>route is being set</white>"
+    caution: "<prefix> <aqua><zone></aqua> <white>signal box: proceed at caution</white>"
+    caution-bar: "<aqua>Signal box:</aqua> <white>proceed at caution</white>"
+    ack: "<prefix> <aqua><zone></aqua> <white>signal box: received</white>"
+    ack-bar: "<aqua>Signal box:</aqua> <white>received</white>"
 sign:
   # AutoStation sign line 4 is blank or unrecognised: the doors will not open at this stop
   autostation-door-missing: "<prefix> <yellow>Line 4 has no valid door direction; trains stopping here will not open their doors.</yellow>\n<gray>Write the world direction of the doors (N/E/S/W/NE/NW/SE/SW) or BOTH; write NONE if this platform has no doors to open.</gray>"
@@ -1780,3 +1858,75 @@ command:
       unlinked: "<prefix> <yellow>Removed the link from <white><from></white></yellow>"
       myworlds-unavailable: "<prefix> <red>MyWorlds portals are unavailable; existing links were left unchanged</red>"
       save-failed: "<prefix> <red>Saving portal links failed; nothing was changed. Check the console log</red>"
+pids:
+  board:
+    # Signal box console (signalbox-3x5): header, train list, buttons and transient notices
+    signalbox:
+      # Header: mode badge, signaller on duty (<name>), driver call badge (<train>)
+      mode:
+        manual: "Manual"
+        auto: "Auto"
+      signaller: "On duty: <name>"
+      unattended: "Unattended"
+      call: "<train> calling"
+      # Train list column headers
+      header:
+        train: "Train"
+        destination: "To"
+        status: "Status"
+        delay: "Delay"
+      # Train list status; <seconds> is how long the train has been in it
+      status:
+        approaching: "Approaching"
+        waiting: "Waiting at entry <seconds> s"
+        route-pending: "Route being set"
+        route-set: "Route locked"
+        in-zone: "In zone"
+        dwelling: "Dwelling"
+        held: "Held <seconds> s"
+      on-time: "On time"
+      no-trains: "No trains in the control zone"
+      # Buttons: primary 12 px over secondary 10 px, 100 px wide
+      button:
+        set-route: "Set route"
+        set-route-secondary: ""
+        cancel-route: "Cancel route"
+        cancel-route-secondary: ""
+        hold: "Hold"
+        hold-secondary: ""
+        release: "Release"
+        release-secondary: ""
+        auto-pass: "Auto pass"
+        auto-pass-secondary: ""
+        to-auto: "Switch to auto"
+        to-auto-secondary: ""
+        to-manual: "Switch to manual"
+        to-manual-secondary: ""
+      # The four fixed replies to a driver's call
+      reply:
+        wait: "Train ahead, please wait"
+        wait-secondary: ""
+        route-setting: "Route is being set"
+        route-setting-secondary: ""
+        caution: "Proceed at caution speed"
+        caution-secondary: ""
+        ack: "Acknowledged"
+        ack-secondary: ""
+      # Transient notices on the right of the header; <train> in route-blocked-by is the blocking train
+      notice:
+        route-blocked: "Route occupied, permission pending"
+        route-blocked-by: "Route occupied by <train>"
+        route-locked: "Route locked, cannot cancel"
+        not-dwelling: "Train is not dwelling, cannot hold"
+        not-dynamic: "Not a dynamic platform stop"
+        auto-pass-on: "Auto pass set"
+        auto-pass-off: "Auto pass cleared"
+        reply-sent: "Reply sent"
+        hold-expired: "Hold limit reached, released"
+        no-route: "Entry unknown, cannot set auto pass"
+        graph-not-ready: "Rail graph not ready, cannot go manual"
+      # Shown in place of the train list when there is no console data
+      not-ready: "Signal box console not ready"
+      not-ready-secondary: ""
+      no-zone: "No control zone: bind one with /fta pids set <screen> zone <zone>"
+      no-zone-secondary: ""

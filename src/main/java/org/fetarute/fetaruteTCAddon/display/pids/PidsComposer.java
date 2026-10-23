@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.display.pids;
 import java.time.Instant;
 import java.time.InstantSource;
 import java.time.ZoneId;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -44,10 +45,14 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardViews;
+import org.fetarute.fetaruteTCAddon.display.pids.view.SignalboxView;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardSource;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardZones;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardScope;
+import org.fetarute.fetaruteTCAddon.signaller.console.ConsoleTarget;
+import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxConsole;
+import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
  * 决定一块屏幕此刻显示什么。
@@ -57,6 +62,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.yard.YardScope;
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
  *   <li>测试卡模式：测试卡，列出布局、识别出的车站（或运营商）与屏幕编号
  *   <li>站场图屏（布局带站场图组件）：本站或所绑控制区的轨道、占用与列车（{@link PidsYardSource}）；要绑车站或控制区，不组合翻页、不放公告
+ *   <li>信号员控制台（站场图屏再带列车表或操作按钮，即 {@code signalbox-*}）：站场图加上所绑控制区的控制台数据（{@link SignalboxConsole}）；
+ *       没绑控制区或信号员模块未就绪时只画站场图，列车表的位置写说明
  *   <li>线路运行状况屏（布局带状况表组件）：屏幕所属运营商各线路的运行状况（{@link PidsLineStatusViews}），不轮播宣传页；线路多时分页； 可以不绑车站、只绑运营商
  *   <li>组合翻页（屏幕除主布局外还选了布局，见 {@link PidsScreenPages}）：按时钟轮流显示各布局，每个布局照它自己的规则显示，
  *       线路运行状况分页时每轮放一页、按轮轮换；线路运行状况屏单独用时也按这套时钟翻页。只绑运营商的屏幕只轮流显示线路运行状况
@@ -101,6 +108,9 @@ public final class PidsComposer {
   private volatile PidsYardSource yards = PidsYardSource.NONE;
 
   private volatile PidsYardZones controlZones = PidsYardZones.NONE;
+
+  /** 信号员控制台的数据。未接入时控制台写“控制台未就绪”。 */
+  private volatile SignalboxConsole signalboxConsole = SignalboxConsole.NONE;
 
   private final PidsYardViews yardViews;
 
@@ -178,6 +188,15 @@ public final class PidsComposer {
     this.controlZones = controlZones == null ? PidsYardZones.NONE : controlZones;
   }
 
+  /**
+   * 接入信号员控制台的数据。
+   *
+   * @param console 数据来源；null 恢复默认（写“控制台未就绪”）
+   */
+  public void setSignalboxConsole(SignalboxConsole console) {
+    this.signalboxConsole = console == null ? SignalboxConsole.NONE : console;
+  }
+
   /** 没有公告。 */
   /**
    * 接入叫车：站台屏空行写叫车提示、叫来的车状态写“叫车”。
@@ -242,6 +261,20 @@ public final class PidsComposer {
   /** 站场图屏的内容标识：几何按对象身份比较，占用与列车按值比较。 */
   record YardKey(PidsLayout layout, PidsYardView view) {}
 
+  /**
+   * 信号员控制台的内容标识：站场图之外，控制台数据（选中车、按钮能不能按、进路、信号、呼叫等全部字段）按值比较，值相同就不重画。
+   * 不进各屏共享的帧缓存（选中与按钮状态随点击当拍变化，不能串到别的屏、也不能滞后）；屏幕据此推出点击区。
+   *
+   * @param layout 布局
+   * @param view 一帧
+   */
+  public record SignalboxKey(PidsLayout layout, SignalboxView view) {
+    public SignalboxKey {
+      Objects.requireNonNull(layout, "layout");
+      Objects.requireNonNull(view, "view");
+    }
+  }
+
   /** 排版缓存的键：公告内容版本与布局编号、尺寸（重要与否已含在内容版本里）。布局与文案随站台屏服务一起重建，不必比较整个布局。 */
   private record TypesetKey(String revision, String layoutId, int tileRows, int tileCols) {}
 
@@ -293,13 +326,13 @@ public final class PidsComposer {
     if (screen.mode() == PidsScreen.Mode.TEST_CARD) {
       return Optional.of(card(testCard(screen, pages)));
     }
-    // 站场图屏不能组合翻页，只有主布局一页；要绑车站或控制区
+    // 站场图屏（含信号员控制台）不能组合翻页，只有主布局一页；要绑车站或控制区
     PidsLayout primary = pages.get(0);
     if (primary.yard().isPresent()) {
-      return Optional.of(
-          screen.station().isPresent() || screen.zone().isPresent()
-              ? yard(screen, primary)
-              : card(testCard(screen, pages)));
+      if (screen.station().isEmpty() && screen.zone().isEmpty()) {
+        return Optional.of(card(testCard(screen, pages)));
+      }
+      return Optional.of(primary.signalbox() ? signalbox(screen, primary) : yard(screen, primary));
     }
     // 到发页要绑车站：只绑运营商的屏幕只显示其中的线路运行状况
     List<PidsLayout> shown =
@@ -376,6 +409,65 @@ public final class PidsComposer {
 
   /** 站场图：本站或所绑控制区的占用与列车，按站台屏的检查间隔刷新。绑了控制区时以控制区为准，标题写控制区名。 */
   private PidsContent yard(PidsScreen screen, PidsLayout layout) {
+    PidsYardView shown = yardView(screen, layout);
+    return new PidsContent(new YardKey(layout, shown), () -> renderer.renderYard(layout, shown));
+  }
+
+  /**
+   * 信号员控制台：站场图加上所绑控制区的控制台数据。没绑控制区时写“未绑定控制区”，信号员模块未就绪（数据为空或取数出错）时写“控制台未就绪”，
+   * 都只画站场图。去向的站码换成站名（按控制区所属运营商查）。
+   */
+  private PidsContent signalbox(PidsScreen screen, PidsLayout layout) {
+    PidsYardView yardView = yardView(screen, layout);
+    Optional<String> operator = screen.operatorCode();
+    Optional<SignalboxState> state = Optional.empty();
+    Optional<Names> placeholder;
+    if (screen.zone().isEmpty() || operator.isEmpty()) {
+      placeholder = Optional.of(vocabulary.signalboxNoZone());
+    } else {
+      try {
+        state = signalboxConsole.state(operator.get(), screen.zone().get());
+      } catch (RuntimeException ex) {
+        state = Optional.empty();
+      }
+      if (state == null) {
+        state = Optional.empty();
+      }
+      placeholder =
+          state.isPresent() ? Optional.empty() : Optional.of(vocabulary.signalboxNotReady());
+    }
+    Map<String, String> destinations = new HashMap<>();
+    state.ifPresent(
+        found ->
+            found.rows().stream()
+                .flatMap(row -> row.destination().stream())
+                .distinct()
+                .forEach(
+                    code ->
+                        directory
+                            .stationName(
+                                code.contains(":") ? code : operator.orElseThrow() + ":" + code)
+                            .map(Names::primary)
+                            .ifPresent(name -> destinations.put(code, name))));
+    SignalboxView view =
+        new SignalboxView(yardView, state, vocabulary.signalboxLabels(), destinations, placeholder);
+    return new PidsContent(
+        new SignalboxKey(layout, view), () -> renderer.renderSignalbox(layout, view));
+  }
+
+  /**
+   * 信号员控制台上 ({@code x}, {@code y}) 处右键点到的东西（见 {@link PidsRenderer#signalboxTarget}）。
+   *
+   * @param key 屏幕上正显示的内容
+   * @param x 整块屏幕的像素横坐标
+   * @param y 整块屏幕的像素纵坐标
+   */
+  public ConsoleTarget signalboxTarget(SignalboxKey key, int x, int y) {
+    return renderer.signalboxTarget(key.layout(), key.view(), x, y);
+  }
+
+  /** 站场图屏的一帧：绑了控制区时以控制区为准，标题写控制区名。 */
+  private PidsYardView yardView(PidsScreen screen, PidsLayout layout) {
     PidsLayout.Yard widget = layout.yard().orElseThrow();
     PidsYardView view;
     if (screen.zone().isPresent()) {
@@ -396,8 +488,7 @@ public final class PidsComposer {
       YardPicture picture = yards.picture(YardScope.station(station), screen.worldId(), widget);
       view = yardViews.build(station, theme(screen), clock.instant(), zone, picture);
     }
-    PidsYardView shown = view;
-    return new PidsContent(new YardKey(layout, shown), () -> renderer.renderYard(layout, shown));
+    return view;
   }
 
   /** 线路运行状况的一页：线路少时用大行，多了用小行并分页。 */

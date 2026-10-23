@@ -297,6 +297,7 @@ public final class YardProvider implements PidsYardSource {
             new YardTrainEntry(
                 train.name(),
                 new YardPicture.TrainMark(
+                    train.name(),
                     details.label(),
                     details.lineColor(),
                     Lateness.of(details.delaySeconds()),

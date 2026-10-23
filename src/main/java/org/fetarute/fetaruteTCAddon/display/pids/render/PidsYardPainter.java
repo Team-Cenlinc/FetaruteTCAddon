@@ -56,7 +56,44 @@ final class PidsYardPainter {
     return PidsTheme.LIGHT.equals(theme) ? HELD_LIGHT : HELD_DARK;
   }
 
+  /**
+   * 叠在站场图上的东西（信号员控制台用）：只读站场图屏不叠任何东西，画面与没有这一层时逐像素相同。
+   *
+   * <p>两处时机：空闲轨道画好之后、占用标记之前（进路的预显示与排列中，被锁闭与占用盖住）；车次窗画好之后（信号、股道选择、选中框）。 都在站场图的裁剪范围内画。
+   */
+  interface Overlay {
+
+    /** 什么都不叠。 */
+    Overlay NONE = new Overlay() {};
+
+    /** 空闲轨道画好之后、占用标记之前。 */
+    default void routes(YardGeometry geometry) {}
+
+    /**
+     * 车次窗画好之后。
+     *
+     * @param describers 各车次窗的位置
+     */
+    default void top(YardGeometry geometry, List<Describer> describers) {}
+  }
+
+  /**
+   * 一个车次窗。
+   *
+   * @param train 列车
+   * @param text 车次窗里写的字（超宽已省略）
+   * @param x 左
+   * @param y 上
+   * @param width 宽
+   * @param height 高
+   */
+  record Describer(YardPicture.TrainMark train, String text, int x, int y, int width, int height) {}
+
   void draw(PidsLayout.Yard yard, PidsYardView view) {
+    draw(yard, view, Overlay.NONE);
+  }
+
+  void draw(PidsLayout.Yard yard, PidsYardView view, Overlay overlay) {
     PidsTheme theme = p.theme();
     p.fill(yard.x(), yard.y(), yard.width(), 1, theme.inverseMuted());
     p.fill(yard.x(), yard.y() + yard.height() - 1, yard.width(), 1, theme.inverseMuted());
@@ -76,18 +113,17 @@ final class PidsYardPainter {
             theme.panel());
       }
       drawDepotPanels(geometry.get());
-      drawTracks(geometry.get(), view.picture().marks());
+      drawTracks(geometry.get(), view.picture().marks(), overlay);
       List<int[]> texts =
           new ArrayList<>(drawDepots(yard, geometry.get(), view.depot(), view.depotTrack()));
       texts.addAll(drawPlatformLabels(yard, geometry.get(), view.track()));
       drawLabels(yard, geometry.get(), texts);
-      List<int[]> placed = new ArrayList<>();
       for (YardPicture.TrainMark train : view.picture().trains()) {
         drawBody(train);
       }
-      for (YardPicture.TrainMark train : view.picture().trains()) {
-        drawDescriber(yard, train, placed);
-      }
+      List<Describer> describers = describers(yard, view.picture().trains(), p.measure());
+      describers.forEach(describer -> drawDescriber(yard, describer));
+      overlay.top(geometry.get(), describers);
       view.note()
           .ifPresent(
               note ->
@@ -104,11 +140,13 @@ final class PidsYardPainter {
     }
   }
 
-  private void drawTracks(YardGeometry geometry, List<YardPicture.EdgeMark> marks) {
+  private void drawTracks(
+      YardGeometry geometry, List<YardPicture.EdgeMark> marks, Overlay overlay) {
     PidsTheme theme = p.theme();
     for (YardGeometry.Path path : geometry.paths()) {
       drawPath(path, TRACK, theme.outline());
     }
+    overlay.routes(geometry);
     Map<EdgeId, YardPicture.Mark> marked = new HashMap<>();
     marks.forEach(mark -> marked.put(mark.edge(), mark.mark()));
     for (YardGeometry.Path path : geometry.paths()) {
@@ -240,7 +278,7 @@ final class PidsYardPainter {
     }
   }
 
-  private void drawPath(YardGeometry.Path path, int thickness, int rgb) {
+  void drawPath(YardGeometry.Path path, int thickness, int rgb) {
     for (YardGeometry.Segment s : path.segments()) {
       p.line(s.x0(), s.y0(), s.x1(), s.y1(), thickness, rgb);
     }
@@ -401,37 +439,56 @@ final class PidsYardPainter {
     }
   }
 
-  /** 车次窗：车头上方，与已放好的重叠时改放下方，仍重叠就往右挪。 */
-  private void drawDescriber(
-      PidsLayout.Yard yard, YardPicture.TrainMark train, List<int[]> placed) {
-    PidsTheme theme = p.theme();
+  /**
+   * 各车次窗的位置：车头上方，与已放好的重叠时改放下方，仍重叠就往右挪。只按布局与文字宽度推，不依赖画的过程，信号员控制台据此算点击区。
+   *
+   * @param yard 站场图组件
+   * @param trains 站场内的列车，按画的先后
+   * @param measure 量文字的尺子
+   */
+  static List<Describer> describers(
+      PidsLayout.Yard yard, List<YardPicture.TrainMark> trains, PidsTextMeasure measure) {
     int size = yard.labelSize();
-    String text = p.ellipsize(train.label(), size, LABEL_MAX);
-    int width = STRIP + 2 + p.width(text, size) + 3;
-    int height = size + 3;
-    YardGeometry.Point head = train.anchor();
-    int left = yard.x() + 1;
-    int right = yard.x() + yard.width() - 1 - width;
-    int x = Math.max(left, Math.min(head.x() - width / 2, right));
-    int above = head.y() - height - 4;
-    int below = head.y() + 5;
-    int y = above < yard.y() + 2 ? below : above;
-    if (overlaps(placed, x, y, width, height)) {
-      y = y == above ? below : above;
+    List<int[]> placed = new ArrayList<>();
+    List<Describer> out = new ArrayList<>(trains.size());
+    for (YardPicture.TrainMark train : trains) {
+      String text = measure.ellipsize(train.label(), size, LABEL_MAX);
+      int width = STRIP + 2 + measure.width(text, size) + 3;
+      int height = size + 3;
+      YardGeometry.Point head = train.anchor();
+      int left = yard.x() + 1;
+      int right = yard.x() + yard.width() - 1 - width;
+      int x = Math.max(left, Math.min(head.x() - width / 2, right));
+      int above = head.y() - height - 4;
+      int below = head.y() + 5;
+      int y = above < yard.y() + 2 ? below : above;
+      if (overlaps(placed, x, y, width, height)) {
+        y = y == above ? below : above;
+      }
+      for (int tries = 0; tries < 6 && overlaps(placed, x, y, width, height); tries++) {
+        x = Math.min(right, x + width / 2 + 2);
+      }
+      placed.add(new int[] {x, y, width, height});
+      out.add(new Describer(train, text, x, y, width, height));
     }
-    for (int tries = 0; tries < 6 && overlaps(placed, x, y, width, height); tries++) {
-      x = Math.min(right, x + width / 2 + 2);
-    }
-    placed.add(new int[] {x, y, width, height});
-    p.fill(x, y, width, height, theme.panel());
-    p.fill(x, y, STRIP, height, train.lineColor().orElse(theme.outline()));
+    return out;
+  }
+
+  /** 车次窗：面板色底、左边线路色条；晚点超过 1 分钟琥珀色字、超过 5 分钟红字。 */
+  private void drawDescriber(PidsLayout.Yard yard, Describer describer) {
+    PidsTheme theme = p.theme();
+    YardPicture.TrainMark train = describer.train();
+    int x = describer.x();
+    int y = describer.y();
+    p.fill(x, y, describer.width(), describer.height(), theme.panel());
+    p.fill(x, y, STRIP, describer.height(), train.lineColor().orElse(theme.outline()));
     int color =
         switch (train.lateness()) {
           case ON_TIME -> theme.text();
           case LATE -> theme.amber();
           case SEVERELY_LATE -> theme.red();
         };
-    p.text(text, size, x + STRIP + 2, y + 2, color);
+    p.text(describer.text(), yard.labelSize(), x + STRIP + 2, y + 2, color);
   }
 
   private static boolean overlaps(List<int[]> placed, int x, int y, int width, int height) {

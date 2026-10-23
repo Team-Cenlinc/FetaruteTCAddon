@@ -1,12 +1,15 @@
 package org.fetarute.fetaruteTCAddon.display.pids.view;
 
+import java.util.EnumMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
+import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
  * 站台屏文案。中英文同时显示，每条文案取两个键：{@code <键>} 为中文，{@code <键>-secondary} 为英文。
@@ -533,6 +536,62 @@ public final class PidsVocabulary {
   /** 有区间缺少轨道几何、以直线代替。 */
   public Names yardPartial() {
     return names("yard.partial");
+  }
+
+  /** 信号员控制台的文案（{@code pids.board.signalbox.*}）。 */
+  public SignalboxView.Labels signalboxLabels() {
+    Map<SignalboxState.RowStatus, String> statuses = new EnumMap<>(SignalboxState.RowStatus.class);
+    for (SignalboxState.RowStatus status : SignalboxState.RowStatus.values()) {
+      statuses.put(status, primary("signalbox.status." + keyOf(status)));
+    }
+    Map<SignalboxState.Button, Names> buttons = new EnumMap<>(SignalboxState.Button.class);
+    for (SignalboxState.Button button : SignalboxState.Button.values()) {
+      if (button != SignalboxState.Button.MODE) {
+        buttons.put(button, names("signalbox.button." + keyOf(button)));
+      }
+    }
+    Map<SignalboxState.Reply, Names> replies = new EnumMap<>(SignalboxState.Reply.class);
+    for (SignalboxState.Reply reply : SignalboxState.Reply.values()) {
+      replies.put(reply, names("signalbox.reply." + keyOf(reply)));
+    }
+    Map<SignalboxState.NoticeKind, String> notices = new EnumMap<>(SignalboxState.NoticeKind.class);
+    for (SignalboxState.NoticeKind kind : SignalboxState.NoticeKind.values()) {
+      notices.put(kind, primary("signalbox.notice." + keyOf(kind)));
+    }
+    return new SignalboxView.Labels(
+        primary("signalbox.mode.manual"),
+        primary("signalbox.mode.auto"),
+        primary("signalbox.signaller"),
+        primary("signalbox.unattended"),
+        primary("signalbox.call"),
+        primary("signalbox.header.train"),
+        primary("signalbox.header.destination"),
+        primary("signalbox.header.status"),
+        primary("signalbox.header.delay"),
+        statuses,
+        primary("signalbox.on-time"),
+        primary("signalbox.no-trains"),
+        buttons,
+        names("signalbox.button.to-auto"),
+        names("signalbox.button.to-manual"),
+        replies,
+        notices,
+        primary("signalbox.notice.route-blocked-by"));
+  }
+
+  /** 信号员模块未就绪（或控制区查不到）时控制台写的说明。 */
+  public Names signalboxNotReady() {
+    return names("signalbox.not-ready");
+  }
+
+  /** 控制台屏幕没绑控制区时写的说明。 */
+  public Names signalboxNoZone() {
+    return names("signalbox.no-zone");
+  }
+
+  /** 枚举常量 → 文案键的一段：小写、下划线换成连字符（{@code ROUTE_PENDING} → {@code route-pending}）。 */
+  private static String keyOf(Enum<?> value) {
+    return value.name().toLowerCase(Locale.ROOT).replace('_', '-');
   }
 
   private Names names(String key) {

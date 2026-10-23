@@ -172,6 +172,7 @@ drive:
       protection-active: ["<prefix> <red>The line is congested; new shifts are paused</red>"]
       no-permission: ["<prefix> <red>You are not allowed to drive trains outside dispatch; take a driving task to drive a dispatched train</red>"]
       not-stopped-at-station: ["<prefix> <red>A dispatched train can only be taken over while it is stopped at a station</red>"]
+      guard-on-duty: ["<prefix> <red>You are on guard duty and cannot drive at the same time</red>"]
     status: ["<prefix> <white><train></white> <gray>|</gray> Notch <yellow><notch></yellow> <gray>|</gray> Speed <white><speed_kmh></white> km/h <gray>(limit <limit_kmh>)</gray> <gray>|</gray> <mode> accel <accel> decel <decel> b/s² <gray>|</gray> <direction> <gray>|</gray> <phase>"]
     congestion:
       status: ["<prefix> Congestion breaker: <white><status></white>"]
@@ -230,6 +231,10 @@ drive:
       door: ["<prefix> <red>Door fault: the door-closed loop is open and traction is cut. Make sure the doors are closed, then use the door bypass on the desk.</red>"]
   seat-exit:
     moving: ["<prefix> <yellow>You cannot leave the seat while the train is moving; stop first, then press Shift</yellow>"]
+  guard:
+    command:
+      start:
+        driving: ["<prefix> <red>You are driving and cannot be the guard at the same time</red>"]
 sign:
   stopmark:
     invalid: ["<prefix> <red>Invalid stop mark</red> <gray>Line 3: carriage:N, e.g. carriage:4, carriage:4,6, carriage:3-5, carriage:*</gray>"]
