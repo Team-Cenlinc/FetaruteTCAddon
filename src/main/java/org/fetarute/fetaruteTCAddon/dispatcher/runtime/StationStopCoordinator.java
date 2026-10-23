@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.UUID;
@@ -132,6 +133,85 @@ public final class StationStopCoordinator {
     if (allocator != null) {
       allocator.setCouplingPartners(this.couplingPartners);
     }
+  }
+
+  /** 压上站牌之前估计列车会停在站牌之后多远：停车位置标、先到联挂站时挂上以后整列的中点等，照 AutoStation 对位的同一规则（实现在插件层，读世界里的牌子与标志）。 */
+  @FunctionalInterface
+  public interface StopTailEstimator {
+    /**
+     * @param train 列车
+     * @param trainName 列车名
+     * @param routeId 列车此刻的交路；读不到时为 {@code null}
+     * @param stopNode 要停的车站节点
+     * @return 第一节车厢中心停在站牌之后多远（格）；估不出时为空
+     */
+    OptionalDouble tailBlocks(
+        RuntimeTrainHandle train, String trainName, UUID routeId, NodeId stopNode);
+  }
+
+  private volatile StopTailEstimator stopTail =
+      (train, name, route, node) -> OptionalDouble.empty();
+
+  /** 注册压牌前的停车点估计；{@code null} 恢复为估不出（调度按半个车长估）。 */
+  public void setStopTail(StopTailEstimator estimator) {
+    this.stopTail =
+        estimator == null ? (train, name, route, node) -> OptionalDouble.empty() : estimator;
+  }
+
+  /**
+   * 压上站牌之前估计列车会停在站牌之后多远（第一节车厢中心，格），见 {@link StopTailEstimator}。
+   *
+   * @return 估不出、或估计时出错时为空
+   */
+  public OptionalDouble stopTailBlocks(RuntimeTrainHandle train, NodeId stopNode) {
+    if (train == null || stopNode == null) {
+      return OptionalDouble.empty();
+    }
+    try {
+      TrainProperties properties = train.properties();
+      String name =
+          properties == null || trainNames == null
+              ? null
+              : trainNames.apply(properties).orElse(null);
+      if (name == null) {
+        return OptionalDouble.empty();
+      }
+      UUID route =
+          properties == null || routeUuids == null
+              ? null
+              : routeUuids.apply(properties).orElse(null);
+      OptionalDouble tail = stopTail.tailBlocks(train, name, route, stopNode);
+      return tail != null && tail.isPresent() && Double.isFinite(tail.getAsDouble())
+          ? OptionalDouble.of(Math.max(0.0, tail.getAsDouble()))
+          : OptionalDouble.empty();
+    } catch (RuntimeException ex) {
+      debugLogger.accept("STATION_STOP_TAIL_ESTIMATE_FAILED stop=" + stopNode + " error=" + ex);
+      return OptionalDouble.empty();
+    }
+  }
+
+  /**
+   * 车站停车点在站牌之后多远（第一节车厢中心，格），调度按它把天花板延长到停车点（见 {@code RunCurveModel.ControlEnd}）：
+   *
+   * <ol>
+   *   <li>压上站牌后 AutoStation 的停站刹车动作在走：取它的余下距离（{@link RuntimeTrainHandle#stopCurveRemainingBlocks}）；
+   *   <li>压牌前：照 AutoStation 对位的规则估（{@link #stopTailBlocks}：停车位置标、先到联挂站时挂上以后整列的中点）；
+   *   <li>估不出时按车中心对牌子，即半个车长（{@link RuntimeTrainHandle#headToCenterBlocks}）。
+   * </ol>
+   *
+   * <p>压牌前的估值向下取整格：车厢间距逐 tick 有零点几格的抖动，取整后同一条边上天花板的输入不变、缓存才命中；宁可压上站牌时慢一点（停站动作会惰行等曲线）。
+   */
+  public double stationTailBlocks(RuntimeTrainHandle train, NodeId stopNode) {
+    if (train == null) {
+      return 0.0;
+    }
+    OptionalDouble remaining = train.stopCurveRemainingBlocks();
+    if (remaining.isPresent()) {
+      return remaining.getAsDouble();
+    }
+    OptionalDouble planned = stopTailBlocks(train, stopNode);
+    return Math.floor(
+        planned.isPresent() ? planned.getAsDouble() : train.headToCenterBlocks().orElse(0.0));
   }
 
   /** 注册联挂等候；{@code null} 恢复不扣。 */

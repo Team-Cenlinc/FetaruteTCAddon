@@ -64,16 +64,17 @@ ETA = 行程 + 停站 + 等待。停站的口径与运行时实际怎么停一�
 | 已到站、停站计时尚未注册（停稳前约 3 秒） | 本站计划停站（靠 `StationPresenceTracker` 识别在站）。此前这几秒按 0 计，ETA 先提前一整段停站再跳回 |
 | 本站停站计时已结束（关门、等发车许可） | 0，超时部分按扣停处理（见上节） |
 
-途中车站的停站另加 `timetable.station-stop-overhead-seconds`（默认 4 秒：压牌后居中刹停约 3 秒，停稳后 AutoStation 再过 1 秒开门，
-dwell 从开门起算）；车库与区间停车点只有 dwell。与编表同一口径（`RouteStopPlan#stopSecondsBetween`）。
+途中车站的停站另加 `timetable.station-stop-overhead-seconds`（默认 1 秒：停稳后 AutoStation 再过 1 秒开门，dwell 从开门起算；
+刹车在走行里算）；车库与区间停车点只有 dwell。与编表同一口径（`RouteStopPlan#stopSecondsBetween`）。
 
 ## 走行（与编表同一条运行曲线）
 
 行程由 `TravelTimeModel` 按途中停车点**拆段**，每段交给 `RunCurveModel`——编表用的同一个模型（见 `timetable.md`「走行」）：
 
 - 第一段从列车当前位置、当前速度出发（边内进度扣掉首边已走的部分）；之后每段从停车点静止起步。
-- 每段以进站规则收尾：`runtime.approach-window-blocks` / `approach-window-edges` 窗口内按 `approach-speed-bps`（车库
-  `approach-depot-speed-bps`）行驶，触发节点与运行时 `resolveApproachControl` 同一规则（`StopApproach`）。目标不停车（PASS）时不减速。
+- 每段以进站规则收尾：车站沿自动运行曲线（车种减速度 × `train.ato-brake-fraction`）刹到站牌节点；车库与区间停车点在
+  `runtime.approach-window-blocks` / `approach-window-edges` 窗口内按 `approach-depot-speed-bps` / `approach-speed-bps` 行驶，
+  触发节点与运行时 `resolveApproachControl` 同一规则（`StopApproach`）。目标不停车（PASS）时不减速。
 - 是否停车只看 `passType`，不看 `dwell` 是否为 0。
 
 与编表只差两处，都是有意的：

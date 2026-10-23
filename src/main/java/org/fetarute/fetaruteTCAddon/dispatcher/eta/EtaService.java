@@ -3018,8 +3018,7 @@ public final class EtaService {
           planned.isPresent()
               ? planned.get()
               : spawnTrainConfigs.resolve(routeUuid, config.trainConfigSettings(), now);
-      settings =
-          settings.withMotion(new SpeedCurve(trainConfig.accelBps2(), trainConfig.decelBps2()));
+      settings = settings.withTrain(trainConfig.accelBps2(), trainConfig.decelBps2());
       maxSpeed = trainConfig.maxSpeedBps();
     }
     return new TravelTimeModel(
@@ -3055,7 +3054,7 @@ public final class EtaService {
     ConfigManager.ConfigView config = currentConfig();
     if (config != null && !TrainRuntimeSnapshot.Motion.NONE.equals(snap.motion())) {
       TrainConfig train = snap.motion().resolve(config.trainConfigSettings());
-      settings = settings.withMotion(new SpeedCurve(train.accelBps2(), train.decelBps2()));
+      settings = settings.withTrain(train.accelBps2(), train.decelBps2());
     }
     return new TravelTimeModel(
         new RunCurveModel(

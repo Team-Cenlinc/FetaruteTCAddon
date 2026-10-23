@@ -57,15 +57,17 @@ route 定义 + 调度图限速 + 运营参数  →  build  →  publish  →  �
 
 | 量 | 取值 | 说明 |
 | --- | --- | --- |
-| 加减速 | `train.default-type`（默认 `metro`，1.1 / 1.2）那个车种的 `accel-bps2` / `decel-bps2`，按 S 形曲线两端渐变 | 编表**不读车库牌子**推断车种：牌子所在区块没加载时会退回默认车种，同一份输入就不再产出同一张表 |
-| 进站限速区 | `runtime.approach-window-blocks` / `approach-window-edges`、`approach-speed-bps`、`approach-depot-speed-bps` | 触发节点与运行时 `resolveApproachControl` 同一规则（`StopApproach`）：目标站同站同股道的本体与咽喉，或与之直接相连的道岔；区间停车点只认它自己。限速区由 `StopApproach.zones` 划定，编表与控车调同一个函数：区从窗口内的第一个图节点起算，不是连续的里程 |
-| 终点速度 | 车站：进站限速（压上站牌后由 TrainCarts 居中刹停）；车库：进库限速；区间停车点：0（调度层在节点处刹停）；交路末端 PASS（开进车库销毁）：不限 | — |
-| 停站 | 车站 = dwell + `timetable.station-stop-overhead-seconds`（默认 4）；车库与区间停车点只有 dwell | 车压牌后居中刹停约 3 秒，停稳后 AutoStation 再过 1 秒开门，dwell 从开门起算 |
+| 加减速 | `train.default-type`（默认 `metro`，1.1 / 1.2）那个车种的 `accel-bps2` / `decel-bps2`，减速度乘 `train.ato-brake-fraction`（默认 0.75，自动运行曲线），按 S 形曲线两端渐变 | 编表**不读车库牌子**推断车种：牌子所在区块没加载时会退回默认车种，同一份输入就不再产出同一张表 |
+| 进站限速区 | `runtime.approach-window-blocks` / `approach-window-edges`、`approach-speed-bps`、`approach-depot-speed-bps` | 触发节点与运行时 `resolveApproachControl` 同一规则（`StopApproach`）：目标站同站同股道的本体与咽喉，或与之直接相连的道岔；区间停车点只认它自己。车站不限速，只有车库与区间停车点划区。限速区由 `StopApproach.zones` 划定，编表与控车调同一个函数：区从窗口内的第一个图节点起算，不是连续的里程 |
+| 终点速度 | 车站：0（沿自动运行曲线刹到站牌节点停稳）；车库：进库限速；区间停车点：0（调度层在节点处刹停）；交路末端 PASS（开进车库销毁）：不限 | 车站实际停在站牌之后（车中心对牌子，或车头对停车位置标），压上站牌后由 AutoStation 沿同一条曲线刹完，每站晚停约“站牌到停车点的距离 ÷ 线路速度”（车中心对牌子时即半个车长 ÷ 线路速度：短车不到 1 秒，8 节长车约 3～4 秒）；编表不读车长、不另计，长车多出的这几秒算作晚点 |
+| 停站 | 车站 = dwell + `timetable.station-stop-overhead-seconds`（默认 1）；从车库出发的交路，第一个停车的车站再加 2 秒；车库与区间停车点只有 dwell | 停稳后 AutoStation 再过 1 秒开门（出库后第一站 3 秒，给车门附件与动画预热），dwell 从开门起算；刹车已在走行里 |
 
 它是"理想司机"：在限速区起点正好刹到限速。2026-09-28 起控车用同一个速度天花板（逐 tick 斜坡跟随）与同一条 S 形加速曲线（`CurveLaunchAction` 每 tick 推速），
 控车与本模型是同一条速度曲线：按控车规则与调度节拍（每秒下发、补牵引门槛 1%）逐 tick 模拟，与本模型的到站时刻相差约 0.1 秒以内，偏差来自驶出慢速边后最多晚一个调度周期才重新加速（`ControlCurveAlignmentTest`）。天花板的输入由 `RunCurveModel#ceiling` 一处组装，控车与编表共用。此前控车在触发点前 64 格线性预减速、起步用服务器默认的 bezier launch，与模型各走各的。
 计划停车点不再被移动授权按“刹到 0”压到进站限速以下，前方慢速边也按到下一停车点的整段路径提前制动，两处都与本模型一致。
-S 形曲线让每次起步、每次减速各比恒加减速度多约 2 秒，表定时分相应变长。改车种预设、默认车种、`runtime.approach-*` 或曲线后必须重新 build 并发布时刻表。
+S 形曲线让每次起步、每次减速各比恒加减速度多约 2 秒，表定时分相应变长。改车种预设、默认车种、`train.ato-brake-fraction`、`runtime.approach-*` 或曲线后必须重新 build 并发布时刻表。
+
+车站此前按进站限速进站、压牌后由 TrainCarts 居中刹停（停站开销 4 秒里含居中约 3 秒）。改为沿自动运行曲线刹到站牌后，每次车站停车的走行按 0.75 倍减速度刹停会长约 0.5～4 秒（metro），停站开销同时从 4 秒减到 1 秒；整体快慢视站距与线路速度而定，部署后要重新 build 并发布。
 
 **实服校核（2026-09-26，22 分钟日志、30 个站间区段、136 次停站）**：走行"发车→压牌"中位误差 0.0%、平均绝对误差 5.1%；
 停站"压牌→发车"中位 24 秒（dwell 20）。旧口径（每站按限速"飞"出去、瞬间停车，加减速 1.0/1.2、不做进站限速）同一批区段
@@ -418,7 +420,7 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
   - 下限是 `timetable.recovery.min-dwell-seconds` 与车门走完一个开关过程（关门动画提前开始 + 车门至少全开的时长）取大。编表拿不到车上的车门动画，
     取运行时的缺省（`AutoStationSignAction.DEFAULT_DOOR_FLOOR_SECONDS`，8 秒）；车上用的是更长的旧式动画时运行时的下限更高，这里会多算几秒。
   - 表定停站取档案的到发之差，与编表同一口径（喂车多停在里面，运行时晚点车本来就不等它），先扣掉换模加时（按各 route 的停靠表推算，与时分档案加进去的是同一份；
-    运行时换模加时加在压缩之后，压不掉），再扣停站开销 `station-stop-overhead-seconds`（居中刹停与开门延迟，压缩从开门起算，压不掉）。
+    运行时换模加时加在压缩之后，压不掉），再扣停站开销 `station-stop-overhead-seconds`（停稳到开门，压缩从开门起算，压不掉）。
   - **只算停站压缩，不算放宽线路限速**——后者要晚点超过 `engage-delay-seconds` 才启用、追回多少取决于限速与车型，编表算不准，保守地不算。
   - `min-dwell-seconds` 为 0（运行时不压缩停站）时 `R = 0`，即旧行为。
 - **累计上限**：同一辆车（同一交路）全表靠追回吸收的秒数，不超过这一交路**除首班外各班可追回量之和的 50%**（`ConflictAbsorption.RECOVERABLE_BUDGET_PERCENT`）。
@@ -1032,8 +1034,8 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
 `carriedIn` 是带入（本趟第一次记录时已晚多少，来自上一趟或起点晚发），`gained` 是本趟途中新增的晚点，`recovered` 是追回的秒数；
 `detail` 逐条是 `序号 + a(到)/d(发) + 偏差`。追赶管不管用看 `recovered`，晚点从哪来看 `carriedIn` 与 `gained`。两处口径：
 
-- 到站事件在列车**停稳之后**才发出，而表定到达是压牌时刻，所以到站按"表定到达 + 停稳耗时"比，停稳耗时 =
-  `station-stop-overhead-seconds` − 开门延迟 1 秒；不补的话每站到达都会凭空晚约 3 秒。
+- 到站事件在列车**停稳之后**才发出，表定到达是刹到站牌节点停稳的时刻，到站按"表定到达 + 停稳耗时"比，停稳耗时 =
+  `station-stop-overhead-seconds` − 开门延迟 1 秒（默认 1 秒时为 0；开销调大时，多出的部分当作停稳耗时补上）。
 - `gained`/`recovered` 只数**晚点**部分（负偏差按 0 计）：早到的车在站里按表扣留、偏差从 −20 回到 0 是计划内的，不算新增晚点。
 
 结账原因：`terminated`（到达终点站）、`rebound`（换了车次）、`route-changed`（改派交路）、`timetable-unpublished`（时刻表下架）、`released:<原因>`（列车离开）。
@@ -1208,7 +1210,7 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
 | `recovery.overspeed-percent` | `10` | 晚点追赶：线路限速放宽的百分比，只放宽写明的线路限速；0 关闭 |
 | `recovery.engage-delay-seconds` | `10` | 晚点追赶：最近一次到发晚点达到多少秒才放宽线路限速 |
 | `build-threads` | `auto` | 编表（含快车错峰）用几个线程并行试候选：`auto` 取核数一半（至少 1、至多 4），`0` 全部核，`1` 单线程，显式写的数不超过可用核数；结果与线程数无关（见"并行"） |
-| `station-stop-overhead-seconds` | `4` | 编表时车站停车在 dwell 之外多算的秒数：TrainCarts 居中刹停约 3 秒 + AutoStation 开门延迟 1 秒（dwell 从开门起算）。表定发车 = 到站 + dwell + 本值，车站终到的折返同理；车库与区间停车点不加。改了要重新 build |
+| `station-stop-overhead-seconds` | `1` | 编表时车站停车在 dwell 之外多算的秒数：AutoStation 停稳后的开门延迟 1 秒（dwell 从开门起算；刹车在走行里算）。表定发车 = 到站 + dwell + 本值，车站终到的折返同理；车库与区间停车点不加。改了要重新 build |
 
 ## 遥测（未来的 calibration，不是构建输入）
 

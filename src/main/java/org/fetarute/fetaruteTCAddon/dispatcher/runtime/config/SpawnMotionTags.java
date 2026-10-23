@@ -11,8 +11,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
  * <h2>写什么</h2>
  *
  * <p>写的是调度此刻为这列车解析出的值：车种（{@code FTA_TRAIN_TYPE}，缺省为 {@code train.default-type}）在 {@code
- * train.types} 里的加减速。编表与 ETA 的运行曲线取的是默认车种的同一组数（{@code
- * RunCurveModel.Settings#fromConfig}），所以没打车种标签的列车写下的就是编表口径；模板列车自带车种标签时写的是该车种的数，与自动运行一致，不改写成编表口径。
+ * train.types} 里的加速度与常用制动减速度。编表与 ETA 的运行曲线取的是默认车种的同一组数，减速度再乘自动运行的舒适比例（{@code
+ * RunCurveModel.Settings#fromConfig}）；驾驶员的常用全制动就是这里写下的减速度，比自动运行刹得狠。模板列车自带车种标签时写的是该车种的数，
+ * 与自动运行一致，不改写成编表口径。
  *
  * <h2>不改变自动运行</h2>
  *

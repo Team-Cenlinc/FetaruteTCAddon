@@ -21,10 +21,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * 照着建议速度开能不能达到时刻表：用手动驾驶的动力学（档位、力的爬升速率、惰行阻力）和一个照 Boss 栏操作、有反应迟滞的驾驶员， 逐 tick
- * 开完一段，与编表运行曲线同一段的用时比较。编表另有每站的对位与开门开销（{@code station-stop-overhead-seconds}，默认 4 秒）， 这里不计。
+ * 开完一段，与编表运行曲线同一段的用时比较。编表另有每站停稳到开门的开销（{@code station-stop-overhead-seconds}，默认 1 秒），这里不计。
  *
- * <p>车种取 metro 预设（加速度 1.1、减速度 1.2 格/秒²），线路速度 80 km/h、进站限速 10 格/秒，与实服配置一致。驾驶员看到“开始制动”拉到 B4，低于建议速度就松到
- * B1；低于建议速度较多时 P3，略低时 P1，贴着就惰行。
+ * <p>车种取 metro 预设（加速度 1.1、减速度 1.2 格/秒²），线路速度 80 km/h，与实服配置一致。编表与生产同口径：自动运行曲线（减速度乘 {@code
+ * train.ato-brake-fraction}），车站不限速、沿曲线刹到停车点。驾驶员看到“开始制动”拉到 B4，低于建议速度就松到 B1；低于建议速度较多时 P3，略低时
+ * P1，贴着就惰行。
  */
 @DisplayName("照建议速度开能达到编表")
 class ManualDrivingAchievabilityTest {
@@ -33,7 +34,6 @@ class ManualDrivingAchievabilityTest {
   private static final double DECEL = 1.2;
   private static final double LINE = 80.0 / 3.6;
   private static final double SLOW = 40.0 / 3.6;
-  private static final double APPROACH = 10.0;
   private static final double DT = 0.05;
 
   /** 停在停车点前后这么近算停准（格）。 */
@@ -44,7 +44,17 @@ class ManualDrivingAchievabilityTest {
 
   private static final double AIR_ONLY_FRACTION = 0.85;
 
-  private static final SpeedCurve CURVE = new SpeedCurve(ACCEL, DECEL);
+  /** 编表的运行曲线：与生产同一口径（{@code RunCurveModel.Settings#fromConfig}），减速度乘自动运行的舒适比例。 */
+  private static final SpeedCurve CURVE =
+      SpeedCurve.ato(
+          ACCEL,
+          DECEL,
+          org.fetarute
+              .fetaruteTCAddon
+              .config
+              .ConfigManager
+              .TrainConfigSettings
+              .DEFAULT_ATO_BRAKE_FRACTION);
 
   /** 一段线路：编表的边与进站限速区，驾驶员看到的分段限速与停车点。 */
   private record Route(
@@ -75,19 +85,19 @@ class ManualDrivingAchievabilityTest {
           new Route(
               new double[] {740.0, 60.0},
               new double[] {LINE, LINE},
-              List.of(new SpeedCeiling.Cap(740.0, 800.0, APPROACH)),
+              List.of(),
               List.of(new Section(0.0, LINE))),
           // 途中一段 40 km/h 慢行，再进站停车。
           new Route(
               new double[] {400.0, 200.0, 240.0, 60.0},
               new double[] {LINE, SLOW, LINE, LINE},
-              List.of(new SpeedCeiling.Cap(840.0, 900.0, APPROACH)),
+              List.of(),
               List.of(new Section(0.0, LINE), new Section(400.0, SLOW), new Section(600.0, LINE))),
           // 短站间：还没到线路速度就要进站。
           new Route(
               new double[] {200.0, 60.0},
               new double[] {LINE, LINE},
-              List.of(new SpeedCeiling.Cap(200.0, 260.0, APPROACH)),
+              List.of(),
               List.of(new Section(0.0, LINE))));
 
   @ParameterizedTest(name = "反应 {0} tick")

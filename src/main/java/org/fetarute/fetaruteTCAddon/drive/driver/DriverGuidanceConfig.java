@@ -8,7 +8,8 @@ import org.bukkit.configuration.ConfigurationSection;
  *
  * @param bossBar 是否用 Boss 栏显示前方目标、距离与建议速度
  * @param rangeBlocks Boss 栏满格对应的距离（格）；更远的目标不显示
- * @param adviceBrakeFraction 建议速度按常用全制动的这个比例反推（编表同一条 S 形曲线），余下的留给驾驶员修正反应迟滞；1 即与编表完全相同，人跟不住
+ * @param adviceBrakeFraction 建议速度按常用全制动的这个比例反推（与编表同一形状的 S 形曲线），余下的留给驾驶员修正反应迟滞；编表按自动运行的舒适比例 （{@code
+ *     train.ato-brake-fraction}）刹，更柔和，所以照建议速度开不比时刻表慢；1 即按常用全制动，人跟不住会冲标
  * @param brakeAdviceToleranceBps 车速超过建议速度多少时提示开始制动
  */
 public record DriverGuidanceConfig(

@@ -31,7 +31,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
  *   <li>走行：{@link RunTimeModel}（生产上是 {@code RunCurveModel}）。路径点按停车方式切成若干段<b>走行</b>： 每段从停车点静止起步，途中的
  *       PASS 点按线路速度通过，到下一个停车点按进站规则减速——站间的起步与制动正是旧口径（每站满速通过）少算的那部分。
  *   <li>停站：{@link RouteStop#dwellSeconds()}，缺省值由调用方从配置传入；车站停车另加 {@link
- *       RunTimeModel#stationStopOverheadSeconds()}（居中刹停 + 开门延迟，dwell 从开门起算）。
+ *       RunTimeModel#stationStopOverheadSeconds()}（停稳到开门，dwell 从开门起算），从车库出发的交路第一个停车的车站再加 {@link
+ *       RunTimeModel#firstStationStopExtraSeconds()}（出库后第一站开门前多等的那几秒）。
  * </ul>
  *
  * <p>终端折返时间<b>不</b>计入 stop profile：它发生在两趟车之间，属于车辆周转（duty）的范畴， 记在这里会让"这趟车跑多久"和"这辆车多久能再发一趟"混成同一个数。
@@ -96,6 +97,9 @@ public final class TimetableTimingCalculator {
     profile.add(stopAt(waypoints.get(0), stops, 0, 0, 0));
     int departure = 0;
     int runStart = 0;
+    // 从车库出发：车是刚出库的，第一个停车的车站开门前多等一会儿（从车站出发的车早已开过门）
+    boolean firstStationPending =
+        StopApproach.targetOf(graph, waypoints.get(0)).kind() == StopApproach.Kind.DEPOT;
     for (int end = 1; end < waypoints.size(); end++) {
       boolean last = end == waypoints.size() - 1;
       if (!last && !stopsAt(stops, end)) {
@@ -136,11 +140,25 @@ public final class TimetableTimingCalculator {
         }
       }
       int arrival = offsets[offsets.length - 1];
+      boolean station =
+          StopApproach.targetOf(graph, waypoints.get(end)).kind() == StopApproach.Kind.STATION;
       int stopSeconds =
           last
               ? 0
               : stopSeconds(
-                  graph, runTimeModel, waypoints.get(end), stops, end, dwellFallback, powerDwell);
+                      graph,
+                      runTimeModel,
+                      waypoints.get(end),
+                      stops,
+                      end,
+                      dwellFallback,
+                      powerDwell)
+                  + (firstStationPending && station
+                      ? runTimeModel.firstStationStopExtraSeconds()
+                      : 0);
+      if (station) {
+        firstStationPending = false;
+      }
       profile.add(stopAt(waypoints.get(end), stops, end, arrival, arrival + stopSeconds));
       departure = arrival + stopSeconds;
       runStart = end;

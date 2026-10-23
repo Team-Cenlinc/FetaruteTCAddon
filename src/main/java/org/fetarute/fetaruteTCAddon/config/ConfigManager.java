@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 46;
+  private static final int EXPECTED_CONFIG_VERSION = 47;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -1121,7 +1121,22 @@ public final class ConfigManager {
     String sound = DEFAULT_AUTOSTATION_DOOR_CLOSE_SOUND;
     float volume = DEFAULT_AUTOSTATION_DOOR_CLOSE_VOLUME;
     float pitch = DEFAULT_AUTOSTATION_DOOR_CLOSE_PITCH;
+    double scatter = AutoStationSettings.DEFAULT_STOP_SCATTER_BLOCKS;
     if (section != null) {
+      double configuredScatter = section.getDouble("stop-scatter-blocks", scatter);
+      if (Double.isFinite(configuredScatter)
+          && configuredScatter >= 0.0
+          && configuredScatter <= AutoStationSettings.MAX_STOP_SCATTER_BLOCKS) {
+        scatter = configuredScatter;
+      } else {
+        logger.warning(
+            "autostation.stop-scatter-blocks 必须在 [0, "
+                + AutoStationSettings.MAX_STOP_SCATTER_BLOCKS
+                + "] 内，已按 "
+                + scatter
+                + " 处理: "
+                + configuredScatter);
+      }
       String configured = section.getString("door-close-sound", sound);
       if (configured != null && !configured.trim().isEmpty()) {
         sound = configured.trim();
@@ -1140,7 +1155,7 @@ public final class ConfigManager {
         logger.warning("autostation.door-close-sound-pitch 配置无效: " + configuredPitch + "，已回退为默认值");
       }
     }
-    return new AutoStationSettings(sound, volume, pitch);
+    return new AutoStationSettings(sound, volume, pitch, scatter);
   }
 
   /** 解析 runtime 配置段。 */
@@ -1502,7 +1517,20 @@ public final class ConfigManager {
         section != null
             ? section.getString("default-type", DEFAULT_TRAIN_TYPE.key())
             : DEFAULT_TRAIN_TYPE.key();
-    return new TrainConfigSettings(defaultType, parsed);
+    double atoBrakeFraction =
+        section != null
+            ? section.getDouble(
+                "ato-brake-fraction", TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION)
+            : TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION;
+    if (!(atoBrakeFraction > 0.0) || atoBrakeFraction > 1.0) {
+      logger.warning(
+          "train.ato-brake-fraction 必须在 (0, 1] 内，已按 "
+              + TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION
+              + " 处理: "
+              + atoBrakeFraction);
+      atoBrakeFraction = TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION;
+    }
+    return new TrainConfigSettings(defaultType, parsed, atoBrakeFraction);
   }
 
   private static TrainTypeSettings parseTrainType(
@@ -1773,7 +1801,7 @@ public final class ConfigManager {
    * @param maxCatchUpSeconds 发车侧单次轮询最多回补多长的时间窗口
    * @param reloadIntervalSeconds 重新加载已发布时刻表的间隔
    * @param recorderFlushIntervalSeconds 录制结果落库的间隔
-   * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（TrainCarts 居中刹停 + AutoStation 开门延迟）
+   * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（停稳确认 + AutoStation 开门延迟；刹停本身已在运行曲线里）
    * @param recoveryMinDwellSeconds 晚点追赶：晚点车中途站最少停多少秒；0 表示不压缩停站
    * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
    * @param recoveryEngageDelaySeconds 晚点追赶：晚点达到多少秒才放宽线路限速
@@ -1795,8 +1823,8 @@ public final class ConfigManager {
       int maxDelaySeconds,
       int buildThreads) {
 
-    /** 车站停车开销的缺省值：dwell 20 秒时，"压牌→发车"的中位耗时约 24 秒。 */
-    public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
+    /** 车站停车开销的缺省值：运行曲线算到停稳为止，停稳后约 1 秒开门、dwell 从开门起算。 */
+    public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 1;
 
     /**
      * 晚点车最短停站的缺省值。
@@ -2389,9 +2417,36 @@ public final class ConfigManager {
     }
   }
 
-  /** AutoStation 相关配置（默认关门提示音与音量/音高）。 */
+  /**
+   * AutoStation 相关配置（默认关门提示音与音量/音高、自动运行停车的随机误差）。
+   *
+   * @param stopScatterBlocks 自动运行停车的随机误差上限（格），0 表示分毫不差
+   */
   public record AutoStationSettings(
-      String doorCloseSound, float doorCloseSoundVolume, float doorCloseSoundPitch) {}
+      String doorCloseSound,
+      float doorCloseSoundVolume,
+      float doorCloseSoundPitch,
+      double stopScatterBlocks) {
+
+    /** 停车误差的缺省上限：实车定位停车误差约 ±0.3 米，多数在 ±0.1 米内（三角分布）。 */
+    public static final double DEFAULT_STOP_SCATTER_BLOCKS = 0.2;
+
+    public AutoStationSettings {
+      stopScatterBlocks =
+          Double.isFinite(stopScatterBlocks) && stopScatterBlocks > 0.0
+              ? Math.min(MAX_STOP_SCATTER_BLOCKS, stopScatterBlocks)
+              : 0.0;
+    }
+
+    /** 按缺省的停车误差。 */
+    public AutoStationSettings(
+        String doorCloseSound, float doorCloseSoundVolume, float doorCloseSoundPitch) {
+      this(doorCloseSound, doorCloseSoundVolume, doorCloseSoundPitch, DEFAULT_STOP_SCATTER_BLOCKS);
+    }
+
+    /** 停车误差上限的上限：再大就超出“停准”（停短 2.5 格会前移再停）的意义了。 */
+    static final double MAX_STOP_SCATTER_BLOCKS = 1.0;
+  }
 
   /** 运行时调度配置。 */
   public record RuntimeSettings(
@@ -2631,12 +2686,21 @@ public final class ConfigManager {
    *
    * @param defaultType 默认车种（{@code train.default-type}）；为空时取 {@link #DEFAULT_TRAIN_TYPE}
    * @param types 各车种加减速；未列出的车种取 {@link TrainType} 自带的预设
+   * @param atoBrakeFraction 自动运行（含编表、到站预测与驾驶员的 ATO 模式）的舒适减速度占车种常用制动减速度的比例，在 (0, 1] 内；
+   *     信号与移动授权的刹车、驾驶员的建议速度不乘它
    */
-  public record TrainConfigSettings(String defaultType, Map<TrainType, TrainTypeSettings> types) {
+  public record TrainConfigSettings(
+      String defaultType, Map<TrainType, TrainTypeSettings> types, double atoBrakeFraction) {
+
+    /** 自动运行舒适减速度比例的缺省值：比驾驶员建议速度（常用制动的 0.85）柔，人照建议速度开比时刻表略快。 */
+    public static final double DEFAULT_ATO_BRAKE_FRACTION = 0.75;
 
     public TrainConfigSettings {
       if (defaultType == null || defaultType.isBlank()) {
         defaultType = DEFAULT_TRAIN_TYPE.key();
+      }
+      if (!(atoBrakeFraction > 0.0) || atoBrakeFraction > 1.0) {
+        atoBrakeFraction = DEFAULT_ATO_BRAKE_FRACTION;
       }
       Map<TrainType, TrainTypeSettings> complete = new EnumMap<>(TrainType.class);
       for (TrainType type : TrainType.values()) {
@@ -2644,6 +2708,11 @@ public final class ConfigManager {
         complete.put(type, configured != null ? configured : TrainTypeSettings.preset(type));
       }
       types = Map.copyOf(complete);
+    }
+
+    /** 按缺省的自动运行减速度比例。 */
+    public TrainConfigSettings(String defaultType, Map<TrainType, TrainTypeSettings> types) {
+      this(defaultType, types, DEFAULT_ATO_BRAKE_FRACTION);
     }
 
     public TrainType defaultTrainType() {

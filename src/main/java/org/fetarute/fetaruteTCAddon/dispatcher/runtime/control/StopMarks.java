@@ -30,9 +30,6 @@ public final class StopMarks {
   /** 标志在车站牌子（或车头）后方不超过这么多（格）时仍算在前方（同一段轨道上的测量误差）。 */
   public static final double BEHIND_TOLERANCE_BLOCKS = 0.5;
 
-  /** 开往标志时至少保持的速度（格/tick）：列车进站时已经很慢也不至于一路蠕行。 */
-  static final double MIN_HOLD_BPT = 0.1;
-
   /**
    * 轨道上的一块停车位置标。
    *
@@ -87,16 +84,6 @@ public final class StopMarks {
       marks = List.copyOf(marks);
     }
   }
-
-  /**
-   * 自动运行开往标志的两段：先以 {@code holdBpt} 走 {@code holdBlocks}，再在 {@code brakeBlocks} 内制动停下。
-   *
-   * @param holdBlocks 保持速度的一段（格）；为 0 时直接制动
-   * @param holdBpt 保持的速度（格/tick）
-   * @param brakeBlocks 制动的一段（格）
-   * @param ticks 预计用时（tick）
-   */
-  public record Approach(double holdBlocks, double holdBpt, double brakeBlocks, int ticks) {}
 
   private record Step(RailBlockPos pos, double blocks) {}
 
@@ -281,32 +268,6 @@ public final class StopMarks {
     }
     double dot = stationAxis.getX() * travel.getX() + stationAxis.getZ() * travel.getZ();
     return dot < 0.0 ? stationAxis.clone().multiply(-1.0) : stationAxis.clone();
-  }
-
-  /**
-   * 自动运行怎么开到标志：保持进站速度（列车本来就更慢时保持现速，但不低于 {@link #MIN_HOLD_BPT}），在常用制动距离处开始制动，正好停在标志上。 距离不够制动时直接制动。
-   *
-   * @param distanceBlocks 车头沿轨道到标志的距离（格）
-   * @param currentBpt 此刻速度（格/tick）
-   * @param approachBpt 进站限速（格/tick）
-   * @param decelBpt2 常用制动减速度（格/tick²）
-   */
-  public static Approach approach(
-      double distanceBlocks, double currentBpt, double approachBpt, double decelBpt2) {
-    double ceiling = Math.max(MIN_HOLD_BPT, approachBpt);
-    double hold = Math.min(Math.max(MIN_HOLD_BPT, currentBpt), ceiling);
-    double brake = hold * hold / (2.0 * Math.max(1.0e-4, decelBpt2));
-    if (brake + BEHIND_TOLERANCE_BLOCKS >= distanceBlocks) {
-      return new Approach(0.0, hold, distanceBlocks, (int) Math.ceil(2.0 * distanceBlocks / hold));
-    }
-    double holdBlocks = distanceBlocks - brake;
-    // 比保持速度慢（从停着起步）时先要加速：这一段平均速度按起步速度与保持速度的平均估
-    double start = Math.max(0.0, Math.min(currentBpt, hold));
-    return new Approach(
-        holdBlocks,
-        hold,
-        brake,
-        (int) Math.ceil(2.0 * holdBlocks / (start + hold) + 2.0 * brake / hold));
   }
 
   private static boolean better(Mark mark, double ahead, Selected best) {

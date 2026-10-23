@@ -288,7 +288,7 @@ public final class TrainLaunchManager {
       if (train != null) {
         if (curveSpeedBpt < 0.001) {
           train.stop();
-        } else if (train.isMoving()) {
+        } else if (train.isMoving() && train.stopCurveRemainingBlocks().isEmpty()) {
           train.accelerateTo(curveSpeedBpt, decelBpt2);
         }
       }
@@ -349,7 +349,9 @@ public final class TrainLaunchManager {
           launchCommandAccepted = true;
         }
         boolean needsMovingControl = shouldIssueMovingControl(train, targetBpt);
-        if (allowLaunch || needsMovingControl || resumeTraction) {
+        // AutoStation 的停站刹车动作每 tick 自己给前进力；这时下发的发车动作排在它后面，它停住的同一 tick 就会把车从停车点开走。
+        boolean stopCurveRunning = train.stopCurveRemainingBlocks().isPresent();
+        if ((allowLaunch || needsMovingControl || resumeTraction) && !stopCurveRunning) {
           double controlAcceleration = needsMovingControl ? decelBpt2 : accelBpt2;
           // 运动中：放行/信号变化时补充牵引；目标回升（驶过慢速边、授权延伸）时同样补牵引——TrainCarts 列车
           // 不会因为 speedLimit 调高就自己加速。目标速度下降时这次 launch 并不起平滑作用——speedLimit 已在下一

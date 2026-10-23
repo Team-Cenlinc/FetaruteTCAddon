@@ -215,6 +215,25 @@ public final class StopMarkIndex {
         .flatMap(marks -> StopMarks.select(marks, stationPoint, direction, carriages));
   }
 
+  /**
+   * 同 {@link #selectCached(Block, Vector, Vector, int)}，但先按挂上以后整列的节数选（与 {@link #select(Block,
+   * Vector, Vector, int, OptionalInt)} 同一规则）。
+   */
+  public Optional<StopMarks.Selected> selectCached(
+      Block stationRail,
+      Vector stationPoint,
+      Vector direction,
+      int carriages,
+      OptionalInt preferredCarriages) {
+    if (stationPoint == null || direction == null) {
+      return Optional.empty();
+    }
+    return cached(stationRail)
+        .flatMap(
+            marks ->
+                StopMarks.select(marks, stationPoint, direction, carriages, preferredCarriages));
+  }
+
   /** 清空缓存：停车位置标或节点牌子建好、拆掉时调用。可在任意线程调用；已知车站在下一 tick 起于后台重走。 */
   public void invalidate() {
     cache.clear();

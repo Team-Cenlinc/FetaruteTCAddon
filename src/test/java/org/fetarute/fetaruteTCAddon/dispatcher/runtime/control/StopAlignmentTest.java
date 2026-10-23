@@ -71,4 +71,48 @@ class StopAlignmentTest {
     assertEquals(0.0, StopAlignment.halfCartLength(properties), 1e-9);
     assertEquals(0.0, StopAlignment.halfCartLength(null), 1e-9);
   }
+
+  @Test
+  @DisplayName("沿轨道走到停车点所在的轨道后，按直线补上走到的点与停车点之差；差得太远（不是同一处）不补")
+  void alongTrackToCorrectsTheWalkEndToTheStopPoint() {
+    Vector east = new Vector(1, 0, 0);
+    Vector stopPoint = new Vector(100.5, 64, 0.5);
+    // 走到的点比停车点早半格（这段轨道按进入方向的中心与按牌子朝向的中心不同）：再走半格
+    assertEquals(
+        20.5, StopAlignment.alongTrackTo(20.0, new Vector(100.0, 64, 0.5), east, stopPoint), 1e-9);
+    // 走过了半格：少走半格
+    assertEquals(
+        19.5, StopAlignment.alongTrackTo(20.0, new Vector(101.0, 64, 0.5), east, stopPoint), 1e-9);
+    // 差 3 格：走到的不是同一处，照走到的距离
+    assertEquals(
+        20.0, StopAlignment.alongTrackTo(20.0, new Vector(97.5, 64, 0.5), east, stopPoint), 1e-9);
+    // 量不出方向：照走到的距离
+    assertEquals(
+        20.0,
+        StopAlignment.alongTrackTo(
+            20.0, new Vector(100.0, 64, 0.5), new Vector(0, 1, 0), stopPoint),
+        1e-9);
+  }
+
+  @Test
+  @DisplayName("停车误差：落在 ±上限内、中间多两头少、平均不偏；上限为 0 时分毫不差")
+  void stopScatterIsTriangularWithinTheLimit() {
+    java.util.Random random = new java.util.Random(42);
+    double sum = 0.0;
+    int nearCenter = 0;
+    int samples = 20000;
+    for (int i = 0; i < samples; i++) {
+      double scatter = StopAlignment.stopScatterBlocks(0.2, random);
+      assertTrue(Math.abs(scatter) < 0.2, "超出上限: " + scatter);
+      sum += scatter;
+      if (Math.abs(scatter) < 0.1) {
+        nearCenter++;
+      }
+    }
+    assertEquals(0.0, sum / samples, 0.005, "平均不偏前也不偏后");
+    // 三角分布：落在中间一半宽度内的占 3/4（均匀分布只有 1/2）
+    assertEquals(0.75, nearCenter / (double) samples, 0.02);
+    assertEquals(0.0, StopAlignment.stopScatterBlocks(0.0, random), 0.0);
+    assertEquals(0.0, StopAlignment.stopScatterBlocks(Double.NaN, random), 0.0);
+  }
 }

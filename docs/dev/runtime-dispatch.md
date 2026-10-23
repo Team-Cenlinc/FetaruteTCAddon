@@ -299,12 +299,12 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
 - 当信号处于 PROCEED_WITH_CAUTION/CAUTION/STOP 时，会基于 lookahead 占用中的首个阻塞资源估算距离，提前下压速度；STOP 会额外用 TrainCarts railState 和图节点坐标估算剩余距离，避免固定节点距离导致红灯曲线长期保持非零。
 - 当“下一站”为 STOP/TERM waypoint 时，信号 tick 的距离只看前方 blocker（不看下一节点距离/CAUTION 距离），避免提前刹停在牌子前。
 - `runtime.speed-curve-type` 控制曲线形态（`physics/linear/quadratic/cubic`）。
-- `runtime.speed-curve-factor` 用于调节阻塞/授权终点停车曲线的激进程度（>1 更激进，<1 更保守）；进站区外制动与前方限速边按车型减速度原值计算，不受它影响（与编表运行曲线同口径）。
+- `runtime.speed-curve-factor` 用于调节阻塞/授权终点停车曲线的激进程度（>1 更激进，<1 更保守）；停车点、进站限速区与前方限速边的制动按自动运行曲线（车种减速度 × `train.ato-brake-fraction`）计算，不受它影响（与编表运行曲线同口径）。
 - `runtime.speed-curve-early-brake-blocks` 用于提前开始减速的缓冲距离。
-- `runtime.approach-depot-speed-bps` 用于进库前限速（站点限速仍由 `approach-speed-bps` 控制）。
+- `runtime.approach-depot-speed-bps` 用于进库前限速（区间停车点由 `approach-speed-bps` 控制，车站不限速）。
 - 进站限速区由 `StopApproach.zones` 划定，与编表/ETA 运行曲线（`RunCurveModel`）共用同一判据。
-- 目标速度取速度天花板（`SpeedCeiling`，在 `resolveApproachControl` 里按到下一停车点的展开路径计算）：沿途各边限速、进站限速区与到站速度按 S 形制动曲线（`SpeedCurve`）往回推，与编表运行曲线同一个函数；天花板同时登记为逐 tick 斜坡的保持约束。SignalSystem 只提供信号、约束类型和距离。
-- 移动授权终点正是下一处计划停车点、且进站限速已就绪时，该终点不再按“刹到 0”参与移动授权、速度曲线与 Smart 前瞻，由进站控制按运行曲线接管（STOP 信号不变）。
+- 目标速度取速度天花板（`SpeedCeiling`，在 `resolveApproachControl` 里按到下一停车点的展开路径计算）：沿途各边限速、进站限速区与到站速度按自动运行的 S 形制动曲线（`SpeedCurve#ato`）往回推，与编表运行曲线同一个函数；天花板同时登记为逐 tick 斜坡的保持约束。SignalSystem 只提供信号、约束类型和距离。
+- 移动授权终点正是下一处计划停车点、且进站控制已就绪（车站：天花板算得出；车库与区间停车点：有进站限速与限速区）时，该终点不再按“刹到 0”参与移动授权、速度曲线与 Smart 前瞻，由进站控制按运行曲线接管（STOP 信号不变）。
 - 到下一停车点整段展开路径上的各边限速都在天花板内，远处慢速边与编表一样提前制动，不受 `lookahead-edges` 窗口限制。
 - 发车与调速用本插件的 `CurveLaunchAction`（S 形加速，每 tick 读当前限速），不用 TrainCarts 自带的 launch 曲线；详见 `docs/dev/train-config.md`。
 - 最短路距离会通过缓存复用，并按 `runtime.distance-cache-refresh-seconds` 异步刷新，降低高密度咽喉区的重复计算开销。
@@ -352,7 +352,7 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 - `bps2 -> bpt2`：除以 20^2
 
 ## 进站限速
-- `runtime.approach-speed-bps` 控制 approaching 速度上限（进站 + STOP/TERM waypoint handoff）。
+- `runtime.approach-speed-bps` 控制区间停车点（STOP/TERM waypoint handoff）的 approaching 速度上限。车站不限速：沿自动运行曲线刹到站牌，压上站牌后由 AutoStation 接着刹完（见 `docs/dev/autostation.md`）；关闭 `runtime.speed-curve-enabled` 时没有曲线可接，车站照旧按它进站。
 - `runtime.approach-window-blocks` / `runtime.approach-window-edges` 划定进站限速区：节点到其后第一个进站触发点的距离或边数不超过该值时，从该节点起按进站限速运行；停车点本身也算一个区。
 - 区外按车型的 S 形制动曲线提前降到区起点，不再有单独的预减速区或末边参数（`approach-target-edges` 已于 config-version 36 移除）。编表与 ETA 用同一判据，改动后需重新 build 时刻表；规则详见 `docs/dev/train-config.md`。
 

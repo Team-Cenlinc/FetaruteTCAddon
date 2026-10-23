@@ -33,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailPathOccupa
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
@@ -196,6 +197,43 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       cartLengths.add((double) member.getProperties().getModel().getCartLength());
     }
     return PhysicalRailFootprintPolicy.conservativeTrainLengthBlocks(observedPathSpan, cartLengths);
+  }
+
+  @Override
+  @SuppressFBWarnings(
+      value = "BC_UNCONFIRMED_CAST_OF_RETURN_VALUE",
+      justification = "TrainCarts 的 MinecartMember#getEntity 泛型契约保证返回该成员对应的 CommonMinecart")
+  public OptionalDouble headToCenterBlocks() {
+    if (!group.isValid()) {
+      return OptionalDouble.empty();
+    }
+    for (MinecartMember<?> member : group) {
+      org.bukkit.entity.Entity entity =
+          member == null || member.getEntity() == null ? null : member.getEntity().getEntity();
+      if (entity == null || !entity.isValid()) {
+        return OptionalDouble.empty();
+      }
+    }
+    // 与 AutoStation 按车站牌子居中同一口径（相邻车厢中心距离之和的一半）
+    double half = StopAlignment.bodyLengthBlocks(group) / 2.0;
+    return Double.isFinite(half) ? OptionalDouble.of(half) : OptionalDouble.empty();
+  }
+
+  @Override
+  public OptionalDouble stopCurveRemainingBlocks() {
+    if (!group.isValid()) {
+      return OptionalDouble.empty();
+    }
+    if (group.getActions().getCurrentAction() instanceof StopCurveAction stop) {
+      return OptionalDouble.of(stop.remainingBlocks());
+    }
+    for (MinecartMember<?> member : group) {
+      if (member != null
+          && member.getActions().getCurrentAction() instanceof StopCurveAction stop) {
+        return OptionalDouble.of(stop.remainingBlocks());
+      }
+    }
+    return OptionalDouble.empty();
   }
 
   /**

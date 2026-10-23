@@ -39,6 +39,16 @@ public interface RunTimeModel {
   }
 
   /**
+   * 出库后第一站在 {@link #stationStopOverheadSeconds()} 之外再多耗的秒数：AutoStation
+   * 给车门附件与动画预热，这一站停稳后比中途站多等一会儿才开门。
+   *
+   * @return 秒数，默认 0
+   */
+  default int firstStationStopExtraSeconds() {
+    return 0;
+  }
+
+  /**
    * 一段走行的逐点轨迹，与 {@link #nodeTimes} 同一条曲线。
    *
    * <p>编表的闭塞时间要知道列车在每一处的速度来算制动距离：只按节点到达秒数推平均速度，长边上会把进站前的减速当成线路速度。

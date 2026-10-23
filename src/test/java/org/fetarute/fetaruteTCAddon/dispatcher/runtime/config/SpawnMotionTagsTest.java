@@ -47,7 +47,11 @@ class SpawnMotionTagsTest {
             train.properties(), TrainConfigResolver.TAG_TRAIN_CONFIG_SOURCE));
     SpeedCurve timetable = RunCurveModel.Settings.fromConfig(config, 8.0).motion();
     assertEquals(timetable.accelBps2(), after.accelBps2(), "编表口径的加速度");
-    assertEquals(timetable.decelBps2(), after.decelBps2(), "编表口径的减速度");
+    assertEquals(
+        timetable.decelBps2(),
+        after.decelBps2() * config.trainConfigSettings().atoBrakeFraction(),
+        1e-12,
+        "写下的是常用制动；编表曲线取它的自动运行舒适比例");
   }
 
   @Test

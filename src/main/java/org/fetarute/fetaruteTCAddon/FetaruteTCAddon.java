@@ -81,6 +81,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeSignalMonitor;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserverHub;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopCurveAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
@@ -980,6 +981,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             new org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StationExitPoints(), this);
     // 本插件的发车动作随列车保存：区块卸载再加载后按原速度接着加速，不丢动作。
     CurveLaunchAction.registerSerializer(TrainCarts.plugin);
+    StopCurveAction.registerSerializer(TrainCarts.plugin);
     preloadSignNodeRegistryFromStorage();
     getServer()
         .getPluginManager()
@@ -1259,6 +1261,19 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.stationPresence = new StationPresenceTracker();
     stationStopHub.register("station-presence", stationPresence);
     runtimeDispatchService.stationStops().setObserver(stationStopHub);
+    // 压牌前按停车位置标、联挂站的停法估停车点：调度据此把速度天花板延长到真正的停车点，一段刹车
+    runtimeDispatchService
+        .stationStops()
+        .setStopTail(
+            new org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StationStopTailEstimator(
+                new org.fetarute.fetaruteTCAddon.drive.driver.StationStopPoints(
+                    node ->
+                        getSignNodeRegistry() == null
+                            ? Optional.empty()
+                            : getSignNodeRegistry().findByNodeId(node, null),
+                    this::getStopMarkIndex),
+                this::getCouplerService,
+                org.bukkit.Bukkit::getCurrentTick));
     runtimeDispatchRecoveryComplete = false;
     beginRuntimeDispatchRecovery("plugin-enable");
     runtimeDispatchService.setStartupRecoveryRequestedListener(
@@ -2704,6 +2719,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       stopMarkTask = null;
     }
     CurveLaunchAction.unregisterSerializer(TrainCarts.plugin);
+    StopCurveAction.unregisterSerializer(TrainCarts.plugin);
     if (signNodeRegistry != null) {
       signNodeRegistry.clear();
     }

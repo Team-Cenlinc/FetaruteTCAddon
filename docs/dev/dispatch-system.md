@@ -321,7 +321,7 @@ TrainCarts 会根据 `setWaitAcceleration()` 与 `setSpeedLimit()` 自行完成�
 | `runtime.speed-curve-type` | 曲线类型：PHYSICS/LINEAR/QUADRATIC/CUBIC | `PHYSICS` |
 | `runtime.speed-curve-factor` | 曲线系数（安全裕度） | `1.0` |
 | `runtime.speed-curve-early-brake-blocks` | 提前制动距离 | `0.0` |
-| `runtime.approach-speed-bps` | approaching 速度上限（进站 + STOP/TERM waypoint handoff） | `4.0` |
+| `runtime.approach-speed-bps` | 区间停车点（STOP/TERM waypoint handoff）的 approaching 速度上限；车站不限速（关闭速度曲线时车站也按它） | `4.0` |
 | `runtime.approach-depot-speed-bps` | 进库限速 | `3.5` |
 | `runtime.approach-window-blocks` | 进站限速区：节点离其后第一个进站触发点不超过该距离时从该节点起限速（与编表共用） | `96.0` |
 | `runtime.approach-window-edges` | 同上，按边数判定；`0` 禁用 | `0` |

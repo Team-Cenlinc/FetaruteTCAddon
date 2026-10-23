@@ -29,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
  * </ul>
  *
  * <p>进站限速区由 {@link #zones} 划定，编表运行曲线与运行时控车调同一个函数：区的起点落在图节点上，列车在区内不超过进站限速， 区外按车型减速度制动至区起点。
+ * 只有车库与区间停车点有进站限速（{@link Rule#speedFor}）；车站不限速，列车沿舒适减速度曲线直接刹到停车点。
  */
 public final class StopApproach {
 
@@ -93,16 +94,16 @@ public final class StopApproach {
    *
    * @param windowBlocks 到触发节点的距离不超过它时进入进站窗口；0 表示不按距离触发
    * @param windowEdges 到触发节点的边数不超过它时也进入窗口；0 表示不按边数触发
-   * @param stationSpeedBps 车站与区间停车点的进站限速；0 表示不限速
+   * @param waypointSpeedBps 区间停车点的进站限速（{@code runtime.approach-speed-bps}）；0 表示不限速
    * @param depotSpeedBps 进库限速；0 表示不限速
    */
   public record Rule(
-      double windowBlocks, int windowEdges, double stationSpeedBps, double depotSpeedBps) {
+      double windowBlocks, int windowEdges, double waypointSpeedBps, double depotSpeedBps) {
 
     public Rule {
       windowBlocks = Double.isFinite(windowBlocks) ? Math.max(0.0, windowBlocks) : 0.0;
       windowEdges = Math.max(0, windowEdges);
-      stationSpeedBps = Double.isFinite(stationSpeedBps) ? Math.max(0.0, stationSpeedBps) : 0.0;
+      waypointSpeedBps = Double.isFinite(waypointSpeedBps) ? Math.max(0.0, waypointSpeedBps) : 0.0;
       depotSpeedBps = Double.isFinite(depotSpeedBps) ? Math.max(0.0, depotSpeedBps) : 0.0;
     }
 
@@ -132,15 +133,24 @@ public final class StopApproach {
           || (windowEdges > 0 && edges <= windowEdges);
     }
 
-    /** 停车点类别对应的进站限速。 */
+    /**
+     * 停车点类别对应的进站限速；0 表示不限速。
+     *
+     * <p>车站不限速：列车沿舒适减速度曲线直接刹到停车点，不先降到一个进站速度再由 TrainCarts 居中（那样短车最后几格刹得极急）。
+     * 车库牌子不是精确停车点、库线上还停着车，区间停车点由调度层在节点处停车，这两类照旧按进站限速进场。
+     */
     public double speedFor(Kind kind) {
-      return kind == Kind.DEPOT ? depotSpeedBps : stationSpeedBps;
+      return switch (kind) {
+        case STATION -> 0.0;
+        case DEPOT -> depotSpeedBps;
+        case WAYPOINT -> waypointSpeedBps;
+      };
     }
   }
 
   /** 停车点的类别：决定进站限速取哪个值、以及终点是否要停稳。 */
   public enum Kind {
-    /** 车站：AutoStation 在站牌处接管，把车居中刹停。 */
+    /** 车站：沿舒适减速度曲线刹到停车点，压上站牌后由 AutoStation 接着刹完、对准。 */
     STATION,
     /** 车库：按进库限速进场。 */
     DEPOT,

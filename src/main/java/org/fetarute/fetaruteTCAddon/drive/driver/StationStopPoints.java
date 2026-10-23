@@ -99,6 +99,22 @@ public final class StationStopPoints {
   /** 见 {@link Lookup#lookup}。 */
   public Optional<StopPoint> lookup(
       NodeId node, World world, Vector travel, int carriages, long nowTick) {
+    return lookup(node, world, travel, carriages, java.util.OptionalInt.empty(), nowTick);
+  }
+
+  /**
+   * 同 {@link #lookup(NodeId, World, Vector, int, long)}，但先按挂上以后整列的节数选停车位置标（先到联挂站、要等对方挂上来的车，与
+   * AutoStation 对位同一规则）。
+   *
+   * @param preferredCarriages 挂上以后整列几节；不等谁时为空
+   */
+  public Optional<StopPoint> lookup(
+      NodeId node,
+      World world,
+      Vector travel,
+      int carriages,
+      java.util.OptionalInt preferredCarriages,
+      long nowTick) {
     Optional<Station> station = station(node, world, nowTick);
     if (station.isEmpty()) {
       return Optional.empty();
@@ -114,7 +130,8 @@ public final class StationStopPoints {
                 world.getBlockAt(found.x(), found.y(), found.z()),
                 found.point(),
                 forward,
-                carriages);
+                carriages,
+                preferredCarriages == null ? java.util.OptionalInt.empty() : preferredCarriages);
     if (mark.isPresent()) {
       return Optional.of(
           new StopPoint(

@@ -53,12 +53,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
 
 /**
- * 进站限速按编表运行曲线的口径执行，距离从车头量起。
+ * 进站按编表运行曲线的口径执行，距离从车头量起。
  *
- * <p>夹具：A —400— W —90— 车站，进站限速 6 bps，线路限速 20 bps，加减速 1.0，进站窗口 96 格。W 离站 90 格、在窗口内，
- * 按编表运行曲线的判据（{@code StopApproach#zones}）进站限速区从 W 起。目标速度就是编表与控车共用的速度天花板（{@link
- * SpeedCeiling}）在车头处的值：区外沿 S 形制动曲线降到区起点。旧口径从 A 量起、车头在 A 与 W 之间距离不变， 要等过 W 才一次性降下来；实服 2026-09-27
- * 进站时“一下就降下去”即此。
+ * <p>夹具：A —400— W —90— 车站，线路限速 20 bps，加减速 1.0（自动运行的减速度再乘舒适比例），进站窗口 96 格（区间停车点的进站限速 6 对车站不起作用）。W 离站
+ * 90 格、在窗口内，进站范围从 W 起（只用于诊断）。目标速度就是编表与控车共用的速度天花板（{@link SpeedCeiling}）在车头处的值： 沿 S
+ * 形制动曲线刹到站牌（停车点就在站牌处时留保底速度，车要压得上站牌）。距离若从 A 量起，车头在 A 与 W 之间距离不变， 要等过 W 才一次性降下来。
  */
 class ApproachHeadDistanceTest {
 
@@ -80,7 +79,7 @@ class ApproachHeadDistanceTest {
     assertEquals(LINE_BPS, diagnostics.finalTargetBps(), 1.0e-6, diagnostics.toString());
   }
 
-  /** 车头在 x=300（从 A 量起仍是 490 格）：按车头到限速区起点 100 格制动，与编表运行曲线同一个天花板。 */
+  /** 车头在 x=300（从 A 量起仍是 490 格）：按车头到站牌 190 格制动，与编表运行曲线同一个天花板。 */
   @Test
   void brakesIntoTheZoneThatStartsAtTheFirstNodeWithinTheWindow() {
     ControlDiagnostics diagnostics = signalTick(300.0);
@@ -124,16 +123,18 @@ class ApproachHeadDistanceTest {
     assertEquals(LINE_BPS, far.holdLimitBps(farTrain).orElseThrow(), 1.0e-9, "远处的保持上限就是线路速度");
   }
 
-  /** 编表与控车共用的天花板在车头 x 处的值：沿途两条边、进站限速区 [W, 车站] 与到站速度。 */
+  /** 编表与控车共用的天花板在车头 x 处的值：沿途两条边、没有进站限速区，到站留保底速度，减速度取自动运行的舒适比例。 */
   private static double expectedCeiling(double headX) {
     return SpeedCeiling.of(
             new double[] {ZONE_START - headX, STATION_X - ZONE_START},
             new double[] {LINE_BPS, LINE_BPS},
-            List.of(
-                new SpeedCeiling.Cap(ZONE_START - headX, STATION_X - headX, APPROACH_BPS),
-                new SpeedCeiling.Cap(STATION_X - headX, STATION_X - headX, APPROACH_BPS)),
-            APPROACH_BPS,
-            new SpeedCurve(1.0, 1.0))
+            List.of(),
+            org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel.stationControlExitBps(
+                SpeedCurve.ato(
+                    1.0, 1.0, ConfigManager.TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION),
+                LINE_BPS,
+                0.0),
+            SpeedCurve.ato(1.0, 1.0, ConfigManager.TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION))
         .limitBps(0.0);
   }
 

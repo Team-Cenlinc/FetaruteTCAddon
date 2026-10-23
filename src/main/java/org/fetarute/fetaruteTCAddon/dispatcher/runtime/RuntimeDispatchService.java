@@ -1404,6 +1404,7 @@ public final class RuntimeDispatchService {
    * @param ceiling 到停车点整段路径的速度天花板（沿途各边限速、进站限速区、到站速度），里程从当前图节点量起；与编表运行曲线同一个构造
    * @param ceilingOffsetBlocks 车头在天花板里程上的位置（车头已驶过当前图节点的距离）
    * @param engaged 车头是否已在进站限速区内；诊断在它或进站限速实际收紧时才显示
+   * @param stationCurve 车站停车由天花板沿自动运行曲线刹到站牌之后的停车点（速度曲线开启时的车站）；关闭速度曲线时车站照旧按进站限速
    */
   private record ApproachControl(
       Optional<NodeId> node,
@@ -1415,7 +1416,8 @@ public final class RuntimeDispatchService {
       List<StopApproach.Zone> zones,
       Optional<SpeedCeiling> ceiling,
       double ceilingOffsetBlocks,
-      boolean engaged) {
+      boolean engaged,
+      boolean stationCurve) {
     private ApproachControl {
       node = node == null ? Optional.empty() : node;
       stopNode = stopNode == null ? Optional.empty() : stopNode;
@@ -1438,6 +1440,7 @@ public final class RuntimeDispatchService {
           List.of(),
           Optional.empty(),
           0.0,
+          false,
           false);
     }
 
@@ -1457,11 +1460,16 @@ public final class RuntimeDispatchService {
       return engaged && candidate != null && node.isPresent() && node.get().equals(candidate);
     }
 
-    /** 移动授权终点是否正是本停车点，且进站限速已就绪（限速值与限速区都在）。 */
+    /**
+     * 移动授权终点是否正是本停车点，且进站控制已就绪：按曲线刹车的车站有速度天花板（刹到站牌之后的停车点）；其余（车库、区间停车点、 关闭速度曲线时的车站）有进站限速值与限速区。
+     *
+     * <p>按曲线刹车的车站没有进站限速值，若仍按限速值判断，移动授权会照旧按“刹到站牌节点停住”压速，车停在站牌前、压不上站牌。
+     * 反过来，关闭速度曲线、又没有进站限速时，天花板根本不刹车，此时必须留给移动授权刹停。
+     */
     private boolean governsAuthorityEnd(AuthorityEnd authorityEnd) {
+      boolean ready = stationCurve ? ceiling.isPresent() : limitBps.isPresent() && !zones.isEmpty();
       return authorityEnd != null
-          && limitBps.isPresent()
-          && !zones.isEmpty()
+          && ready
           && stopNode
               .map(
                   stop ->
@@ -15159,9 +15167,13 @@ public final class RuntimeDispatchService {
         createEdgeSpeedResolver(train.worldId(), stationStopCoordinator.lineSpeedFactor(trainName));
     // 制动曲线只在速度曲线启用时参与（与前瞻同一开关）；加减速取本车车种，与编表按默认车种一致（未打车种标签时）。
     TrainConfig motionConfig = trainConfigResolver.resolve(properties, configManager.current());
+    // 自动运行的舒适减速度（train.ato-brake-fraction），与编表、到站预测同一个比例。
     SpeedCurve speedCurve =
         runtimeSettings.speedCurveEnabled()
-            ? new SpeedCurve(motionConfig.accelBps2(), motionConfig.decelBps2())
+            ? SpeedCurve.ato(
+                motionConfig.accelBps2(),
+                motionConfig.decelBps2(),
+                configManager.current().trainConfigSettings().atoBrakeFraction())
             : null;
     ApproachControl approachControl =
         resolveApproachControl(
@@ -15172,7 +15184,8 @@ public final class RuntimeDispatchService {
             currentNodeOpt.get(),
             headProgressBlocks,
             edgeSpeedResolver,
-            speedCurve);
+            speedCurve,
+            train);
     OptionalLong distanceOpt = OptionalLong.empty();
     OptionalLong constraintDistanceOpt = OptionalLong.empty();
     OptionalLong blockerDistanceOpt = OptionalLong.empty();
@@ -15306,7 +15319,8 @@ public final class RuntimeDispatchService {
     }
     boolean plannedStopAuthorityEnd =
         isPlannedStopAuthorityEnd(authorityEnd, plannedTerminusProven);
-    // 授权终点就是计划停车点、且进站控制已接管时，停车点按编表运行曲线处理：到站降到进站限速，由 AutoStation 居中刹停。
+    // 授权终点就是计划停车点、且进站控制已接管时，停车点按编表运行曲线处理：车站沿自动运行曲线刹到站牌、压上站牌后由 AutoStation 刹完；
+    // 车库与区间停车点降到进站限速。
     // 此时不再把它当“刹到 0”的终点——那条曲线从上一图节点量距，末段边短于约 54 格时整段被压到进站限速以下。
     // 前方真实阻塞仍按硬约束处理，STOP 信号的处理不变。
     boolean plannedStopByApproach =
@@ -19521,10 +19535,13 @@ public final class RuntimeDispatchService {
       return;
     }
     TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
-    // 与编表运行曲线同一条 S 形加减速曲线；关闭速度曲线时不按制动曲线提前降速。
+    // 与编表运行曲线同一条 S 形加减速曲线（减速度取自动运行的舒适比例）；关闭速度曲线时不按制动曲线提前降速。
     SpeedCurve speedCurve =
         configManager.current().runtimeSettings().speedCurveEnabled()
-            ? new SpeedCurve(config.accelBps2(), config.decelBps2())
+            ? SpeedCurve.ato(
+                config.accelBps2(),
+                config.decelBps2(),
+                configManager.current().trainConfigSettings().atoBrakeFraction())
             : null;
     // 先获取边限速作为 PROCEED 基准（而非固定 defaultSpeed）
     double edgeLimit =
@@ -27948,13 +27965,18 @@ public final class RuntimeDispatchService {
       OptionalDouble override = overrides.approachLimitBps();
       if (override.isPresent() && (approach.engaged() || atHead < target)) {
         approachLimitBps = override;
+      } else if (override.isEmpty() && atHead < target && approach.ceilingCapBoundAtHead()) {
+        // 车站没有进站限速值：按曲线刹向停车点时，把车头处的天花板当作这一拍的进站限制显示。
+        approachLimitBps = OptionalDouble.of(atHead);
       }
       if (atHead < target) {
         target = atHead;
         limiterSource =
-            override.isPresent() && approach.ceilingCapBoundAtHead()
-                ? resolveApproachLimiterSource(approach, override.getAsDouble(), target)
-                : "edge_speed_lookahead";
+            !approach.ceilingCapBoundAtHead()
+                ? "edge_speed_lookahead"
+                : override.isPresent()
+                    ? resolveApproachLimiterSource(approach, override.getAsDouble(), target)
+                    : "approach_curve";
       }
     }
     // 信号降级（CAUTION）与移动授权给出的上限：不随距离变化，登记为保持约束（见下）。
@@ -28020,7 +28042,7 @@ public final class RuntimeDispatchService {
    * <p>Route 往往只写停靠点，不写沿途 throat/switcher。本方法从当前 route index 向前找到下一处非 PASS stop，再按调度图最短路展开 route
    * 片段，计算到 station/depot/STOP waypoint 的真实距离。
    *
-   * <p>进站限速区由 {@link StopApproach#zones} 划定，与编表/ETA 的运行曲线同一判据，另加停车点本身（运行曲线以进站限速为终点速度）。
+   * <p>进站限速区由 {@link StopApproach#zones} 划定，与编表/ETA 的运行曲线同一判据（车站没有限速区，只有车库与区间停车点有），另加停车点本身。
    * 区间位置换算成从<b>车头</b>量起：从当前图节点量起的距离在两节点之间不缩短，要等过了节点才会降，那一拍就是一刀。 {@link ApproachControl#engaged()}
    * 只表示车头已在区内，供诊断使用；区外的制动由调用方按限速区自行推算。
    *
@@ -28030,6 +28052,7 @@ public final class RuntimeDispatchService {
    * @param headProgressBlocks 车头已驶过 {@code effectiveNodes[currentIndex]} 的距离
    * @param edgeSpeeds 边有效限速
    * @param curve 加减速曲线；为 {@code null} 时（关闭速度曲线）天花板只取逐点限速，不提前制动
+   * @param train 列车：车站停车点在站牌之后多远由它量（见 {@link StationStopCoordinator#stationTailBlocks}）
    */
   private ApproachControl resolveApproachControl(
       RailGraph graph,
@@ -28039,7 +28062,8 @@ public final class RuntimeDispatchService {
       NodeId currentNode,
       long headProgressBlocks,
       SignalLookahead.EdgeSpeedResolver edgeSpeeds,
-      SpeedCurve curve) {
+      SpeedCurve curve,
+      RuntimeTrainHandle train) {
     if (graph == null
         || route == null
         || effectiveNodes == null
@@ -28093,7 +28117,7 @@ public final class RuntimeDispatchService {
         zones.add(new StopApproach.Zone(zone.fromBlocks() - head, zone.toBlocks() - head));
       }
     }
-    // 停车点本身：编表运行曲线以进站限速为终点速度，控车同样要在这里降到进站限速。
+    // 停车点本身：只用于判断是否已在进站范围内与诊断，速度由天花板给出。
     double stopAhead = positions[last] - head;
     zones.add(new StopApproach.Zone(stopAhead, stopAhead));
     boolean engaged = false;
@@ -28103,10 +28127,13 @@ public final class RuntimeDispatchService {
         break;
       }
     }
+    // 车站不按进站限速（沿舒适减速度曲线刹到停车点）；关闭速度曲线时没有曲线可接，照旧按区间停车点的进站限速。
     double limit =
-        "depot".equals(target.kind())
-            ? runtime.approachDepotSpeedBps()
-            : runtime.approachSpeedBps();
+        switch (target.kind()) {
+          case "depot" -> runtime.approachDepotSpeedBps();
+          case "station" -> curve == null ? runtime.approachSpeedBps() : 0.0;
+          default -> runtime.approachSpeedBps();
+        };
     long headDistance = Math.round(Math.max(0.0, positions[firstTrigger] - head));
     String reason =
         "route_stop:"
@@ -28126,7 +28153,8 @@ public final class RuntimeDispatchService {
     OptionalDouble limitOpt =
         Double.isFinite(limit) && limit > 0.0 ? OptionalDouble.of(limit) : OptionalDouble.empty();
     // 速度天花板与编表运行曲线同一个构造（RunCurveModel#ceiling）：从当前图节点出发的整段展开路径，车头处按偏移取值。
-    // 区间停车点保持进站限速到点（调度层在节点处停车），不像编表那样刹到 0，否则车会停在牌子前触发不到停车。
+    // 车站刹到站牌之后的停车点（过站牌时还有余速，压上站牌后由 AutoStation 接着刹完）；区间停车点保持进站限速到点（调度层在节点处停车），
+    // 都不像编表那样刹到 0，否则车会停在牌子前触发不到停车。
     int edgeCount = Math.min(last, path.edges().size());
     RunCurveModel runModel =
         new RunCurveModel(
@@ -28143,7 +28171,11 @@ public final class RuntimeDispatchService {
                 0.0,
                 true),
             curve,
-            true);
+            new RunCurveModel.ControlEnd(
+                true,
+                "station".equals(target.kind())
+                    ? stationStopCoordinator.stationTailBlocks(train, target.stopNode())
+                    : 0.0));
     return new ApproachControl(
         Optional.of(path.nodes().get(firstTrigger)),
         Optional.of(target.stopNode()),
@@ -28154,7 +28186,8 @@ public final class RuntimeDispatchService {
         zones,
         ceiling,
         head,
-        engaged);
+        engaged,
+        "station".equals(target.kind()) && curve != null);
   }
 
   private Optional<IndexedRouteStop> findNextStoppingRouteStop(

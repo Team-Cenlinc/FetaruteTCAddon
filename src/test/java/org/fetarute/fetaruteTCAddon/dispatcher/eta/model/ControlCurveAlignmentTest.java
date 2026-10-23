@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test;
  *       作为新的一段加速，牵引目标就是限速本身——与 {@code TrainLaunchManager#shouldResumeTraction} 的门槛一致。
  * </ul>
  *
- * <p>剩余偏差来自调度节拍：驶出慢速边后最多晚一个周期才重新加速，每次约 0.1 秒。
+ * <p>剩余偏差来自调度节拍：驶出慢速边后最多晚一个周期才重新加速，按驶出时落在周期的哪一拍，每次 0～0.5 秒（周期取 1 tick 时与编表只差千分之几秒）。
  */
 class ControlCurveAlignmentTest {
 
@@ -91,7 +91,7 @@ class ControlCurveAlignmentTest {
     }
     double control = controlArrivalSeconds(ceiling, total);
     assertTrue(model > 0.0);
-    assertEquals(model, control, 0.3, "控车 " + control + " 秒，编表 " + model + " 秒");
+    assertEquals(model, control, 0.5, "控车 " + control + " 秒，编表 " + model + " 秒");
   }
 
   /** 按控车规则与节拍逐 tick 模拟走完 {@code total} 格的秒数（最后一 tick 按比例插值）。 */

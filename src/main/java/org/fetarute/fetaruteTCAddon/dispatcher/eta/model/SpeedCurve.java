@@ -8,7 +8,8 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
  * <ul>
  *   <li>加速：以 {@link #START_FLOOR} 倍满值起步，约 {@value #START_SECONDS} 秒升到满值；离目标速度还差约 {@value
  *       #END_SECONDS} 秒可走完的速度差时开始渐收，最后以 {@link #END_FLOOR} 倍满值贴上目标；
- *   <li>制动：从巡航速度开始时同样由小到大，接近末速度时同样渐收。
+ *   <li>制动：从巡航速度开始时同样由小到大；接近末速度时在约 {@value #BRAKE_END_SECONDS} 秒内渐收到 {@link #BRAKE_END_FLOOR}
+ *       倍满值再贴上末速度（冲动约 1 m/s³，与实车 ATO 停车前缓解制动相当），比加速到速收得快： 停车前最后一格不至于慢慢挪。
  * </ul>
  *
  * <p>只看速度而不看时间，控车在任何时刻中断、重新下发都会沿同一条曲线接着走，编表按里程积分得到的也是同一条曲线。 两端不能从 0 开始：纯按速度的规律若起点加速度为 0
@@ -31,11 +32,20 @@ public record SpeedCurve(double accelBps2, double decelBps2) {
   /** 从满值渐收到末端比例、再贴上目标速度的总时长（秒，按满值计）。 */
   static final double END_SECONDS = 2.5;
 
+  /** 制动到末速度时的减速度占满值的比例。 */
+  static final double BRAKE_END_FLOOR = 0.4;
+
+  /** 制动从满值渐收到末端比例、再贴上末速度的总时长（秒，按满值计）。 */
+  static final double BRAKE_END_SECONDS = 1.6;
+
   /** {@code ln(1/START_FLOOR)}：编表积分与控车每步都要用，对数只算一次。 */
   private static final double START_LOG = Math.log(1.0 / START_FLOOR);
 
   /** {@code ln(1/END_FLOOR) + 1}。 */
   private static final double END_LOG_PLUS_ONE = Math.log(1.0 / END_FLOOR) + 1.0;
+
+  /** {@code ln(1/BRAKE_END_FLOOR) + 1}。 */
+  private static final double BRAKE_END_LOG_PLUS_ONE = Math.log(1.0 / BRAKE_END_FLOOR) + 1.0;
 
   public SpeedCurve {
     if (!Double.isFinite(accelBps2) || accelBps2 <= 0.0) {
@@ -44,6 +54,18 @@ public record SpeedCurve(double accelBps2, double decelBps2) {
     if (!Double.isFinite(decelBps2) || decelBps2 <= 0.0) {
       throw new IllegalArgumentException("decelBps2 必须为正数");
     }
+  }
+
+  /**
+   * 自动运行用的曲线：加速度照车种，减速度取车种常用制动的 {@code atoBrakeFraction} 倍（舒适减速度）。控车、编表与到站预测都经这里构造， 三边乘的是同一个比例。
+   *
+   * @param accelBps2 车种满加速度（格/秒²）
+   * @param serviceDecelBps2 车种常用制动减速度（格/秒²）
+   * @param atoBrakeFraction 舒适减速度比例；不在 (0, 1] 内时按 1
+   */
+  public static SpeedCurve ato(double accelBps2, double serviceDecelBps2, double atoBrakeFraction) {
+    double fraction = atoBrakeFraction > 0.0 && atoBrakeFraction <= 1.0 ? atoBrakeFraction : 1.0;
+    return new SpeedCurve(accelBps2, serviceDecelBps2 * fraction);
   }
 
   /** 没有配置可读时的加减速（插件还没加载配置、单元测试）；有配置时一律读车种配置。 */
@@ -59,7 +81,14 @@ public record SpeedCurve(double accelBps2, double decelBps2) {
    * @param targetBps 要加速到的速度（当前限速）
    */
   public double accelerationBps2(double speedBps, double phaseStartBps, double targetBps) {
-    return accelBps2 * shape(speedBps - phaseStartBps, targetBps - speedBps, accelBps2);
+    return accelBps2
+        * shape(
+            speedBps - phaseStartBps,
+            targetBps - speedBps,
+            accelBps2,
+            END_SECONDS,
+            END_FLOOR,
+            END_LOG_PLUS_ONE);
   }
 
   /**
@@ -85,7 +114,15 @@ public record SpeedCurve(double accelBps2, double decelBps2) {
     if (speedBps >= cap) {
       return cap;
     }
-    double accel = accelBps2 * shape(speedBps - phaseStartBps, cap - speedBps, accelBps2);
+    double accel =
+        accelBps2
+            * shape(
+                speedBps - phaseStartBps,
+                cap - speedBps,
+                accelBps2,
+                END_SECONDS,
+                END_FLOOR,
+                END_LOG_PLUS_ONE);
     return Math.min(cap, speedBps + accel * seconds);
   }
 
@@ -97,21 +134,38 @@ public record SpeedCurve(double accelBps2, double decelBps2) {
    * @param endBps 要减到的速度
    */
   public double decelerationBps2(double speedBps, double cruiseBps, double endBps) {
-    return decelBps2 * shape(cruiseBps - speedBps, speedBps - endBps, decelBps2);
+    return decelBps2
+        * shape(
+            cruiseBps - speedBps,
+            speedBps - endBps,
+            decelBps2,
+            BRAKE_END_SECONDS,
+            BRAKE_END_FLOOR,
+            BRAKE_END_LOG_PLUS_ONE);
   }
 
   /**
-   * 两端柔和的比例：离起点的速度差越小越接近 {@link #START_FLOOR}，离终点的速度差越小越接近 {@link #END_FLOOR}。
+   * 两端柔和的比例：离起点的速度差越小越接近 {@link #START_FLOOR}，离终点的速度差越小越接近 {@code endFloor}。
    *
    * <p>过渡带宽度由时长换算。起步段 {@code dv/dt = full·(floor + (1 − floor)·Δv/带宽)}，走完用时 {@code 带宽·ln(1/floor) /
-   * (full·(1 − floor))}；收尾段先按比例线性收到 {@link #END_FLOOR}、再以它走完余下的速度差，用时 {@code 带宽·(ln(1/floor) + 1) /
+   * (full·(1 − floor))}；收尾段先按比例线性收到 {@code endFloor}、再以它走完余下的速度差，用时 {@code 带宽·(ln(1/floor) + 1) /
    * full}。
+   *
+   * @param endSeconds 收尾总时长（加速与制动不同）
+   * @param endFloor 收尾末端比例
+   * @param endLogPlusOne {@code ln(1/endFloor) + 1}
    */
-  private static double shape(double sinceStartBps, double untilEndBps, double full) {
+  private static double shape(
+      double sinceStartBps,
+      double untilEndBps,
+      double full,
+      double endSeconds,
+      double endFloor,
+      double endLogPlusOne) {
     double startBand = START_SECONDS * full * (1.0 - START_FLOOR) / START_LOG;
-    double endBand = END_SECONDS * full / END_LOG_PLUS_ONE;
+    double endBand = endSeconds * full / endLogPlusOne;
     double rise = START_FLOOR + (1.0 - START_FLOOR) * clamp01(sinceStartBps / startBand);
-    double fall = Math.max(END_FLOOR, clamp01(untilEndBps / endBand));
+    double fall = Math.max(endFloor, clamp01(untilEndBps / endBand));
     return Math.min(rise, fall);
   }
 

@@ -1,9 +1,14 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.allowProceed;
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.dynamicStop;
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.graphWithConflictFreeLinearPath;
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.graphWithSingleEdge;
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.mockOccupancyManager;
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.registryWithStation;
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.routeStop;
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.testConfigView;
+import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.withRuntimeSettings;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -3561,103 +3566,6 @@ class RuntimeDispatchServiceTest {
 
     assertEquals(RiskSource.HARD_BLOCKER, source);
     verify(occupancyManager, never()).isProvenSameDirectionFollower(request, node, "leader", false);
-  }
-
-  @Test
-  void routeStopPublishesCautionWithoutRecoverableHold() {
-    List<String> debugMessages = new ArrayList<>();
-    NodeId a = NodeId.of("A");
-    NodeId station = NodeId.of("OP:S:CENTRAL:1");
-    RouteDefinition route =
-        new RouteDefinition(RouteId.of("r"), List.of(a, station), Optional.empty());
-    TagStore tags =
-        new TagStore(
-            "train-1",
-            "FTA_OPERATOR_CODE=op",
-            "FTA_LINE_CODE=l1",
-            "FTA_ROUTE_CODE=r1",
-            "FTA_ROUTE_INDEX=0");
-    java.util.concurrent.atomic.AtomicReference<String> destination =
-        new java.util.concurrent.atomic.AtomicReference<>(station.value());
-    when(tags.properties().getDestination()).thenAnswer(inv -> destination.get());
-    org.mockito.Mockito.doAnswer(
-            inv -> {
-              destination.set("");
-              return null;
-            })
-        .when(tags.properties())
-        .clearDestination();
-    UUID worldId = UUID.randomUUID();
-
-    ConfigManager configManager = mock(ConfigManager.class);
-    when(configManager.current()).thenReturn(testConfigView(1, 40.0));
-
-    RailGraphService railGraphService = mock(RailGraphService.class);
-    when(railGraphService.getSnapshot(worldId))
-        .thenReturn(
-            Optional.of(
-                new RailGraphService.RailGraphSnapshot(
-                    graphWithSingleEdge(a, station, 25), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
-            any(), any(), any(), anyDouble(), anyDouble()))
-        .thenReturn(40.0);
-
-    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
-    when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
-    when(routeDefinitions.findStop(route.id(), 1))
-        .thenReturn(Optional.of(routeStop(1, station, RouteStopPassType.STOP)));
-
-    OccupancyManager occupancyManager = mockOccupancyManager();
-    when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
-    when(occupancyManager.acquire(any())).thenAnswer(allowProceed());
-
-    RouteProgressRegistry registry = new RouteProgressRegistry();
-    RuntimeDispatchService service =
-        new RuntimeDispatchService(
-            occupancyManager,
-            railGraphService,
-            routeDefinitions,
-            registry,
-            registryWithStation(worldId, station),
-            mock(LayoverRegistry.class),
-            new DwellRegistry(),
-            configManager,
-            null,
-            new TrainConfigResolver(),
-            debugMessages::add);
-
-    FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.5);
-    service.handleSignalTick(train, true);
-
-    assertEquals(
-        SignalAspect.PROCEED_WITH_CAUTION, registry.get("train-1").orElseThrow().lastSignal());
-    assertEquals(0, train.hardStopCalls);
-    verify(tags.properties(), never()).clearDestination();
-    assertEquals(station.value(), destination.get());
-    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
-    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
-    assertTrue(speedCaptor.getValue() > 0.0);
-    assertFalse(
-        debugMessages.stream()
-            .anyMatch(
-                message ->
-                    message.contains("SMART_DISPATCH_RECOVERABLE_HOLD")
-                        && message.contains("riskSource=ROUTE_STOP_OR_TERMINAL")));
-    assertTrue(
-        debugMessages.stream()
-            .anyMatch(
-                message ->
-                    message.contains("MOVEMENT_AUTHORITY_PLANNED_STOP_ADVISORY")
-                        && message.contains("reason=ROUTE_STOP_OR_TERMINAL")));
-    assertTrue(
-        debugMessages.stream()
-            .anyMatch(
-                message ->
-                    message.contains("SMART_DISPATCH_ACTION_OBSERVED")
-                        && message.contains("effectClass=SIGNAL_ADVISORY")));
-    assertFalse(
-        debugMessages.stream()
-            .anyMatch(message -> message.contains("SMART_AUTHORITY_WINDOW_EXCEEDED_REAL")));
   }
 
   @Test
@@ -8697,13 +8605,6 @@ class RuntimeDispatchServiceTest {
     assertEquals(end, path.get(3).toNode());
   }
 
-  private static Answer<OccupancyDecision> allowProceed() {
-    return inv -> {
-      OccupancyRequest request = inv.getArgument(0);
-      return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
-    };
-  }
-
   /**
    * 「挡不挡」只认 obstructs 真值表：物理 NODE/EDGE 上的尾保是 PROTECTIVE_PHYSICAL（前瞻要减速）， 抽象 single:/switcher:
    * 上的尾保仍是 PROTECTIVE_ONLY（只留痕），MOVEMENT_REQUIRED 是 LIVE。
@@ -8767,49 +8668,6 @@ class RuntimeDispatchServiceTest {
             "provenSameRouteLeader", String.class, String.class);
     method.setAccessible(true);
     return (boolean) method.invoke(service, requesterTrain, blockerTrain);
-  }
-
-  private static RailGraph graphWithSingleEdge(NodeId a, NodeId b, int lengthBlocks) {
-    RailEdge edge =
-        new RailEdge(EdgeId.undirected(a, b), a, b, lengthBlocks, -1.0, true, Optional.empty());
-    return new RailGraph() {
-      @Override
-      public java.util.Collection<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes() {
-        return List.of(new RailNodeTest(a), new RailNodeTest(b));
-      }
-
-      @Override
-      public java.util.Collection<RailEdge> edges() {
-        return List.of(edge);
-      }
-
-      @Override
-      public Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> findNode(NodeId id) {
-        if (id == null) {
-          return Optional.empty();
-        }
-        if (id.equals(a)) {
-          return Optional.of(new RailNodeTest(a));
-        }
-        if (id.equals(b)) {
-          return Optional.of(new RailNodeTest(b));
-        }
-        return Optional.empty();
-      }
-
-      @Override
-      public java.util.Set<RailEdge> edgesFrom(NodeId id) {
-        if (id.equals(a) || id.equals(b)) {
-          return java.util.Set.of(edge);
-        }
-        return java.util.Set.of();
-      }
-
-      @Override
-      public boolean isBlocked(EdgeId id) {
-        return false;
-      }
-    };
   }
 
   private static RailGraph graphWithTwoEdges(
@@ -9420,39 +9278,6 @@ class RuntimeDispatchServiceTest {
                     Optional.of(WaypointMetadata.station("OP", "CENTRAL", 1)))),
         Map.of(edge1.id(), edge1, edge2.id(), edge2, edge3.id(), edge3),
         Set.of());
-  }
-
-  private static SignNodeRegistry registryWithStation(UUID worldId, NodeId station) {
-    SignNodeRegistry registry = new SignNodeRegistry();
-    registry.put(
-        worldId,
-        "world",
-        0,
-        64,
-        0,
-        new SignNodeDefinition(
-            station,
-            NodeType.STATION,
-            Optional.of(station.value()),
-            Optional.of(WaypointMetadata.station("OP", "CENTRAL", 1))));
-    return registry;
-  }
-
-  private static ConfigManager.ConfigView withRuntimeSettings(
-      ConfigManager.ConfigView base, ConfigManager.RuntimeSettings runtime) {
-    return new ConfigManager.ConfigView(
-        base.configVersion(),
-        base.debugEnabled(),
-        base.locale(),
-        base.storageSettings(),
-        base.graphSettings(),
-        base.autoStationSettings(),
-        runtime,
-        base.spawnSettings(),
-        base.trainConfigSettings(),
-        base.reclaimSettings(),
-        base.smartDispatcherSettings(),
-        base.healthSettings());
   }
 
   private static ConfigManager.RuntimeSettings runtimeWithLookaheadEdges(
@@ -10104,8 +9929,9 @@ class RuntimeDispatchServiceTest {
     assertEquals(diagnostics.finalTargetBps() / 20.0, speedCaptor.getValue(), 1.0e-6);
   }
 
+  /** 车站不再压到进站速度：车头处取到站沿自动运行曲线刹车的天花板（停车点在站牌处时到站留保底速度），标签为按曲线进站。 */
   @Test
-  void stopStationTriggersApproachLimiter() {
+  void stopStationBrakesAlongTheAtoCurveWithoutAnApproachPlateau() {
     NodeId a = NodeId.of("A");
     NodeId station = NodeId.of("OP:S:CENTRAL:1");
     RouteDefinition route =
@@ -10163,11 +9989,33 @@ class RuntimeDispatchServiceTest {
     ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
     verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
 
-    assertEquals(6.0 / 20.0, speedCaptor.getValue(), 1.0e-6);
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig motion =
+        new TrainConfigResolver().resolve(tags.properties(), configManager.current());
+    double expected =
+        SpeedCeiling.of(
+                new double[] {50},
+                new double[] {28.8},
+                List.of(),
+                org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel
+                    .stationControlExitBps(
+                        SpeedCurve.ato(
+                            motion.accelBps2(),
+                            motion.decelBps2(),
+                            configManager.current().trainConfigSettings().atoBrakeFraction()),
+                        28.8,
+                        0.0),
+                SpeedCurve.ato(
+                    motion.accelBps2(),
+                    motion.decelBps2(),
+                    configManager.current().trainConfigSettings().atoBrakeFraction()))
+            .limitBps(0.0);
+    assertTrue(expected > 6.0, "比旧的进站速度 6 快：不再先降到进站速度");
+    assertEquals(expected / 20.0, speedCaptor.getValue(), 1.0e-6);
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
     assertEquals("station", diagnostics.approachKind());
     assertEquals(station, diagnostics.approachNode());
-    assertEquals("approach", diagnostics.finalLimiterSource());
+    assertEquals("approach_curve", diagnostics.finalLimiterSource());
+    assertTrue(diagnostics.approachReason().contains("approach_limit=0.000"));
   }
 
   /**
@@ -10300,7 +10148,7 @@ class RuntimeDispatchServiceTest {
     assertEquals("station", diagnostics.approachKind());
     assertEquals(switcher, diagnostics.approachNode());
     assertEquals(90L, diagnostics.distanceToApproach().orElseThrow());
-    assertEquals("approach", diagnostics.finalLimiterSource());
+    assertEquals("approach_curve", diagnostics.finalLimiterSource());
   }
 
   @Test
@@ -10363,17 +10211,23 @@ class RuntimeDispatchServiceTest {
     service.handleSignalTick(train, true);
 
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
-    // W 离站旁道岔 10 格、在进站窗口内，限速区从 W（前方 110 格）起；按列车自己的减速度 0.25 沿 S 形制动曲线降到区起点，
-    // 与编表运行曲线同一个天花板（SpeedCeiling），输入是沿途各边限速、限速区与到站速度。
+    // W 离站旁道岔 10 格、在进站窗口内，进站范围从 W（前方 110 格）起；车站没有进站限速，按列车自己的减速度 0.25 乘自动运行的舒适比例
+    // 沿 S 形制动曲线刹到站牌（停车点在站牌处时留保底速度），与编表运行曲线同一个天花板（SpeedCeiling）。
     double expectedApproachEnvelope =
         SpeedCeiling.of(
                 new double[] {110, 10, 20},
                 new double[] {28.8, 28.8, 28.8},
-                List.of(
-                    new SpeedCeiling.Cap(110.0, 140.0, 6.0),
-                    new SpeedCeiling.Cap(140.0, 140.0, 6.0)),
-                6.0,
-                new SpeedCurve(1.0, 0.25))
+                List.of(),
+                org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel
+                    .stationControlExitBps(
+                        SpeedCurve.ato(
+                            1.0,
+                            0.25,
+                            configManager.current().trainConfigSettings().atoBrakeFraction()),
+                        28.8,
+                        0.0),
+                SpeedCurve.ato(
+                    1.0, 0.25, configManager.current().trainConfigSettings().atoBrakeFraction()))
             .limitBps(0.0);
     assertEquals("station", diagnostics.approachKind());
     assertEquals("approach_curve", diagnostics.finalLimiterSource(), diagnostics.toString());
@@ -11094,8 +10948,10 @@ class RuntimeDispatchServiceTest {
         new TrainConfigResolver().resolve(tags.properties(), configManager.current());
     assertEquals(
         org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling.brakingLimitBps(
-            new org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve(
-                config.accelBps2(), config.decelBps2()),
+            org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve.ato(
+                config.accelBps2(),
+                config.decelBps2(),
+                configManager.current().trainConfigSettings().atoBrakeFraction()),
             40.0,
             8.0,
             50.0),
@@ -19650,15 +19506,6 @@ class RuntimeDispatchServiceTest {
    * <p>大量运行时测试只关心控车与信号计算，并用 Mockito 直接返回 allowed decision；该替身显式补上生产实现提供的最终 owner 校验能力。需要验证 owner
    * 丢失的用例应自行构造返回 {@code false} 的接口实现。
    */
-  private static OccupancyManager mockOccupancyManager() {
-    OccupancyManager manager =
-        mock(OccupancyManager.class, withSettings().extraInterfaces(AuthorityHandoffSupport.class));
-    when(((AuthorityHandoffSupport) manager).holdsHardAuthority(any())).thenReturn(true);
-    when(((AuthorityHandoffSupport) manager).migrateAuthorityOwner(anyString(), anyString()))
-        .thenReturn(true);
-    return manager;
-  }
-
   private RouteProgressRegistry smartUnlockProgressRegistry() {
     RouteDefinition route =
         new RouteDefinition(

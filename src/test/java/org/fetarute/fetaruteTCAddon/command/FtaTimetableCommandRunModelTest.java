@@ -25,6 +25,7 @@ class FtaTimetableCommandRunModelTest {
     config.set("train.default-type", "dmu");
     config.set("train.types.dmu.accel-bps2", 0.7);
     config.set("train.types.dmu.decel-bps2", 0.9);
+    config.set("train.ato-brake-fraction", 0.8);
     config.set("runtime.approach-window-blocks", 80.0);
     config.set("runtime.approach-window-edges", 2);
     config.set("runtime.approach-speed-bps", 9.0);
@@ -36,10 +37,11 @@ class FtaTimetableCommandRunModelTest {
     RunCurveModel.Settings run = FtaTimetableCommand.runCurveSettings(view);
 
     assertEquals(0.7, run.motion().accelBps2(), 1e-9);
-    assertEquals(0.9, run.motion().decelBps2(), 1e-9);
+    assertEquals(0.9 * 0.8, run.motion().decelBps2(), 1e-9, "减速度取自动运行的舒适比例");
+    assertEquals(0.8, run.atoBrakeFraction(), 1e-9);
     assertEquals(80.0, run.approach().windowBlocks(), 1e-9);
     assertEquals(2, run.approach().windowEdges());
-    assertEquals(9.0, run.approach().stationSpeedBps(), 1e-9);
+    assertEquals(9.0, run.approach().waypointSpeedBps(), 1e-9);
     assertEquals(4.0, run.approach().depotSpeedBps(), 1e-9);
     assertEquals(12.0, run.fallbackSpeedBps(), 1e-9);
     assertEquals(6, run.stationStopOverheadSeconds());
@@ -58,10 +60,16 @@ class FtaTimetableCommandRunModelTest {
         text.contains(String.format(Locale.ROOT, "起步 %.2f", TrainType.METRO.presetAccelBps2())),
         text);
     assertTrue(
-        text.contains(String.format(Locale.ROOT, "制动 %.2f", TrainType.METRO.presetDecelBps2())),
+        text.contains(
+            String.format(
+                Locale.ROOT,
+                "制动 %.2f",
+                TrainType.METRO.presetDecelBps2()
+                    * ConfigManager.TrainConfigSettings.DEFAULT_ATO_BRAKE_FRACTION)),
         text);
-    assertTrue(text.contains("进站 96 格内"), text);
-    assertTrue(text.contains("dwell + 4s"), text);
+    assertTrue(text.contains("常用制动的 75%"), text);
+    assertTrue(text.contains("区间停车点 96 格内"), text);
+    assertTrue(text.contains("dwell + 1s"), text);
   }
 
   /** 没有配置时退回默认加减速、不做进站限速，而不是抛异常：面板在任何状态下都要能打开。 */
@@ -69,7 +77,7 @@ class FtaTimetableCommandRunModelTest {
   void missingConfigurationFallsBackQuietly() {
     RunCurveModel.Settings run = FtaTimetableCommand.runCurveSettings(null);
 
-    assertEquals(0.0, run.approach().stationSpeedBps(), 1e-9);
+    assertEquals(0.0, run.approach().waypointSpeedBps(), 1e-9);
     assertEquals(
         ConfigManager.TimetableSettings.DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
         run.stationStopOverheadSeconds());

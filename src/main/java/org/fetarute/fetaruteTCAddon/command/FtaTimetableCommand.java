@@ -1072,8 +1072,7 @@ public final class FtaTimetableCommand {
                             key,
                             profile.pattern(),
                             new RunCurveModel(
-                                base.withMotion(
-                                    new SpeedCurve(profile.accelBps2(), profile.decelBps2())),
+                                base.withTrain(profile.accelBps2(), profile.decelBps2()),
                                 capped(edges, profile.maxSpeedBps())),
                             profile.lengthBlocks(),
                             profile.spawnLimit()));
@@ -2932,11 +2931,13 @@ public final class FtaTimetableCommand {
   static String describeRun(RunCurveModel.Settings run) {
     return String.format(
         java.util.Locale.ROOT,
-        "起步 %.2f / 制动 %.2f 格/秒²，进站 %.0f 格内限 %.1f 格/秒，车站停站 = dwell + %ds",
+        "起步 %.2f / 制动 %.2f 格/秒²（常用制动的 %.0f%%），车站刹到停车点，区间停车点 %.0f 格内限 %.1f 格/秒，"
+            + "车站停站 = dwell + %ds",
         run.motion().accelBps2(),
         run.motion().decelBps2(),
+        run.atoBrakeFraction() * 100.0,
         run.approach().windowBlocks(),
-        run.approach().stationSpeedBps(),
+        run.approach().waypointSpeedBps(),
         run.stationStopOverheadSeconds());
   }
 
@@ -2955,8 +2956,10 @@ public final class FtaTimetableCommand {
         Math.max(
             runtime.followingMinClearBlocks(),
             runtime.followingStopMarginBlocks() + runtime.movementAuthorityCautionMarginBlocks());
+    // 后车在信号与移动授权前按常用制动刹停（不乘自动运行的舒适比例），闭塞时间按它算。
+    ConfigManager.TrainConfigSettings trains = config.trainConfigSettings();
     return new TimetableBuildOptions.Following(
-        runCurveSettings(config).motion().decelBps2(),
+        trains.forType(trains.defaultTrainType()).decelBps2(),
         margin,
         runtime.rearGuardEdges(),
         runtime.dispatchTickIntervalTicks() / 20.0D,

@@ -73,6 +73,41 @@ public final class StopAlignment {
   }
 
   /**
+   * 自动运行停车的随机误差（格）：两个均匀随机数之和减 1 再乘上限，三角分布——多数停在停车点附近，越往两边越少，与实车定位停车的误差相近；不偏前也不偏后。
+   *
+   * @param maxBlocks 误差上限（格）；不为正或非有限时为 0（分毫不差）
+   * @param random 随机数源
+   * @return 正为多走、负为少走
+   */
+  public static double stopScatterBlocks(double maxBlocks, java.util.Random random) {
+    if (!(maxBlocks > 0.0) || !Double.isFinite(maxBlocks) || random == null) {
+      return 0.0;
+    }
+    return (random.nextDouble() + random.nextDouble() - 1.0) * maxBlocks;
+  }
+
+  /** 走到的点与停车点相差超过这么多（格）就不按直线补：走到的不是同一处。 */
+  static final double WALK_RESIDUAL_MAX_BLOCKS = 1.0;
+
+  /**
+   * 沿轨道走到停车点所在的轨道后，到停车点本身的距离：走到的是这段轨道按列车进入方向的中心，停车点（例如车站牌子按牌子朝向取的中心）在 TCC 等轨道上可能与它差半格，
+   * 按直线投影补上这点差，与停短判定量的是同一个点。差得超过 {@link #WALK_RESIDUAL_MAX_BLOCKS}，或量不出方向时不补。
+   *
+   * @param walkedBlocks 沿轨道走过的距离（格）
+   * @param walkEnd 走到的位置
+   * @param travel 走到处的行进方向
+   * @param stopPoint 停车点
+   * @return 沿轨道到停车点的距离（格）
+   */
+  public static double alongTrackTo(
+      double walkedBlocks, Vector walkEnd, Vector travel, Vector stopPoint) {
+    double residual = signedOffset(walkEnd, stopPoint, travel);
+    return Double.isFinite(residual) && Math.abs(residual) <= WALK_RESIDUAL_MAX_BLOCKS
+        ? walkedBlocks - residual
+        : walkedBlocks;
+  }
+
+  /**
    * 列车（按 {@code reference} 取中心或车头）相对停车点的偏移。列车总是朝车头方向走：前进方向取车尾指向车头，单节车取它的行进方向。
    *
    * @return 不在同一世界或量不出方向时为 {@code NaN}

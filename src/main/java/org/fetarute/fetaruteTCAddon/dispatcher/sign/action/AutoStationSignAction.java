@@ -72,7 +72,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private static final long DOOR_OPEN_DELAY_TICKS = 20L;
 
   /**
-   * 停稳到开门的秒数（中途站）。编表的车站停车开销 = 居中刹停 + 本值，时刻表据此把"停稳"换算回"压牌"。
+   * 停稳到开门的秒数（中途站）。编表的车站停车开销就是它（刹停已在运行曲线里），开销调大时多出的部分按停稳耗时比较到站。
    *
    * @return 开门延迟秒数
    */
@@ -80,7 +80,18 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     return (int) (DOOR_OPEN_DELAY_TICKS / 20L);
   }
 
-  private static final long DOOR_OPEN_FIRST_DELAY_TICKS = 60L;
+  /** 出库后第一站停稳到开门的 tick：给车门附件与动画预热，比中途站多等；编表在这一站多算同样的秒数。 */
+  private static final long DOOR_OPEN_FIRST_DELAY_TICKS =
+      DOOR_OPEN_DELAY_TICKS
+          + org.fetarute
+                  .fetaruteTCAddon
+                  .dispatcher
+                  .eta
+                  .model
+                  .RunCurveModel
+                  .FIRST_STATION_DOOR_EXTRA_SECONDS
+              * 20L;
+
   private static final long TICK_MILLIS = 50L;
   private static final int STOP_WAIT_TIMEOUT_TICKS = 200;
 
@@ -89,8 +100,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
   private static final double TICKS_PER_SECOND = 20.0;
 
-  /** 开往停车位置标时，等停稳多留的 tick（起步与最后制动）。 */
+  /** 停站刹车动作之外，等停稳多留的 tick（实际速度与理想估计的出入）。 */
   private static final int MARK_SETTLE_TICKS = 40;
+
+  /** 按车站牌子居中时，从第一节车厢中心沿轨道往前找牌子所在轨道的最远距离（格）：压上站牌时它就在车头附近，找不到说明车头已经过了它。 */
+  private static final double CENTER_SEARCH_BLOCKS = 32.0;
 
   /** 驾驶员停妥后迟迟不开门，过这么久由站台代为开关门。 */
   private static final long DRIVER_DOOR_TIMEOUT_TICKS = 600L;
@@ -101,8 +115,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private static final int STOP_STABLE_TICKS = 1;
 
   /**
-   * 自动运行的车要连续停稳多少 tick、且对位动作都走完了，才算停妥：对位进站是“保持进站速度 + 制动停到标”两段起步动作，衔接处会有一拍静止， 只看一拍会当成停妥、停在标前
-   * （衔接处对位动作还排着，由此认出）；再多看两拍防信号某一拍的抖动。多一拍就多一拍停站，不往上加。
+   * 自动运行的车要连续停稳多少 tick、且对位动作都走完了，才算停妥：对位动作还排着时车速慢到某一拍看着像静止，只看一拍会当成停妥、停在停车点前；再多看两拍防信号某一拍的抖动。
+   * 多一拍就多一拍停站，不往上加。
    */
   private static final int AUTO_STOP_STABLE_TICKS = 3;
 
@@ -565,10 +579,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /**
    * 自动运行对位的结果。
    *
-   * @param ticks 开往标志预计还要多少 tick（等停稳时多留这么久）；按 TrainCarts 居中或就地停住时为 0
+   * @param ticks 开往停车点预计还要多少 tick（等停稳时多留这么久）；按 TrainCarts 居中或就地停住时为 0
    * @param selected 车头对准的停车位置标；按车站牌子居中时为 {@code null}
+   * @param centered 按车站牌子居中、由停站刹车动作开过去的（停短时可以再前移）
    */
-  private record Alignment(int ticks, StopMarks.Selected selected) {
+  private record Alignment(int ticks, StopMarks.Selected selected, boolean centered) {
+
+    private Alignment(int ticks, StopMarks.Selected selected) {
+      this(ticks, selected, false);
+    }
 
     /** 车头对准的停车位置标；按车站牌子居中时为 {@code null}。 */
     StopMarkSign mark() {
@@ -698,7 +717,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
-   * 自动运行对位：股道上有对应节数的停车位置标时让车头最前端停在标志处，否则按 TrainCarts 把列车中心停在牌子处。停车位置标已经选好（见 {@link #stopMarkFor}）。
+   * 自动运行对位：股道上有对应节数的停车位置标时让车头最前端停在标志处，否则让列车中心停在牌子处（{@link #centerOnSign}，量不出距离时才交给 TrainCarts
+   * 居中）。停车位置标已经选好（见 {@link #stopMarkFor}）。
    *
    * @return 开往标志预计还要多少 tick，以及车头对准了哪块标志
    */
@@ -711,7 +731,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       StopMarks.Mark selected = mark.get().mark();
       org.bukkit.block.Block markRail =
           info.getWorld().getBlockAt(selected.rail().x(), selected.rail().y(), selected.rail().z());
-      int ticks = launchHeadTo(group, markRail);
+      // 先到联挂站、按挂上以后的节数停：不加停车误差，后到的车要对得上
+      int ticks = launchHeadTo(group, markRail, awaited.isEmpty() ? stopScatterBlocks() : 0.0);
       if (ticks >= 0) {
         return new Alignment(ticks, mark.get());
       }
@@ -742,8 +763,66 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       group.stop();
       return new Alignment(0, null);
     }
+    if (group != null) {
+      int ticks = centerOnSign(info, group, awaited.isEmpty() ? stopScatterBlocks() : 0.0);
+      if (ticks >= 0) {
+        return new Alignment(ticks, null, true);
+      }
+    }
     centerTrain(info);
     return new Alignment(0, null);
+  }
+
+  /**
+   * 车中心对准车站牌子：从第一节车厢中心沿轨道量到牌子所在的轨道，加上车中心在第一节车厢之后的距离（相邻车厢中心距离之和的一半）， 沿自动运行的制动曲线开过去停下（{@link
+   * #launchHeadBy}）。弯站台、TCC 上量的都是沿轨道的距离。第一节车厢已过牌子所在的轨道时
+   * （往前找不到它），按直线投影量过了多少——离得近，直线与沿轨道几乎相同。车中心已过牌子时就地停住，不往回开。
+   *
+   * @param extraBlocks 多走的距离（停车误差，见 {@link #stopScatterBlocks}；负为少走）
+   * @return 预计还要多少 tick；量不出时为 -1（照 TrainCarts 居中）
+   */
+  private int centerOnSign(SignActionEvent info, MinecartGroup group, double extraBlocks) {
+    if (!info.hasRails() || group.isEmpty()) {
+      return -1;
+    }
+    MinecartMember<?> head = group.head();
+    double headToSign;
+    com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint walk =
+        new com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint(
+            head.getRailTracker().getState().clone());
+    org.bukkit.Location center = info.getCenterLocation();
+    if (walk.moveFindRail(info.getRails(), CENTER_SEARCH_BLOCKS)) {
+      // 走到的是牌子所在轨道按进入方向的中心，停短判定看的是按牌子朝向的中心（TCC 等轨道两者可差半格）：按直线补上
+      headToSign =
+          center == null
+              ? walk.movedTotal
+              : StopAlignment.alongTrackTo(
+                  walk.movedTotal,
+                  walk.state.positionLocation().toVector(),
+                  walk.state.motionVector(),
+                  center.toVector());
+    } else {
+      double past =
+          center == null
+              ? Double.NaN
+              : StopAlignment.signedOffset(
+                  StopAlignment.head(group),
+                  center.toVector(),
+                  head.getRailTracker().getMotionVector());
+      if (!(past >= 0.0) || past > CENTER_SEARCH_BLOCKS) {
+        return -1;
+      }
+      headToSign = -past;
+    }
+    return launchHeadBy(
+        group, headToSign + StopAlignment.bodyLengthBlocks(group) / 2.0 + extraBlocks);
+  }
+
+  /** 自动运行停车的随机误差（格，见 {@code autostation.stop-scatter-blocks}）。联挂相关的停车与停短后的修正不加：挂车要对得上，修正要照准。 */
+  private double stopScatterBlocks() {
+    return StopAlignment.stopScatterBlocks(
+        plugin.getConfigManager().current().autoStationSettings().stopScatterBlocks(),
+        java.util.concurrent.ThreadLocalRandom.current());
   }
 
   /** 列车中心沿此刻的前进方向已越过车站牌子（见 {@link StopAlignment#centerPastStopPoint}）；量不出时为 false。 */
@@ -784,11 +863,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
   /**
    * 把车头最前端沿轨道送到标志所在的轨道：从第一节车厢中心沿轨道量到标志，少走半个车体长度（{@link
-   * StopAlignment#frontOffsetBlocks}），保持进站速度开到标志前，再按本车的常用制动减速度停下（见 {@link StopMarks#approach}）。
+   * StopAlignment#frontOffsetBlocks}），沿自动运行的制动曲线开过去停下（见 {@link #launchHeadBy}）。
    *
+   * @param extraBlocks 多走的距离（停车误差，见 {@link #stopScatterBlocks}；负为少走）
    * @return 预计还要多少 tick；前方沿轨道找不到这段轨道时为 -1（不倒车）
    */
-  private int launchHeadTo(MinecartGroup group, org.bukkit.block.Block markRail) {
+  private int launchHeadTo(
+      MinecartGroup group, org.bukkit.block.Block markRail, double extraBlocks) {
     MinecartMember<?> head = group.head();
     com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint walk =
         new com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint(
@@ -797,12 +878,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return -1;
     }
     // 走的是第一节车厢中心到标志的距离；停的是车头最前端，少走半个车体长度。
-    return launchHeadBy(group, walk.movedTotal - StopAlignment.frontOffsetBlocks(group));
+    return launchHeadBy(
+        group, walk.movedTotal - StopAlignment.frontOffsetBlocks(group) + extraBlocks);
   }
 
   /**
-   * 让第一节车厢沿行进方向再走 {@code distance} 格停下：保持进站速度开到制动点，再按本车的常用制动减速度停下（见 {@link StopMarks#approach}）。
-   * 不倒车：{@code distance} 不为正时就地停住。
+   * 让第一节车厢沿行进方向再走 {@code distance} 格停下：沿自动运行的制动曲线（本车车种的减速度乘舒适比例，与编表、调度控车同一条）刹车，
+   * 一段刹到停车点，停车前缓解制动、平稳停住（见 {@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopCurveAction}）。不交给 TrainCarts 的距离式
+   * launch：它的平均减速度是 {@code v²/(2·距离)}，与车型无关，余下距离短时刹得极急、长时最后几格在原地爬。不倒车：{@code distance} 不为正时就地停住。
    *
    * @return 预计还要多少 tick
    */
@@ -814,25 +898,35 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return 0;
     }
     ConfigManager.ConfigView config = plugin.getConfigManager().current();
-    double decelBps2 =
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig motion =
         new org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver()
-            .resolve(group.getProperties(), config)
-            .decelBps2();
-    StopMarks.Approach approach =
-        StopMarks.approach(
+            .resolve(group.getProperties(), config);
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopCurveAction action =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopCurveAction(
+            org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve.ato(
+                motion.accelBps2(),
+                motion.decelBps2(),
+                config.trainConfigSettings().atoBrakeFraction()),
+            motion.decelBps2(),
             distance,
-            head.getRealSpeedLimited(),
-            config.runtimeSettings().approachSpeedBps() / TICKS_PER_SECOND,
-            decelBps2 / (TICKS_PER_SECOND * TICKS_PER_SECOND));
-    BlockFace direction =
-        com.bergerkiller.bukkit.tc.Util.vecToFace(head.getRailTracker().getMotionVector(), false);
-    if (approach.holdBlocks() > 0.0) {
-      head.getActions().addActionLaunch(direction, approach.holdBlocks(), approach.holdBpt());
-      head.getActions().addActionLaunch(approach.brakeBlocks(), 0.0);
-    } else {
-      head.getActions().addActionLaunch(direction, approach.brakeBlocks(), 0.0);
-    }
-    return approach.ticks() + MARK_SETTLE_TICKS;
+            com.bergerkiller.bukkit.tc.Util.vecToFace(
+                head.getRailTracker().getMotionVector(), false));
+    int ticks =
+        action.estimatedTicks(head.getRealSpeedLimited(), group.getProperties().getSpeedLimit());
+    head.getActions().addGroupAction(action);
+    // 调度压牌前按半个车长给的限速，停车点更远时（对准远处的停车位置标）会把车压在这个速度上，要等下一次信号检查才放开：
+    // 下一 tick 就按这个动作的余下距离重算一次（照常过信号与移动授权，不自己抬限速）。
+    Bukkit.getScheduler()
+        .runTask(
+            plugin,
+            () -> {
+              if (group.isValid()) {
+                plugin
+                    .getRuntimeDispatchService()
+                    .ifPresent(dispatch -> dispatch.handleSignalTick(group));
+              }
+            });
+    return ticks + MARK_SETTLE_TICKS;
   }
 
   /** 越站：驾驶员越过停车点太多，本站不停、不开门。到站与发车照常记下（交路进度往前走，晚点照算），这趟车的这一站在站台屏上显示为取消， 出站不扣车，下一拍调度按新进度重新控车。 */
@@ -1127,12 +1221,20 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             if (!driverStopping
                 && realignAttempts < AUTO_REALIGN_ATTEMPTS
                 && alignment != null
-                && alignment.selected() != null
+                && (alignment.selected() != null || alignment.centered())
                 && group.getProperties().getSpeedLimit() >= MIN_REALIGN_SPEED_LIMIT) {
-              offset = markOffset(info, group, alignment.selected());
-              if (offset < -AUTO_REALIGN_SHORT_BLOCKS) {
-                // 停短了（多半是进站途中被刹了一下）：朝同一块标志前移再停；沿轨道找不到标志就地停妥，不退回去居中
-                again = realignToMark(info, alignment.selected());
+              if (alignment.selected() != null) {
+                offset = markOffset(info, group, alignment.selected());
+                if (offset < -AUTO_REALIGN_SHORT_BLOCKS) {
+                  // 停短了（多半是进站途中被刹了一下）：朝同一块标志前移再停；沿轨道找不到标志就地停妥，不退回去居中
+                  again = realignToMark(info, alignment.selected());
+                }
+              } else {
+                offset = centerOffset(info, group);
+                if (offset < -AUTO_REALIGN_SHORT_BLOCKS) {
+                  // 按车站牌子居中停短了：再量一次、往前补；量不出时就地停妥，不交给 TrainCarts 居中（它可能往回拉）
+                  again = realignToCenter(info);
+                }
               }
             }
             if (again.isPresent()) {
@@ -1212,10 +1314,34 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return Optional.empty();
     }
     StopMarks.Mark mark = selected.mark();
+    // 修正：照准停车点，不再加停车误差
     int ticks =
         launchHeadTo(
-            group, info.getWorld().getBlockAt(mark.rail().x(), mark.rail().y(), mark.rail().z()));
+            group,
+            info.getWorld().getBlockAt(mark.rail().x(), mark.rail().y(), mark.rail().z()),
+            0.0);
     return ticks < 0 ? Optional.empty() : Optional.of(new Alignment(ticks, selected));
+  }
+
+  /** 停短前移（按车站牌子居中）：再量一次车中心到牌子的距离、往前补；量不出时为空。 */
+  private Optional<Alignment> realignToCenter(SignActionEvent info) {
+    MinecartGroup group = info.getGroup();
+    if (group == null || group.isEmpty()) {
+      return Optional.empty();
+    }
+    int ticks = centerOnSign(info, group, 0.0);
+    // 0：按车厢中心量已对准或已过牌子（与停短判定的车中心口径在弯道上可能不同），就地停妥，不算前移
+    return ticks <= 0 ? Optional.empty() : Optional.of(new Alignment(ticks, null, true));
+  }
+
+  /** 车中心离车站牌子多远：越过为正、未到为负。量不出时为 {@code NaN}。 */
+  private static double centerOffset(SignActionEvent info, MinecartGroup group) {
+    org.bukkit.Location center = info.getCenterLocation();
+    if (center == null || center.getWorld() == null || group == null || group.isEmpty()) {
+      return Double.NaN;
+    }
+    return StopAlignment.groupOffset(
+        group, center.getWorld().getUID(), center.toVector(), StopAlignment.Reference.CENTER);
   }
 
   /** 车头离停车位置标多远：越过为正、未到为负；与对位同一块标志、同一口径（车头最前端）。量不出时为 {@code NaN}。 */

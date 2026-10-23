@@ -157,31 +157,6 @@ class StopMarksTest {
   }
 
   @Test
-  @DisplayName("自动运行开往标志：保持进站速度，按常用制动距离开始制动；距离不够时直接制动")
-  void approachPlan() {
-    // 进站 0.5 格/tick（10 格/秒），常用制动 1 格/秒² = 0.0025 格/tick²：制动距离 50 格。
-    StopMarks.Approach far = StopMarks.approach(80.0, 0.5, 0.5, 0.0025);
-    assertEquals(30.0, far.holdBlocks(), 1.0e-9);
-    assertEquals(0.5, far.holdBpt(), 1.0e-9);
-    assertEquals(50.0, far.brakeBlocks(), 1.0e-9);
-    assertEquals(60 + 200, far.ticks());
-
-    StopMarks.Approach near = StopMarks.approach(20.0, 0.5, 0.5, 0.0025);
-    assertEquals(0.0, near.holdBlocks(), 1.0e-9);
-    assertEquals(20.0, near.brakeBlocks(), 1.0e-9);
-
-    StopMarks.Approach slow = StopMarks.approach(20.0, 0.01, 0.5, 0.05);
-    assertEquals(StopMarks.MIN_HOLD_BPT, slow.holdBpt(), 1.0e-9, "进站已经很慢时不至于一路蠕行");
-    assertEquals(19.9, slow.holdBlocks(), 1.0e-9);
-
-    StopMarks.Approach fromRest = StopMarks.approach(30.0, 0.0, 0.5, 0.05);
-    assertEquals(
-        (int) Math.ceil(2.0 * fromRest.holdBlocks() / StopMarks.MIN_HOLD_BPT + 2.0 * 0.1 / 0.1),
-        fromRest.ticks(),
-        "从停着起步：加速段按平均一半的速度估，不按已在保持速度估");
-  }
-
-  @Test
   @DisplayName("只认车站牌子前方、节数对得上的；写得越专门越优先，再取近的")
   void selectByCarriagesAndDirection() {
     Vector station = new Vector(0.5, 64.0, 0.5);
