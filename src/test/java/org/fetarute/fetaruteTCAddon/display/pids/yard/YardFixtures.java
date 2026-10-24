@@ -1034,6 +1034,112 @@ public final class YardFixtures {
         nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
   }
 
+  public static final NodeId WINDING_LEFT = NodeId.of("SWITCHER:world:100:64:0");
+  public static final NodeId WINDING_CROSSING = NodeId.of("SWITCHER:world:110:64:8");
+  public static final NodeId WINDING_RIGHT = NodeId.of("SWITCHER:world:120:64:0");
+
+  /**
+   * ABC 与 DEF 之间的复线上一组剪式渡线：中间的交叉点连着两头四个道岔。左边两条进交叉点的区间由弯轨拼成，先拐出去再绕回来，轨道长度是两头直线距离的两倍多（游戏里交叉多由弯轨拼成）。
+   *
+   * <pre>
+   *  P1(ABC 1道) ── WINDING_LEFT ─────────── WINDING_RIGHT ── Q1(DEF 1道)
+   *                    (绕)  ╲             ╱
+   *                           WINDING_CROSSING
+   *                    (绕)  ╱             ╲
+   *  P2(ABC 2道) ── 左下道岔 ─────────────── 右下道岔 ── Q2(DEF 2道)
+   * </pre>
+   */
+  public static SimpleRailGraph windingCrossover() {
+    NodeId lowerLeft = NodeId.of("SWITCHER:world:100:64:16");
+    NodeId lowerRight = NodeId.of("SWITCHER:world:120:64:16");
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, P2, NodeType.STATION, 0, 16, false);
+    node(nodes, WINDING_LEFT, NodeType.SWITCHER, 100, 0, false);
+    node(nodes, lowerLeft, NodeType.SWITCHER, 100, 16, false);
+    node(nodes, WINDING_CROSSING, NodeType.SWITCHER, 110, 8, false);
+    node(nodes, WINDING_RIGHT, NodeType.SWITCHER, 120, 0, false);
+    node(nodes, lowerRight, NodeType.SWITCHER, 120, 16, false);
+    node(nodes, Q1, NodeType.STATION, 220, 0, false);
+    node(nodes, Q2, NodeType.STATION, 220, 16, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    List<int[]> fromAbove = new ArrayList<>(line(100, 0, 100, 12));
+    fromAbove.addAll(straight(101, 106, 12));
+    fromAbove.addAll(line(106, 11, 106, 8));
+    fromAbove.addAll(straight(107, 110, 8));
+    edge(edges, footprints, Set.of(), WINDING_LEFT, WINDING_CROSSING, fromAbove, false);
+    List<int[]> fromBelow = new ArrayList<>(line(100, 16, 100, 4));
+    fromBelow.addAll(straight(101, 106, 4));
+    fromBelow.addAll(line(106, 5, 106, 8));
+    fromBelow.addAll(straight(107, 110, 8));
+    edge(edges, footprints, Set.of(), lowerLeft, WINDING_CROSSING, fromBelow, false);
+    edge(edges, footprints, Set.of(), P1, WINDING_LEFT, straight(0, 100, 0), false);
+    edge(edges, footprints, Set.of(), WINDING_LEFT, WINDING_RIGHT, straight(100, 120, 0), false);
+    edge(edges, footprints, Set.of(), WINDING_RIGHT, Q1, straight(120, 220, 0), false);
+    edge(edges, footprints, Set.of(), P2, lowerLeft, straight(0, 100, 16), false);
+    edge(edges, footprints, Set.of(), lowerLeft, lowerRight, straight(100, 120, 16), false);
+    edge(edges, footprints, Set.of(), lowerRight, Q2, straight(120, 220, 16), false);
+    edge(edges, footprints, Set.of(), WINDING_CROSSING, WINDING_RIGHT, line(110, 8, 120, 0), false);
+    edge(edges, footprints, Set.of(), WINDING_CROSSING, lowerRight, line(110, 8, 120, 16), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  public static final NodeId OFFSET_CROSSING = NodeId.of("SWITCHER:world:108:64:1");
+  public static final NodeId OFFSET_CROSSING_NEXT = NodeId.of("SWITCHER:world:114:64:3");
+
+  /**
+   * ABC 与 DEF 之间复线上的一组剪式渡线，交叉由两个节点组成，实地都紧挨 1 道：两条股道相隔 8 格，交叉的两个节点离 1 道只有 1 格、3 格。
+   *
+   * <pre>
+   *  P1(ABC 1道) ── 上道岔1 ──────────────────── 下道岔1 ── Q1(DEF 1道)
+   *                     ╲ OFFSET_CROSSING ── OFFSET_CROSSING_NEXT ╱╲
+   *                     ╱                                           ╲
+   *  P2(ABC 2道) ── 上道岔2 ──────────────────── 下道岔2 ── Q2(DEF 2道)
+   * </pre>
+   */
+  public static SimpleRailGraph offsetScissors() {
+    NodeId upperOne = NodeId.of("SWITCHER:world:100:64:0");
+    NodeId upperTwo = NodeId.of("SWITCHER:world:100:64:8");
+    NodeId lowerOne = NodeId.of("SWITCHER:world:130:64:0");
+    NodeId lowerTwo = NodeId.of("SWITCHER:world:130:64:8");
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, P2, NodeType.STATION, 0, 8, false);
+    node(nodes, upperOne, NodeType.SWITCHER, 100, 0, false);
+    node(nodes, upperTwo, NodeType.SWITCHER, 100, 8, false);
+    node(nodes, OFFSET_CROSSING, NodeType.SWITCHER, 108, 1, false);
+    node(nodes, OFFSET_CROSSING_NEXT, NodeType.SWITCHER, 114, 3, false);
+    node(nodes, lowerOne, NodeType.SWITCHER, 130, 0, false);
+    node(nodes, lowerTwo, NodeType.SWITCHER, 130, 8, false);
+    node(nodes, Q1, NodeType.STATION, 200, 0, false);
+    node(nodes, Q2, NodeType.STATION, 200, 8, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, upperOne, straight(0, 100, 0), false);
+    edge(edges, footprints, Set.of(), upperOne, lowerOne, straight(100, 130, 0), false);
+    edge(edges, footprints, Set.of(), lowerOne, Q1, straight(130, 200, 0), false);
+    edge(edges, footprints, Set.of(), P2, upperTwo, straight(0, 100, 8), false);
+    edge(edges, footprints, Set.of(), upperTwo, lowerTwo, straight(100, 130, 8), false);
+    edge(edges, footprints, Set.of(), lowerTwo, Q2, straight(130, 200, 8), false);
+    edge(edges, footprints, Set.of(), upperOne, OFFSET_CROSSING, line(100, 0, 108, 1), false);
+    edge(edges, footprints, Set.of(), upperTwo, OFFSET_CROSSING, line(100, 8, 108, 1), false);
+    edge(
+        edges,
+        footprints,
+        Set.of(),
+        OFFSET_CROSSING,
+        OFFSET_CROSSING_NEXT,
+        line(108, 1, 114, 3),
+        false);
+    edge(edges, footprints, Set.of(), OFFSET_CROSSING, lowerOne, line(108, 1, 130, 0), false);
+    edge(edges, footprints, Set.of(), OFFSET_CROSSING_NEXT, lowerTwo, line(114, 3, 130, 8), false);
+    edge(edges, footprints, Set.of(), OFFSET_CROSSING_NEXT, lowerOne, line(114, 3, 130, 0), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
   /** 车库 DEP 的第 {@code k} 条库线。 */
   public static NodeId depotTrack(int k) {
     return NodeId.of("SURC:D:DEP:" + k);

@@ -1660,7 +1660,7 @@ public final class YardGeometry {
 
     /**
      * 下一个节点：垂足朝前挪了半个到一个半区间长时取垂足（与脊线平行的股道与脊线对齐），否则按轨道长度接着排——垂足挪不动是斜着岔出去的支线，
-     * 挪得比轨道还长很多是垂足落到了脊线的别处（例如和脊线几乎垂直的库线）。
+     * 挪得比轨道还长很多是垂足落到了脊线的别处（例如和脊线几乎垂直的库线）。“半个区间长”按轨道长度与两头直线距离中短的那个算：弯轨拼成的短区间实际走得不远。
      *
      * <p>上一个节点在弯道里按轨道长度排过、与它的垂足错开时，后面与脊线平行的区间（垂足自己朝前挪了半个到一个半区间长）逐段把这点落差收回来： 每段走的里程夹在 {@value
      * #MIN_CATCH_UP} 到 {@value #MAX_PROJECTED_STEP} 倍区间长之间、尽量落到垂足上，
@@ -1670,14 +1670,20 @@ public final class YardGeometry {
       double before = uOf.get(from);
       double projected = located.get(to).u();
       double length = Math.max(1.0, trackLength(link));
+      // 垂足至少要挪多远才算数，按轨道长度与两头直线距离中短的那个量：道岔区里的短区间常由弯轨拼成（剪式渡线的交叉），
+      // 轨道长度比两头实际隔开的远一倍多，按它量会把渡线中间的节点推过两头的道岔
+      Spot a = spots.get(from);
+      Spot b = spots.get(to);
+      double reach =
+          0.5 * Math.min(length, Math.max(1.0, Math.hypot(b.x() - a.x(), b.z() - a.z())));
       double moved = sign * (projected - before);
       // 与脊线平行与否只在两头量垂足用的是同一条脊线时才比（分叉处两头可能分属来路与支股两条脊线，两套里程不能相减）
       boolean sameFrame = frameOf.get(from) == frameOf.get(to);
       double parallel = sign * (projected - located.get(from).u());
       double step;
-      if (moved >= 0.5 * length && moved <= MAX_PROJECTED_STEP * length) {
+      if (moved >= reach && moved <= MAX_PROJECTED_STEP * length) {
         step = moved;
-      } else if (sameFrame && parallel >= 0.5 * length && parallel <= MAX_PROJECTED_STEP * length) {
+      } else if (sameFrame && parallel >= reach && parallel <= MAX_PROJECTED_STEP * length) {
         step = Math.max(MIN_CATCH_UP * length, Math.min(MAX_PROJECTED_STEP * length, moved));
       } else {
         step = length;
@@ -2844,8 +2850,8 @@ public final class YardGeometry {
         }
       }
       // 其余各段：只接在一行上的（出口短线、尽头侧线）按它离接点的横向偏移排在那一行旁边——横向位置只和接点比，不和别处量的比
-      // （股道出了站常收拢，站台处与咽喉处的横向位置差得远）；接点须与它用同一条脊线量。接在几行之间的（渡线中段）和接不上已有行的，
-      // 按自身横向位置：几行的行位置各在自己的站台处量，彼此不能拿来推算
+      // （股道出了站常收拢，站台处与咽喉处的横向位置差得远）；接点须与它用同一条脊线量。接在几行之间、实地夹在两头接点之间的（渡线中段、
+      // 剪式渡线的交叉）排在最上、最下两行正中，见 between；其余接在几行之间的和接不上已有行的按自身横向位置
       List<List<String>> pending = new ArrayList<>();
       for (Chain chain : chains) {
         for (List<String> run : runs(chain)) {
@@ -2866,13 +2872,13 @@ public final class YardGeometry {
           double v = run.stream().mapToDouble(vOf::get).average().orElse(0.0);
           boolean oneRow = anchors.stream().map(rowOf::get).distinct().count() == 1;
           Row row =
-              new Row(
-                  oneRow
-                      ? anchors.stream()
+              oneRow
+                  ? new Row(
+                      anchors.stream()
                           .mapToDouble(anchor -> rowOf.get(anchor).v() + v - vOf.get(anchor))
                           .average()
-                          .orElse(v)
-                      : v);
+                          .orElse(v))
+                  : between(v, anchors, rowOf).orElseGet(() -> new Row(v));
           run.forEach(key -> rowOf.put(key, row));
           it.remove();
           progress = true;
@@ -2883,6 +2889,52 @@ public final class YardGeometry {
         run.forEach(key -> rowOf.put(key, row));
       }
       return rowOf;
+    }
+
+    /**
+     * 接在几行之间的一段：实地夹在最上、最下两行的接点之间时（各按接点处量的横向位置，差 {@value #SAME_ROW_BLOCKS} 格以内也算），排在这两行正中——
+     * 渡线中段与剪式渡线的交叉画在两股道中间，不按自身横向位置贴到哪一股旁边（交叉的节点实地常紧挨一股；几行的行位置又各在自己的站台处量， 与这里量的比不得）。
+     * 接着的另一段已排在同一个正中位置（同一组交叉的另一部分）时并进它那一行。不夹在中间时为空。
+     */
+    private Optional<Row> between(double v, List<String> anchors, Map<String, Row> rowOf) {
+      Row low = null;
+      Row high = null;
+      for (String anchor : anchors) {
+        Row row = rowOf.get(anchor);
+        if (low == null || row.v() < low.v()) {
+          low = row;
+        }
+        if (high == null || row.v() > high.v()) {
+          high = row;
+        }
+      }
+      if (low == high) {
+        return Optional.empty();
+      }
+      double lowAt = localV(anchors, rowOf, low);
+      double highAt = localV(anchors, rowOf, high);
+      if (v < Math.min(lowAt, highAt) - SAME_ROW_BLOCKS
+          || v > Math.max(lowAt, highAt) + SAME_ROW_BLOCKS) {
+        return Optional.empty();
+      }
+      double middle = (low.v() + high.v()) / 2.0;
+      for (String anchor : anchors) {
+        Row row = rowOf.get(anchor);
+        // 同一组交叉的另一段由同样的两行算出正中，数值完全相同
+        if (row != low && row != high && Double.compare(row.v(), middle) == 0) {
+          return Optional.of(row);
+        }
+      }
+      return Optional.of(new Row(middle));
+    }
+
+    /** 落在 {@code row} 这一行的接点在这里量的平均横向位置。 */
+    private double localV(List<String> anchors, Map<String, Row> rowOf, Row row) {
+      return anchors.stream()
+          .filter(anchor -> rowOf.get(anchor) == row)
+          .mapToDouble(vOf::get)
+          .average()
+          .orElse(row.v());
     }
 
     /** 一段经区间直接连着的、已排进行里的各节点（与这一段用同一条脊线量横向位置），按段内先后。 */

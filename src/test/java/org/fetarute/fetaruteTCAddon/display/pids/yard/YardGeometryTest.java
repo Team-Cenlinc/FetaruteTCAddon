@@ -733,6 +733,40 @@ class YardGeometryTest {
         () -> "两条出口各在 1、2 道那一行: " + where);
   }
 
+  /** 剪式渡线的交叉点经弯轨拼成的短区间连到道岔：轨道比两头隔开的远得多，按沿线实际走到的位置排，交叉点画在两头道岔之间，不被推过另一头的道岔。 */
+  @Test
+  void aCrossingReachedThroughWindingRailsStaysBetweenItsSwitches() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.windingCrossover(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"));
+    YardGeometry.Point left = geometry.nodeAt(YardFixtures.WINDING_LEFT).orElseThrow();
+    YardGeometry.Point crossing = geometry.nodeAt(YardFixtures.WINDING_CROSSING).orElseThrow();
+    YardGeometry.Point right = geometry.nodeAt(YardFixtures.WINDING_RIGHT).orElseThrow();
+    String where = "左道岔 " + left + " 交叉 " + crossing + " 右道岔 " + right;
+
+    assertTrue(left.x() < crossing.x() && crossing.x() < right.x(), () -> "交叉点在两头道岔之间: " + where);
+  }
+
+  /** 剪式渡线的交叉实地紧挨一股道（库里交叉的节点常落在道岔旁）：交叉的几个节点照样画在两股道正中的同一行，画成 X，不贴着那一股拆成几层台阶。 */
+  @Test
+  void aScissorsCrossingSitsMidwayBetweenItsTracks() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.offsetScissors(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"));
+    YardGeometry.Point one = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point two = geometry.nodeAt(P2).orElseThrow();
+    YardGeometry.Point crossing = geometry.nodeAt(YardFixtures.OFFSET_CROSSING).orElseThrow();
+    YardGeometry.Point next = geometry.nodeAt(YardFixtures.OFFSET_CROSSING_NEXT).orElseThrow();
+    String where = "1 道 " + one + " 2 道 " + two + " 交叉 " + crossing + " " + next;
+
+    assertEquals(crossing.y(), next.y(), () -> "交叉的两个节点同一行: " + where);
+    assertEquals(one.y() + two.y(), crossing.y() * 2, () -> "交叉在两股道正中: " + where);
+  }
+
   /** 只连着正线的侧线紧贴正线：不因下面有横跨全站的长侧线、旁边一层被别的侧线占着，就被往下压到别的侧线那一层。 */
   @Test
   void aSidingStaysRightUnderTheLineItLeaves() {
