@@ -276,6 +276,7 @@ final class PidsSignalboxPlan {
                     labels
                         .call()
                         .replace("<train>", trainLabel(state, c.trainName()))
+                        .replace("<caller>", labels.callers().getOrDefault(c.role(), ""))
                         .replace("<reason>", labels.callReasons().getOrDefault(c.reason(), "")));
     int callSpace =
         callText

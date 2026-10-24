@@ -5,6 +5,7 @@ import java.util.Objects;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
@@ -38,7 +39,8 @@ public record SignalboxView(
    * @param auto 模式牌：自动
    * @param signaller 值守者，含 {@code <name>}
    * @param unattended 没人值守
-   * @param call 呼叫牌，含 {@code <train>} 与 {@code <reason>}（呼叫原因）
+   * @param call 呼叫牌，含 {@code <train>}、{@code <caller>}（呼叫者的岗位）与 {@code <reason>}（呼叫原因）
+   * @param callers 呼叫者岗位的写法（驾驶员、车掌）
    * @param callReasons 呼叫原因的写法
    * @param headerTrain 表头：车次
    * @param headerDestination 表头：去向
@@ -63,6 +65,7 @@ public record SignalboxView(
       String signaller,
       String unattended,
       String call,
+      Map<CallerRole, String> callers,
       Map<CallReason, String> callReasons,
       String headerTrain,
       String headerDestination,
@@ -82,6 +85,7 @@ public record SignalboxView(
       String delegated) {
 
     public Labels {
+      callers = Map.copyOf(callers);
       callReasons = Map.copyOf(callReasons);
       statuses = Map.copyOf(statuses);
       buttons = Map.copyOf(buttons);

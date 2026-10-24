@@ -197,4 +197,93 @@ class BuzzerPressTest {
     List<BuzzerPress.Kind> seen = drain(press, 12_050, 14_000);
     assertEquals(List.of(BuzzerPress.Kind.SHORT, BuzzerPress.Kind.SHORT), seen, "相隔两秒是两个一短");
   }
+
+  /** 按重发间隔判松开的铃（车掌的发车铃）：相隔 0.15 秒的两下是同一次按住。丢弃键不能这样判，见下面几条。 */
+  @Test
+  void aUseButtonMergesQuickPressesIntoOneHold() {
+    BuzzerPress press = new BuzzerPress(16, 20);
+    press.press(5_000);
+    press.press(5_150);
+    assertEquals(List.of(BuzzerPress.Kind.SHORT), drain(press, 5_200, 8_000));
+  }
+
+  /** 丢弃键按一下发一个包：快速连按两下（相隔 0.15 秒）就是两短。 */
+  @Test
+  void quickKeyTapsAreACall() {
+    BuzzerPress press = BuzzerPress.forKey(16, 20);
+    press.press(5_000);
+    press.press(5_150);
+    assertEquals(List.of(BuzzerPress.Kind.CALL), drain(press, 5_200, 8_000));
+  }
+
+  /** 手快的连按两下：两个包只隔 0.1 秒（2 tick），与按键重复一样近，但前面没有单独的一个包，仍是两短。 */
+  @Test
+  void veryQuickKeyTapsAreACall() {
+    for (long gap : new long[] {50, 100}) {
+      BuzzerPress press = BuzzerPress.forKey(16, 20);
+      press.press(5_000);
+      press.press(5_000 + gap);
+      assertEquals(
+          List.of(BuzzerPress.Kind.CALL),
+          drain(press, 5_000 + gap + 50, 8_000),
+          () -> "gap " + gap);
+    }
+  }
+
+  @Test
+  void slowKeyTapsWithinTheWindowAreACall() {
+    BuzzerPress press = BuzzerPress.forKey(16, 20);
+    press.press(5_000);
+    press.press(5_700);
+    assertEquals(List.of(BuzzerPress.Kind.CALL), drain(press, 5_750, 8_000));
+  }
+
+  @Test
+  void aSingleKeyTapIsShort() {
+    BuzzerPress press = BuzzerPress.forKey(16, 20);
+    press.press(5_000);
+    assertEquals(List.of(BuzzerPress.Kind.SHORT), drain(press, 5_050, 8_000));
+  }
+
+  /** 按住丢弃键：先一个包，隔着系统按键重复的初始延迟再密集连发；整段是一次按住，按够一秒是一长，不当两短。 */
+  @Test
+  void holdingTheKeyIsOneLongNotACall() {
+    BuzzerPress press = BuzzerPress.forKey(16, 20);
+    press.press(5_000);
+    for (long at = 5_500; at <= 6_200; at += 50) {
+      press.press(at);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.LONG), drain(press, 6_250, 9_000));
+  }
+
+  @Test
+  void aBriefKeyHoldIsOneShort() {
+    BuzzerPress press = BuzzerPress.forKey(16, 20);
+    press.press(5_000);
+    for (long at = 5_400; at <= 5_500; at += 50) {
+      press.press(at);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.SHORT), drain(press, 5_550, 8_000));
+  }
+
+  /** 弱网：网络卡住时没有 tick 结束包，读数不前进，定时检查不会把前一下提前认作松开；两下的包随后挤在一起到，仍按客户端读数分开，照样是两短。 */
+  @Test
+  void keyTapsBunchedAfterAStallStillCall() {
+    BuzzerPress press = BuzzerPress.forKey(16, 20);
+    press.press(5_000);
+    assertEquals(Optional.empty(), press.tick(5_000));
+    press.press(5_200);
+    assertEquals(List.of(BuzzerPress.Kind.CALL), drain(press, 5_200, 8_000));
+  }
+
+  /** 弱网：按住丢弃键时的重复包成串到达（中间没有定时检查），仍是一次按住。 */
+  @Test
+  void bunchedKeyRepeatsStayOneHold() {
+    BuzzerPress press = BuzzerPress.forKey(16, 20);
+    press.press(5_000);
+    for (long at = 5_500; at <= 5_900; at += 50) {
+      press.press(at);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.LONG), drain(press, 5_900, 9_000));
+  }
 }

@@ -15,6 +15,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop.Phase;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallResult;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -80,9 +81,14 @@ class GuardMessagesTest {
             "entry-claimed-self")) {
       keys.add("drive.guard.board." + item);
     }
-    for (String sub : List.of("on", "off", "seat", "status", "tasks", "task", "stop")) {
+    for (String sub : List.of("on", "off", "seat", "status", "call", "tasks", "task", "stop")) {
       keys.add("drive.guard.command.help." + sub);
     }
+    for (String suffix : CallResult.keySuffixes()) {
+      keys.add(GuardSessionManager.SIGNALLER_CALL_KEYS + "." + suffix);
+    }
+    keys.add("drive.guard.menu.item.call-signaller");
+    keys.add("drive.guard.menu.hint.call-signaller");
     for (String key : keys) {
       assertTrue(lang.isString(key), localeTag + " 缺少 " + key);
     }
@@ -181,6 +187,8 @@ class GuardMessagesTest {
       }
     }
     assertTrue(keys.contains("drive.guard.cab-change.moved-with-driver"));
+    // 呼叫信号员的结果按“前缀.结果”拼出，逐个结果的文案在 everyOutcomeAndReasonHasAMessage 里查。
+    keys.remove(GuardSessionManager.SIGNALLER_CALL_KEYS);
     // 发车信号要驾驶员回一短时，在原键后加 -ack。
     keys.add("drive.guard.driver.signal-ack");
     keys.add("drive.guard.driver.signal-forced-ack");

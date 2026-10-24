@@ -36,14 +36,14 @@ class SignallerMessagesTest {
             List.of(
                 "drive.signaller.result.summary",
                 "drive.signaller.result.no-trains",
-                "drive.driver.signaller.called",
-                "drive.driver.signaller.none",
-                "drive.command.call.called",
-                "drive.command.call.none",
                 "drive.command.call.not-dispatch",
                 "drive.command.help.entry-call",
                 "drive.task.claim.signaller-busy",
                 "drive.license.exam.signaller-on-duty"));
+    for (String suffix : CallResult.keySuffixes()) {
+      keys.add("drive.driver.signaller." + suffix);
+      keys.add("drive.command.call." + suffix);
+    }
     for (SignallerShift.EndReason reason : SignallerShift.EndReason.values()) {
       keys.add("drive.signaller.end." + reason.name().toLowerCase(Locale.ROOT).replace('_', '-'));
     }

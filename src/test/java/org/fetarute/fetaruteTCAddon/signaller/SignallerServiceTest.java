@@ -28,6 +28,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallResult;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerShift;
 import org.fetarute.fetaruteTCAddon.signaller.console.ConsoleTarget;
@@ -42,6 +44,7 @@ class SignallerServiceTest {
   private static final UUID DRIVER = UUID.fromString("00000000-0000-0000-0000-0000000000bb");
   private static final UUID OTHER_DRIVER = UUID.fromString("00000000-0000-0000-0000-0000000000dd");
   private static final UUID SECOND = UUID.fromString("00000000-0000-0000-0000-0000000000ee");
+  private static final UUID GUARD = UUID.fromString("00000000-0000-0000-0000-0000000000ff");
   private static final UUID ROUTE = UUID.fromString("00000000-0000-0000-0000-0000000000cc");
   private static final UUID ROUTE_WEST = UUID.fromString("00000000-0000-0000-0000-0000000000c1");
   private static final SignalBox.ConsoleSpot CONSOLE =
@@ -51,6 +54,10 @@ class SignallerServiceTest {
   private Instant now;
   private long tick;
   private List<String> messages;
+
+  /** 各语言键最近一次提醒带的占位符。 */
+  private Map<String, Map<String, String>> alerted;
+
   private List<SignallerShift> shifts;
   private SignallerConfig settings;
   private SignallerService service;
@@ -61,6 +68,7 @@ class SignallerServiceTest {
     now = Instant.parse("2026-10-20T08:00:00Z");
     tick = 0;
     messages = new ArrayList<>();
+    alerted = new HashMap<>();
     shifts = new ArrayList<>();
     settings = SignallerConfig.defaults();
     service =
@@ -78,6 +86,12 @@ class SignallerServiceTest {
               @Override
               public void alert(UUID player, String key, Map<String, String> values) {
                 messages.add(player + " " + key);
+                alerted.put(key, values);
+              }
+
+              @Override
+              public String text(String key) {
+                return key.substring(key.lastIndexOf('.') + 1);
               }
             },
             message -> {});
@@ -379,12 +393,17 @@ class SignallerServiceTest {
 
   @Test
   void driverCallReachesTheSignallerAndTheReplyGoesBack() {
-    assertFalse(service.call(DRIVER, "T1"));
+    assertEquals(CallResult.Status.NO_SIGNALLER, driverCall("T1"));
     goOnDuty();
 
-    assertTrue(service.call(DRIVER, "T1"));
+    assertEquals(
+        new CallResult(CallResult.Status.CALLED, List.of("示例站")),
+        service.call(DRIVER, CallerRole.DRIVER, "T1", CallReason.GENERAL));
     SignalboxState state = service.state("SURC", "ABC").orElseThrow();
-    assertEquals(Optional.of(new SignalboxState.Call("T1", "Drv")), state.call());
+    assertEquals(
+        Optional.of(new SignalboxState.Call("T1", "Drv", CallerRole.DRIVER, CallReason.GENERAL)),
+        state.call());
+    assertEquals("driver Drv", alerted.get("signaller.call.incoming-general").get("caller"));
 
     press(new ConsoleTarget.CallBadge());
     press(new ConsoleTarget.Answer(SignalboxState.Reply.WAIT));
@@ -427,9 +446,9 @@ class SignallerServiceTest {
   void aReplyNeverGoesToTheNextDriverAfterTheFirstCallTimesOut() {
     goOnDuty();
     world.progress.put("T2", progress("T2", YardFixtures.IA));
-    service.call(DRIVER, "T1");
+    driverCall("T1");
     now = now.plusSeconds(30);
-    service.call(OTHER_DRIVER, "T2");
+    service.call(OTHER_DRIVER, CallerRole.DRIVER, "T2", CallReason.GENERAL);
     press(new ConsoleTarget.CallBadge());
 
     // 第一个呼叫超时出队：回复面板退回按钮，画面上那条回复不能落到 T2 的驾驶员头上
@@ -441,10 +460,121 @@ class SignallerServiceTest {
     assertEquals(1, service.boxFor("SURC", "ABC").orElseThrow().calls.size());
   }
 
+  /** 车掌呼叫：控制台写明是车掌在叫，回复回给车掌，不回给同车的驾驶员。 */
+  @Test
+  void aGuardCallShowsTheGuardOnTheConsoleAndTheReplyGoesToTheGuard() {
+    goOnDuty();
+
+    assertEquals(
+        CallResult.Status.CALLED,
+        service.call(GUARD, CallerRole.GUARD, "T1", CallReason.DOORS).status());
+    assertEquals(
+        Optional.of(new SignalboxState.Call("T1", "Grd", CallerRole.GUARD, CallReason.DOORS)),
+        state().call());
+    assertEquals("guard Grd", alerted.get("signaller.call.incoming-doors").get("caller"));
+
+    press(new ConsoleTarget.CallBadge());
+    press(new ConsoleTarget.Answer(SignalboxState.Reply.ACK));
+
+    assertTrue(messages.contains(GUARD + " signaller.reply.ack"));
+    assertFalse(messages.contains(DRIVER + " signaller.reply.ack"));
+    service.endDuty(PLAYER, SignallerShift.EndReason.OFF_DUTY);
+    assertEquals(1, shifts.get(0).callsAnswered());
+    assertEquals(0, shifts.get(0).callsWrong());
+  }
+
+  /** 同一列车的驾驶员与车掌各排各的：各自重复呼叫只算一条，各自写明的新原因只换自己那条。超时未回复的告诉各自。 */
+  @Test
+  void theDriverAndTheGuardOfOneTrainQueueSeparately() {
+    goOnDuty();
+    service.admit("T1", entering(), now);
+
+    assertEquals(CallResult.Status.CALLED, driverCall("T1"));
+    assertEquals(
+        CallResult.Status.CALLED,
+        service.call(GUARD, CallerRole.GUARD, "T1", CallReason.DOORS).status());
+    assertEquals(CallResult.Status.PENDING, driverCall("T1"));
+    assertEquals(
+        CallResult.Status.CALLED,
+        service.call(GUARD, CallerRole.GUARD, "T1", CallReason.OBSTRUCTION).status());
+
+    SignalBox box = service.boxFor("SURC", "ABC").orElseThrow();
+    assertEquals(2, box.calls.size());
+    assertEquals(CallerRole.DRIVER, box.calls.peekFirst().role());
+    assertEquals(CallReason.SIGNAL, box.calls.peekFirst().reason());
+    assertEquals(CallerRole.GUARD, box.calls.peekLast().role());
+    assertEquals(CallReason.OBSTRUCTION, box.calls.peekLast().reason());
+
+    now = now.plusSeconds(61);
+    service.tick();
+    assertTrue(messages.contains(DRIVER + " signaller.call.unanswered"));
+    assertTrue(messages.contains(GUARD + " signaller.call.unanswered"));
+  }
+
+  /** 叫不到时说明原因：功能关着、没人值守、有人值守但列车不在区内也没接近（认不出交路时不列前方的控制区）。 */
+  @Test
+  void aCallThatReachesNobodySaysWhy() {
+    assertEquals(CallResult.Status.NO_SIGNALLER, driverCall("T1"));
+    goOnDuty();
+
+    assertEquals(
+        CallResult.of(CallResult.Status.OUT_OF_ZONE),
+        service.call(DRIVER, CallerRole.DRIVER, "T5", CallReason.GENERAL),
+        "T5 不在区内、没接近、没在入口等，也没有交路进度");
+    assertTrue(service.boxFor("SURC", "ABC").orElseThrow().calls.isEmpty());
+
+    settings = new SignallerConfig(false, 20, 32, 30, 150, 60, 3, 0);
+    assertEquals(CallResult.Status.UNAVAILABLE, driverCall("T1"));
+  }
+
+  /** 叫不到时列出列车沿交路往后会经过的有人值守的控制区：还要先在区外停站的车叫不到，但知道接近哪片再叫；不在途经点上、只是路过的控制区也算。 */
+  @Test
+  void aCallFromOutsideNamesTheStaffedZonesAhead() {
+    useCorridorWithZoneDef(
+        List.of(
+            YardFixtures.D1, YardFixtures.P1, YardFixtures.IB, YardFixtures.Q1, YardFixtures.IC));
+    world.progress.put("T6", at("T6", 0, YardFixtures.D1, YardFixtures.P1));
+    onDuty(PLAYER, "DEF");
+
+    assertEquals(
+        new CallResult(CallResult.Status.OUT_OF_ZONE, List.of("DEF 站")),
+        service.call(DRIVER, CallerRole.DRIVER, "T6", CallReason.GENERAL),
+        "T6 还要先在 ABC 停；ABC 没人值守，不列");
+    assertTrue(service.boxFor("SURC", "DEF").orElseThrow().calls.isEmpty());
+
+    world.route =
+        new RouteDefinition(
+            RouteId.of("SURC:L1:R1"),
+            List.of(YardFixtures.D1, YardFixtures.P1, YardFixtures.IC),
+            Optional.empty());
+    assertEquals(List.of("DEF 站"), service.probe(DRIVER, "T6").zones(), "途经点不在区内，沿图展开会穿过 DEF");
+  }
+
+  /** 弹框前先问能不能叫到：不排队；叫得到时写明哪片控制区，已在等回复时为“已呼叫”，叫不到时与真呼叫同样说明原因。 */
+  @Test
+  void aProbeSaysWhereACallWouldGoWithoutQueueing() {
+    assertEquals(CallResult.Status.NO_SIGNALLER, service.probe(DRIVER, "T1").status());
+    goOnDuty();
+
+    assertEquals(
+        new CallResult(CallResult.Status.CALLED, List.of("示例站")), service.probe(DRIVER, "T1"));
+    SignalBox box = service.boxFor("SURC", "ABC").orElseThrow();
+    assertTrue(box.calls.isEmpty(), "只是问一下，不排队");
+    assertTrue(messages.stream().noneMatch(m -> m.contains("signaller.call.incoming")));
+
+    driverCall("T1");
+    assertEquals(CallResult.Status.PENDING, service.probe(DRIVER, "T1").status());
+    assertEquals(CallResult.Status.CALLED, service.probe(GUARD, "T1").status(), "车掌那条还没排");
+    assertEquals(CallResult.Status.OUT_OF_ZONE, service.probe(DRIVER, "T5").status());
+
+    settings = new SignallerConfig(false, 20, 32, 30, 150, 60, 3, 0);
+    assertEquals(CallResult.Status.UNAVAILABLE, service.probe(DRIVER, "T1").status());
+  }
+
   @Test
   void theCallBadgeSelectsTheCallingTrain() {
     goOnDuty();
-    service.call(DRIVER, "T1");
+    driverCall("T1");
 
     press(new ConsoleTarget.CallBadge());
 
@@ -729,7 +859,9 @@ class SignallerServiceTest {
     now = now.plusSeconds(20);
     assertTrue(service.admit("T2", entering(), now).isEmpty(), "等满时限由系统代排");
     enterZone("T2");
-    assertTrue(service.call(DRIVER, "T2"));
+    assertEquals(
+        CallResult.Status.CALLED,
+        service.call(DRIVER, CallerRole.DRIVER, "T2", CallReason.GENERAL).status());
     now = now.plusSeconds(61);
     service.tick();
     press(new ConsoleTarget.Press(SignalboxState.Button.MODE));
@@ -894,9 +1026,12 @@ class SignallerServiceTest {
     goOnDuty();
     service.admit("T1", entering(), now);
 
-    assertTrue(service.call(DRIVER, "T1"));
+    assertEquals(CallResult.Status.CALLED, driverCall("T1"));
     assertEquals(CallReason.SIGNAL, state().call().orElseThrow().reason(), "在入口等着：信号前等候");
-    assertTrue(service.call(DRIVER, "T1", CallReason.DOORS));
+    assertEquals(CallResult.Status.PENDING, driverCall("T1"), "同一名驾驶员再叫：仍在等回复");
+    assertEquals(
+        CallResult.Status.CALLED,
+        service.call(DRIVER, CallerRole.DRIVER, "T1", CallReason.DOORS).status());
     assertEquals(CallReason.DOORS, state().call().orElseThrow().reason(), "写明的原因替换先前的");
     assertEquals(1, service.boxFor("SURC", "ABC").orElseThrow().calls.size(), "不重复排队");
 
@@ -993,7 +1128,9 @@ class SignallerServiceTest {
     service.admit("T1", entering(), now);
     service.drillCall(PLAYER, bound -> 0);
 
-    assertTrue(service.call(DRIVER, "T1", CallReason.DOORS));
+    assertEquals(
+        CallResult.Status.CALLED,
+        service.call(DRIVER, CallerRole.DRIVER, "T1", CallReason.DOORS).status());
     SignalBox box = service.boxFor("SURC", "ABC").orElseThrow();
     assertEquals(2, box.calls.size(), "真呼叫另排一条");
     assertTrue(box.calls.peekFirst().drill());
@@ -1206,6 +1343,11 @@ class SignallerServiceTest {
         "小区没人：从区外进 DEF 等大区");
   }
 
+  /** 驾驶员 {@link #DRIVER} 不写原因呼叫。 */
+  private CallResult.Status driverCall(String train) {
+    return service.call(DRIVER, CallerRole.DRIVER, train, CallReason.GENERAL).status();
+  }
+
   private void onDuty(UUID player, String zone) {
     service.press(player, "Sig", true, CONSOLE, "SURC", zone, new ConsoleTarget.Deselect());
     assertEquals(SignallerService.DutyStart.STARTED, service.startDuty(player, "Sig", true));
@@ -1269,6 +1411,11 @@ class SignallerServiceTest {
 
     @Override
     public void alert(UUID player, String key, Map<String, String> values) {}
+
+    @Override
+    public String text(String key) {
+      return key;
+    }
   }
 
   /** 两列车在同一个动态停站上暂定的股道不同（候选为 ABC 1、2 道）。 */
@@ -1386,6 +1533,9 @@ class SignallerServiceTest {
     public Optional<PlayerSpot> player(UUID player) {
       if (DRIVER.equals(player)) {
         return Optional.of(new PlayerSpot("Drv", YardFixtures.WORLD, 500, 64, 0, true));
+      }
+      if (GUARD.equals(player)) {
+        return Optional.of(new PlayerSpot("Grd", YardFixtures.WORLD, 520, 64, 0, true));
       }
       return PLAYER.equals(player) || SECOND.equals(player) ? Optional.of(spot) : Optional.empty();
     }

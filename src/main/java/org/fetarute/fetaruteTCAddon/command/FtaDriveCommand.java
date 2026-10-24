@@ -580,7 +580,7 @@ public final class FtaDriveCommand {
     drive.chooseSplit(player, option, outcome -> sendStartOutcome(player, drive, outcome));
   }
 
-  /** 呼叫信号员：只有正在驾驶调度列车的驾驶员能用，不论车上有没有车掌。可写原因（信号前等候、车门故障、线路异常），不写为一般联系。 */
+  /** 呼叫信号员：只有正在驾驶调度列车的驾驶员能用，不论车上有没有车掌；列车要在有人值守的控制区内、正接近或在入口等候。可写原因（信号前等候、车门故障、线路异常），不写为一般联系。 */
   private void handleCall(CommandSender sender, Optional<String> reasonArg) {
     Player player = requirePlayer(sender);
     if (player == null) {
@@ -595,10 +595,7 @@ public final class FtaDriveCommand {
       sender.sendMessage(plugin.getLocaleManager().component("drive.command.call.bad-reason"));
       return;
     }
-    sender.sendMessage(
-        plugin
-            .getLocaleManager()
-            .component(drive.callSignaller(player, reason.orElse(CallReason.GENERAL))));
+    sender.sendMessage(drive.callSignaller(player, reason.orElse(CallReason.GENERAL)));
   }
 
   private void handleReverser(CommandSender sender, String direction) {

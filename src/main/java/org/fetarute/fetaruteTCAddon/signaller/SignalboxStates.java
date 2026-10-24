@@ -76,14 +76,13 @@ final class SignalboxStates {
       }
     }
     preview.removeAll(pending);
+    SignalBox.Call first = staffed ? box.calls.peekFirst() : null;
     Optional<SignalboxState.Call> call =
-        staffed && !box.calls.isEmpty()
-            ? Optional.of(
+        first == null
+            ? Optional.empty()
+            : Optional.of(
                 new SignalboxState.Call(
-                    box.calls.peekFirst().trainName(),
-                    box.calls.peekFirst().driverName(),
-                    box.calls.peekFirst().reason()))
-            : Optional.empty();
+                    first.trainName(), first.callerName(), first.role(), first.reason()));
     Optional<SignalboxState.Notice> notice =
         box.notice != null && now.isBefore(box.notice.until())
             ? Optional.of(new SignalboxState.Notice(box.notice.kind(), box.notice.train()))

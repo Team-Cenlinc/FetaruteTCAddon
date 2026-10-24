@@ -43,14 +43,15 @@ public final class DriveSidebar {
    *
    * <p>只在第一次换上：之后若被别的插件换成它的计分板，就让给它，不再刷新也不抢回来，免得两边每秒互相覆盖。
    *
+   * @param signallerWaiting 列车正停在人工控制的控制区入口等信号员（见 {@link DriveSidebarRows#build}）
    * @return 玩家此刻看到的是驾驶员侧边栏（被别的插件换掉时为 {@code false}）
    */
-  public boolean update(Player player, DriveSession session) {
+  public boolean update(Player player, DriveSession session, boolean signallerWaiting) {
     return update(
         player,
         "drive.sidebar.title",
         session.trainName(),
-        DriveSidebarRows.build(session, Bukkit.getCurrentTick()));
+        DriveSidebarRows.build(session, Bukkit.getCurrentTick(), signallerWaiting));
   }
 
   /**

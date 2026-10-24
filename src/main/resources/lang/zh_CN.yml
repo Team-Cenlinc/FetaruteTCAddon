@@ -1724,14 +1724,17 @@ signaller:
       exam: "<prefix> <gray>考试结束，已在 <white><zone></white> 下岗，控制区回到自动；要继续值守请重新上岗</gray>"
   call:
     unanswered: "<prefix> <yellow><white><zone></white> 信号楼未回复呼叫</yellow>"
-    incoming-signal: "<prefix> <gold>列车 <white><train></white> 呼叫信号楼：信号前等候</gold> <gray>点控制台的呼叫牌回复「进路正在排列」或「前方有车，请等待」</gray>"
-    incoming-signal-bar: "<gold>列车 <white><train></white> 呼叫：信号前等候</gold>"
-    incoming-doors: "<prefix> <gold>列车 <white><train></white> 呼叫信号楼：车门故障</gold> <gray>点控制台的呼叫牌回复「已收到」</gray>"
-    incoming-doors-bar: "<gold>列车 <white><train></white> 呼叫：车门故障</gold>"
-    incoming-obstruction: "<prefix> <gold>列车 <white><train></white> 呼叫信号楼：线路异常</gold> <gray>点控制台的呼叫牌回复「请以注意速度运行」</gray>"
-    incoming-obstruction-bar: "<gold>列车 <white><train></white> 呼叫：线路异常</gold>"
-    incoming-general: "<prefix> <gold>列车 <white><train></white> 呼叫信号楼</gold> <gray>请在控制台点击呼叫牌回复</gray>"
-    incoming-general-bar: "<gold>列车 <white><train></white> 呼叫信号楼</gold>"
+    caller:
+      driver: "驾驶员"
+      guard: "车掌"
+    incoming-signal: "<prefix> <gold>列车 <white><train></white>（<white><caller></white>）呼叫信号楼：信号前等候</gold> <gray>点控制台的呼叫牌回复「进路正在排列」或「前方有车，请等待」</gray>"
+    incoming-signal-bar: "<gold>列车 <white><train></white>（<caller>）呼叫：信号前等候</gold>"
+    incoming-doors: "<prefix> <gold>列车 <white><train></white>（<white><caller></white>）呼叫信号楼：车门故障</gold> <gray>点控制台的呼叫牌回复「已收到」</gray>"
+    incoming-doors-bar: "<gold>列车 <white><train></white>（<caller>）呼叫：车门故障</gold>"
+    incoming-obstruction: "<prefix> <gold>列车 <white><train></white>（<white><caller></white>）呼叫信号楼：线路异常</gold> <gray>点控制台的呼叫牌回复「请以注意速度运行」</gray>"
+    incoming-obstruction-bar: "<gold>列车 <white><train></white>（<caller>）呼叫：线路异常</gold>"
+    incoming-general: "<prefix> <gold>列车 <white><train></white>（<white><caller></white>）呼叫信号楼</gold> <gray>请在控制台点击呼叫牌回复</gray>"
+    incoming-general-bar: "<gold>列车 <white><train></white>（<caller>）呼叫信号楼</gold>"
     wrong-signal: "<prefix> <yellow>回复与呼叫不符：<white><train></white> 报的是信号前等候，应回复「进路正在排列」（马上给它排）或「前方有车，请等待」</yellow>"
     wrong-doors: "<prefix> <yellow>回复与呼叫不符：<white><train></white> 报的是车门故障，应回复「已收到」</yellow>"
     wrong-obstruction: "<prefix> <yellow>回复与呼叫不符：<white><train></white> 报的是线路异常，应回复「请以注意速度运行」</yellow>"
@@ -1998,13 +2001,16 @@ pids:
       partial-secondary: "Some trains may be missing; rebuild the rail graph"
     # 信号员控制台（signalbox-3x5、signalbox-4x8）：标题栏、列车表、操作按钮与临时提示
     signalbox:
-      # 标题栏：模式牌、值守者（<name> 为信号员名）、呼叫牌（<train> 为车次）
+      # 标题栏：模式牌、值守者（<name> 为信号员名）、呼叫牌（<train> 为车次，<caller> 为呼叫者的岗位）
       mode:
         manual: "人工"
         auto: "自动"
       signaller: "值守：<name>"
       unattended: "无人值守"
-      call: "<train> 呼叫：<reason>"
+      call: "<train> <caller>呼叫：<reason>"
+      caller:
+        driver: "驾驶员"
+        guard: "车掌"
       call-reason:
         signal: "信号前等候"
         doors: "车门故障"
@@ -2483,6 +2489,7 @@ drive:
       power: "受电"
       train: "列车"
       signal: "信号"
+      signaller: "信号员"
       next-station: "下一站"
       stop-mark: "停车点"
       stop: "停站"
@@ -2522,6 +2529,9 @@ drive:
         stop: "<red>停车</red>"
         none: "<gray>无行车许可</gray>"
         ato: "<aqua>ATO 运行</aqua>"
+      signaller:
+        waiting: "<yellow>入口等候进路</yellow> <gray>按两下 Q 呼叫</gray>"
+        waiting-guard: "<yellow>入口等候进路</yellow> <gray>/fta drive call 呼叫</gray>"
       station:
         none: "<gray>-</gray>"
       schedule:
@@ -2860,13 +2870,14 @@ drive:
         door-close: "<gray>选中后右键关闭开着的车门</gray>"
         report: "<gray>选中后右键选择原因，当前作业的时限延长一次</gray>"
         confirm: "<gray>出站信号开放后，选中右键确认</gray>"
-        buzzer: "<gray>选中后按住右键约一秒为发车信号（一长声）；一秒内右键两下为呼叫驾驶员</gray>"
+        buzzer: "<gray>选中后按住右键约一秒为发车信号（一长声）；一秒内右键两下为呼叫驾驶员（车上没有驾驶员时呼叫信号员）</gray>"
         emergency: "<gray>选中后右键，列车立即紧急制动</gray>"
     menu:
       title: "车掌菜单"
       item:
         seat: "<aqua>传送入座</aqua>"
         call: "<yellow>呼叫驾驶员</yellow>"
+        call-signaller: "<yellow>呼叫信号员</yellow>"
         report: "<light_purple>异常报告</light_purple>"
         report-used: "<gray>异常报告（本站次数已用完）</gray>"
         end: "<red>结束值乘</red>"
@@ -2874,6 +2885,7 @@ drive:
       hint:
         seat: "<gray>列车停稳时传送回车掌座位；终点站换端时送入要换到的那一端</gray>"
         call: "<gray>铃响两声，通知驾驶员</gray>"
+        call-signaller: "<gray>本列车没有驾驶员：呼叫列车所在或正接近的控制区的信号员</gray>"
         report: "<gray>选择原因，当前作业的时限延长一次</gray>"
         end: "<gray>点击两次结束值乘，车门交还驾驶员或站台</gray>"
     sidebar:
@@ -2890,8 +2902,11 @@ drive:
         cab-change: "换端"
         notice: "提示"
         drill: "演练"
+        signaller: "信号员"
       value:
         train: "<white><train></white>"
+        signaller-buzzer: "<yellow>入口等候进路</yellow> <gray>发车铃右键两下呼叫</gray>"
+        signaller-command: "<yellow>入口等候进路</yellow> <gray>/fta guard call 呼叫</gray>"
         crew-driver: "<white>驾驶员 <driver></white>"
         crew-ato: "<aqua>ATO</aqua>"
         crew-auto: "<gray>自动运行</gray>"
@@ -3008,8 +3023,14 @@ drive:
       doors-open: "<red>车门尚未全部关好，不能发车</red>"
       not-confirmed: "<red>请先确认出发信号</red>"
       not-seated: "<red>请先回到车掌座位</red>"
-    call:
-      no-driver: "<gray>本列车没有驾驶员，无需呼叫</gray>"
+    # 车掌呼叫信号员的结果（两短铃或菜单在侧边栏提示，/fta guard call 另发聊天框）
+    signaller:
+      called: "<aqua>已呼叫 <white><zone></white> 信号楼，请等候回复</aqua>"
+      pending: "<aqua>已呼叫 <white><zone></white> 信号楼，正在等候回复</aqua>"
+      out-of-zone: "<yellow>列车不在有人值守的控制区内，也未接近，无法呼叫信号员</yellow>"
+      out-of-zone-ahead: "<yellow>列车尚未接近有人值守的控制区，接近 <white><zones></white> 后再呼叫</yellow>"
+      none: "<yellow>当前无信号员值守</yellow>"
+      unavailable: "<red>信号员功能未启用</red>"
     report:
       not-at-station: "<gray>只有在车站停站时才能报告</gray>"
       used-up: "<red>本站报告次数已用完</red>"
@@ -3103,6 +3124,7 @@ drive:
         "off": "<yellow>/fta guard off</yellow> <gray>结束值乘</gray>"
         seat: "<yellow>/fta guard seat</yellow> <gray>传送入座；终点站换端时送入要换到的那一端</gray>"
         status: "<yellow>/fta guard status</yellow> <gray>查看值乘情况</gray>"
+        call: "<yellow>/fta guard call [signal|doors|obstruction]</yellow> <gray>呼叫信号员，可写明原因（信号前等候、车门故障、线路异常）；列车须在有人值守的控制区内、正接近或在入口等候</gray>"
         stop: "<yellow>/fta guard stop <玩家></yellow> <gray>撤下车掌</gray>"
         tasks: "<yellow>/fta guard tasks [车站]</yellow> <gray>打开车掌任务板，领取一班车掌</gray>"
         task: "<yellow>/fta guard task [status|abandon|goto]</yellow> <gray>查看、放弃车掌任务或前往上岗</gray>"
@@ -3136,8 +3158,12 @@ drive:
       acknowledged: "<green>信号已确认</green>"
     # 车上无车掌时，驾驶员按两短铃即呼叫信号员（动作栏提示）
     signaller:
-      called: "<aqua>已呼叫信号员，请等候回复</aqua>"
+      called: "<aqua>已呼叫 <white><zone></white> 信号楼，请等候回复</aqua>"
+      pending: "<aqua>已呼叫 <white><zone></white> 信号楼，正在等候回复</aqua>"
       none: "<yellow>当前无信号员值守</yellow>"
+      out-of-zone: "<yellow>本列车不在有人值守的控制区内，也未接近，无法呼叫信号员</yellow>"
+      out-of-zone-ahead: "<yellow>本列车尚未接近有人值守的控制区，接近 <white><zones></white> 后再呼叫</yellow>"
+      unavailable: "<red>信号员功能未启用</red>"
     rescue:
       warn: "<prefix> <yellow>列车已停留 <white><seconds></white> 秒未能前进，请尽快恢复运行；继续停留将转为 ATO</yellow>"
       ato: "<prefix> <yellow>列车停留过久，已转为 ATO 运行</yellow>"
@@ -3163,6 +3189,16 @@ drive:
       revoked: "被撤下"
       shutdown: "插件关闭"
       exam: "考试结束"
+    # 停车时按两短铃（车掌也可点菜单）呼叫信号员：选原因的对话框（<zone> 为接呼叫的控制区）
+    call-dialog:
+      title: "呼叫信号员"
+      body: "呼叫 <zone> 信号楼。选择原因，信号员将按原因回复。"
+      cancel: "取消"
+      reason:
+        signal: "信号前等候"
+        doors: "车门故障"
+        obstruction: "线路异常"
+        general: "一般联系"
   task:
     board:
       title: "<dark_gray>任务板 · </dark_gray><black><station></black>"
@@ -3725,7 +3761,7 @@ drive:
             chat: "<white>下岗：</white><gray>步骤都做完了。输入 <white>/fta signal off</white> 下岗，控制区回到自动，本次练习计次。</gray>"
             subtitle: "<yellow>输入 /fta signal off 下岗</yellow>"
         tips:
-          call: "<prefix> <aqua>信号员提示</aqua> <gray>驾驶员在呼叫：点标题栏的呼叫牌，在操作区选一条回复。超时未回复算漏接（考试中扣分）。</gray>"
+          call: "<prefix> <aqua>信号员提示</aqua> <gray>驾驶员或车掌在呼叫：点标题栏的呼叫牌，在操作区选一条回复。超时未回复算漏接（考试中扣分）。</gray>"
           auto-routed: "<prefix> <aqua>信号员提示</aqua> <gray>刚才一列车等候超时，由系统代排了（考试中扣分）。在列车表里留意「入口等待」的车。</gray>"
           call-missed: "<prefix> <aqua>信号员提示</aqua> <gray>一次呼叫超时未回复，算漏接（考试中扣分）。</gray>"
           to-auto: "<prefix> <aqua>信号员提示</aqua> <gray>控制区已转为自动：车由系统放行。考试中转为自动即不及格；练习请按「转为人工」继续。</gray>"
@@ -3849,7 +3885,7 @@ drive:
       page-2: "<dark_blue><bold>一、上岗与座位</bold></dark_blue>\n<black>坐进调度列车车尾的驾驶室，输入 /fta guard on 上岗（单节车坐另一头）；也可在车站输入 /fta guard tasks 领一班车掌，车到站后坐进车尾即上岗。车掌座位为你预留，他人不能坐。快捷栏换成车掌按钮，选中后右键使用，F 打开车掌菜单；/fta guard off 结束值乘。</black>"
       page-3: "<dark_blue><bold>二、站停作业</bold></dark_blue>\n<black>停妥后右键开门格开站台一侧的车门（1 左、2 右，以列车行进方向为准），随后可下车到站台。侧边栏倒数停站时间，到点后右键 3 关门。开门限 30 秒、关门限 15 秒，超时由站台代做；连续 3 站超时，值乘结束。夹人夹物等情况右键 4 报告，时限延长 30 秒。</black>"
       page-4: "<dark_blue><bold>三、关门与监视</bold></dark_blue>\n<black>关门时站在站台上、靠近自己那节车门（本节不开门时为被送到的那节），视线沿车身注视车门，直到车门关好。门全关后回到车掌座位。列车起步后朝站台一侧或车后看，直到车尾离开站台。两项监视计入成绩。</black>"
-      page-5: "<dark_blue><bold>四、发车铃与紧急停车</bold></dark_blue>\n<black>回座后，出站信号开放时右键 6 确认，再在 7 上按住右键约一秒（一长声）发出发车信号；一短为收到，一秒内右键两下为呼叫驾驶员。出站信号未开放时不计时。遇危险右键 9 紧急停车，停稳后再发一长声解除。</black>"
+      page-5: "<dark_blue><bold>四、发车铃与紧急停车</bold></dark_blue>\n<black>回座后，出站信号开放时右键 6 确认，再在 7 上按住右键约一秒（一长声）发出发车信号；一短为收到，一秒内右键两下为呼叫驾驶员（无驾驶员时呼叫信号员，也可输入 /fta guard call）。出站信号未开放时不计时。遇危险右键 9 紧急停车，停稳后再发一长声解除。</black>"
       page-6: "<dark_blue><bold>五、终点与成绩</bold></dark_blue>\n<black>终点站折返时换到另一头的驾驶室；驾驶员换端时两人一同换座，时间不足时直接送入。每站作业计分：超时、开错门各扣 5 分，提前关门、监视不合格各扣 2 分；异常报告不扣分。</black>"
       page-7: "<dark_blue><bold>六、练习与考试</bold></dark_blue>\n<black>练习：坐上要练习的调度列车（停站中或在终点站待命），输入 /fta license practice guard，从这一站起值乘规定站数，逐站讲评。\n考试：练习后在车站输入 /fta license exam guard，系统指派车次；超时、开错门即不及格，有一站演练夹人夹物。</black>"
     signaller:
@@ -3862,7 +3898,7 @@ drive:
       page-4: "<dark_blue><bold>三、排列进路</bold></dark_blue>\n<black>车开到入口会停下等候：列车表写「入口等待」，入口信号为红。选中它按「排列进路」；进路上有别的车时许可保持排列中。接近的车可以提前排好。车已在接近时取消进路，入口要接近锁闭一阵才能再排。等满时限无人处理，由系统代排。</black>"
       page-5: "<dark_blue><bold>四、扣车与改停股道</bold></dark_blue>\n<black>选中在区内停站的车按「扣车」，停站时间到了也不发车；按「放行」放走，到上限自动放行。选中的车有可改停的股道时，操作区下方列出股道号，点一个即改停；进路锁闭后不能再改。</black>"
       page-6: "<dark_blue><bold>五、自动通过与模式</bold></dark_blue>\n<black>选中一列车按「自动通过」：此后从同一入口去同一股道的车自动放行，入口信号旁写 A；按「取消自动通过」或点带 A 的信号撤销。「转为自动」把整个控制区交还系统；连续几列车无人处理，系统也会转为自动。</black>"
-      page-7: "<dark_blue><bold>六、呼叫</bold></dark_blue>\n<black>驾驶员呼叫时标题栏亮起呼叫牌，写着原因；点它按原因回复：\n信号前等候回「进路正在排列」或「前方有车，请等待」；\n车门故障回「已收到」；\n线路异常回「请以注意速度运行」。\n超时未回复算漏接，回错算答错。</black>"
+      page-7: "<dark_blue><bold>六、呼叫</bold></dark_blue>\n<black>驾驶员或车掌呼叫时标题栏亮起呼叫牌，写着谁在呼叫与原因；点它按原因回复：\n信号前等候回「进路正在排列」或「前方有车，请等待」；\n车门故障回「已收到」；\n线路异常回「请以注意速度运行」。\n超时未回复算漏接，回错算答错。</black>"
       page-8: "<dark_blue><bold>七、成绩与奖励</bold></dark_blue>\n<black>每班满分 100：代排、漏接、答错各扣 5 分，在区内丢了时间的车扣 2 分，两个入口抢同一片道岔时两车合计多晚太多扣 3 分。奖励按亲手排的车计；预排命中、正点放行各加半列，交汇排序得当加一列。</black>"
       page-9: "<dark_blue><bold>八、练习与考试</bold></dark_blue>\n<black>练习：输入 /fta license practice signaller，到控制台上岗，按提示一步步做完，最后用 /fta signal off 下岗计一次。\n考试：输入 /fta license exam signaller，在时限内上岗，亲手排满规定的列数交卷；其间会来一次模拟呼叫。代排、漏接、答错扣分，低于及格线或转为自动即不及格。</black>\n<dark_gray>列数、及格线与时限以 /fta license 显示为准。</dark_gray>"
     driver:
@@ -3878,7 +3914,7 @@ drive:
       page-7: "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准为佳；欠标可前移对标，过标后不得退行。终点站最多越过停车点 3 米，超出即强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"
       page-8: "<dark_blue><bold>七、发车与正点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步将被制止。\n有车掌时车门由车掌开关，等车掌的发车信号再起步。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"
       page-9: "<dark_blue><bold>八、终点与换端</bold></dark_blue>\n<black>到终点站开门后结算本趟成绩，可以结束驾驶，也可以接着驾驶本车的下一趟。\n需要换端时，车门可以开着，走到另一端驾驶室坐下；驾驶座未标记的列车须确认座位。ATO 下同样须换端，坐好后列车自动发车。</black>"
-      page-10: "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。行驶中不能离座；终点站等下一趟时可离座走到发车端，其余情况离座即结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"
+      page-10: "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步；要联系信号员时连按两下 Q（有车掌时输入 /fta drive call）。紧急制动只在必须立即停车时使用。行驶中不能离座；终点站等下一趟时可离座走到发车端，其余情况离座即结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"
   end:
     left-seat: "<prefix> <yellow>你已离开座位，驾驶结束</yellow>"
     seat-lost: "<prefix> <red>无法回到座位，驾驶已结束</red>"
@@ -3967,8 +4003,12 @@ drive:
       stopped: "<prefix> <yellow>已结束驾驶</yellow>"
       not-driving: "<prefix> <red>你当前没有在驾驶</red>"
     call:
-      called: "<prefix> <aqua>已呼叫信号员，请等候回复</aqua>"
+      called: "<prefix> <aqua>已呼叫 <white><zone></white> 信号楼，请等候回复</aqua>"
+      pending: "<prefix> <aqua>已呼叫 <white><zone></white> 信号楼，正在等候回复</aqua>"
       none: "<prefix> <yellow>当前无信号员值守</yellow>"
+      out-of-zone: "<prefix> <yellow>本列车不在有人值守的控制区内，也未接近或在入口等候，无法呼叫信号员</yellow>"
+      out-of-zone-ahead: "<prefix> <yellow>本列车尚未接近有人值守的控制区，无法呼叫信号员</yellow> <gray>前方值守：<white><zones></white>，接近后再呼叫</gray>"
+      unavailable: "<prefix> <red>信号员功能未启用</red>"
       not-dispatch: "<prefix> <red>只有驾驶调度列车时才能呼叫信号员</red>"
       bad-reason: "<prefix> <red>呼叫原因只能是 signal（信号前等候）、doors（车门故障）、obstruction（线路异常）或 general（一般联系）</red>"
     status: "<prefix> <white><train></white> <gray>|</gray> 档位 <yellow><notch></yellow> <gray>|</gray> 速度 <white><speed_kmh></white> km/h <gray>(限速 <limit_kmh>)</gray> <gray>|</gray> <mode> 加速 <accel> 减速 <decel> 米/秒² <gray>|</gray> <direction> <gray>|</gray> <phase>"

@@ -10,6 +10,7 @@ import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
@@ -555,6 +556,10 @@ public final class PidsVocabulary {
     for (SignalboxState.Reply reply : SignalboxState.Reply.values()) {
       replies.put(reply, names("signalbox.reply." + keyOf(reply)));
     }
+    Map<CallerRole, String> callers = new EnumMap<>(CallerRole.class);
+    for (CallerRole role : CallerRole.values()) {
+      callers.put(role, primary("signalbox.caller." + keyOf(role)));
+    }
     Map<CallReason, String> callReasons = new EnumMap<>(CallReason.class);
     for (CallReason reason : CallReason.values()) {
       callReasons.put(reason, primary("signalbox.call-reason." + keyOf(reason)));
@@ -569,6 +574,7 @@ public final class PidsVocabulary {
         primary("signalbox.signaller"),
         primary("signalbox.unattended"),
         primary("signalbox.call"),
+        callers,
         callReasons,
         primary("signalbox.header.train"),
         primary("signalbox.header.destination"),

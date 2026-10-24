@@ -60,7 +60,7 @@ class DriveSidebarCabRowsTest {
     CabSystems cab =
         CabSystems.hotHandover(CONFIG, new CabVehicle(DriveMode.LOCO, false, 6, 7.0), 0);
 
-    DriveSidebarRows.Row air = row(DriveSidebarRows.build(session(cab), 0), "air");
+    DriveSidebarRows.Row air = row(DriveSidebarRows.build(session(cab), 0, false), "air");
 
     assertEquals("drive.sidebar.value.air-loco.ok", air.valueKey());
     assertEquals("900", air.values().get("mr"));
@@ -73,7 +73,7 @@ class DriveSidebarCabRowsTest {
     CabSystems cab = CabSystems.hotHandover(CONFIG, new CabVehicle(DriveMode.MU, true, 6, 11.0), 0);
     cab.tick(1, 0.05, new CabTick(true, true, 1.0, false, false, 20.0, false, true, true));
 
-    DriveSidebarRows.Row air = row(DriveSidebarRows.build(session(cab), 1), "air");
+    DriveSidebarRows.Row air = row(DriveSidebarRows.build(session(cab), 1, false), "air");
 
     assertEquals("drive.sidebar.value.air-regen.ok", air.valueKey());
   }
@@ -85,7 +85,7 @@ class DriveSidebarCabRowsTest {
     cab.faults().inject(CabFault.BRAKE_LEAK, 0);
     cab.faults().toggleDoorBypass();
 
-    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session(cab), 0);
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session(cab), 0, false);
 
     List<String> faultValues =
         rows.stream()

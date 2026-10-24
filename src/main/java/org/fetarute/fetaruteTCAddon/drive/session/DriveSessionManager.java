@@ -82,7 +82,10 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabVehicle;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallResult;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
+import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCallDialog;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCalls;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerLink;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerShift;
@@ -364,10 +367,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 在岗登记：驾驶员、车掌与信号员同一时间只当一个，开始当班或领任务前统一问它。 */
   private final CrewDuty crewDuty = new CrewDuty();
 
-  /** 驾驶员呼叫信号员的去处；信号员模块没有接上时无人接。 */
+  /** 驾驶员与车掌呼叫信号员的去处；信号员模块没有接上时无人接。 */
   private volatile SignallerLink signallerLink = SignallerLink.NONE;
 
-  /** 车上没有车掌时两短铃转为呼叫信号员，以及重复呼叫的合并。 */
+  /** 车上没有车掌时驾驶员两短铃转为呼叫信号员，以及驾驶员与车掌重复呼叫的合并。 */
   private final SignallerCalls signallerCalls;
 
   /** 信号员班次结算。 */
@@ -470,7 +473,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return crewDuty;
   }
 
-  /** 接上信号员模块：驾驶员呼叫信号员时转给它；传 {@code null} 时恢复为无人接。 */
+  /** 接上信号员模块：驾驶员与车掌呼叫信号员时转给它；传 {@code null} 时恢复为无人接。 */
   public void setSignallerLink(SignallerLink link) {
     this.signallerLink = link == null ? SignallerLink.NONE : link;
   }
@@ -783,6 +786,36 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
 
       @Override
+      public SignallerCalls.Outcome callSignaller(
+          UUID guardId, String trainName, CallReason reason) {
+        return signallerCalls.call(
+            guardId, CallerRole.GUARD, trainName, reason, monotonicMillis(), signallerLink);
+      }
+
+      @Override
+      public void buzzSignaller(
+          UUID guardId,
+          String trainName,
+          boolean stopped,
+          SignallerCalls.Ask ask,
+          SignallerCalls.Reply reply) {
+        signallerCalls.buzz(
+            guardId,
+            CallerRole.GUARD,
+            trainName,
+            stopped,
+            monotonicMillis(),
+            signallerLink,
+            ask,
+            reply);
+      }
+
+      @Override
+      public boolean signallerWaiting(String trainName) {
+        return signallerLink.waiting(trainName);
+      }
+
+      @Override
       public boolean driverDoorsOpen(String trainName) {
         // 关门动画放完前也算开着：这时上岗，这一站不交给车掌（已开过门），站台还在等驾驶员回报关好
         return driverSessionOfTrain(trainName)
@@ -1034,7 +1067,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
   }
 
-  /** 车上没有车掌时按成两短的驾驶员：转给信号员，在动作栏告诉驾驶员有没有人接。 */
+  /** 车上没有车掌时按成两短的驾驶员：列车停着时弹出对话框选原因（叫不到时直接说明原因、不弹框）；行驶中直接按一般联系呼叫，免得对话框挡住手柄。结果在动作栏告诉驾驶员。 */
   private void tickSignallerCalls() {
     for (UUID driverId :
         signallerCalls.tick(clientClock::now, active::containsKey, monotonicMillis())) {
@@ -1043,16 +1076,47 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (session == null || session.driverLink() == null || player == null) {
         continue;
       }
-      SignallerCalls.Outcome outcome =
-          signallerCalls.call(
-              driverId, session.driverLink().currentTrainName(), monotonicMillis(), signallerLink);
-      notice(
-          player,
-          outcome.reached() ? "drive.driver.signaller.called" : "drive.driver.signaller.none",
-          Map.of());
-      if (outcome.reached() && !outcome.repeated()) {
-        sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
-      }
+      signallerCalls.buzz(
+          driverId,
+          CallerRole.DRIVER,
+          session.driverLink().currentTrainName(),
+          session.isStopped(),
+          monotonicMillis(),
+          signallerLink,
+          (zone, waiting) ->
+              SignallerCallDialog.open(
+                  plugin,
+                  plugin.getLocaleManager(),
+                  player,
+                  zone,
+                  waiting,
+                  this::callSignallerFromCab),
+          (result, ring) -> tellSignallerCall(player, result, ring));
+    }
+  }
+
+  /** 对话框里选了原因：呼叫信号员。 */
+  private void callSignallerFromCab(Player player, CallReason reason) {
+    DriveSession session = active.get(player.getUniqueId());
+    if (session == null || session.driverLink() == null) {
+      return;
+    }
+    SignallerCalls.Outcome outcome =
+        signallerCalls.call(
+            player.getUniqueId(),
+            CallerRole.DRIVER,
+            session.driverLink().currentTrainName(),
+            reason,
+            monotonicMillis(),
+            signallerLink);
+    tellSignallerCall(player, outcome.result(), outcome.rings());
+  }
+
+  /** 驾驶台上呼叫信号员的结果在动作栏告诉驾驶员，有人接时响一声。 */
+  private void tellSignallerCall(Player player, CallResult result, boolean ring) {
+    notice(player, result.key("drive.driver.signaller"), result.values());
+    if (ring) {
+      sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
     }
   }
 
@@ -1060,25 +1124,27 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    * {@code /fta drive call [原因]}：正在驾驶调度列车的驾驶员呼叫信号员（不论车上有没有车掌）。
    *
    * @param reason 原因；没写时为一般联系（车正在入口等候时信号员那边按“信号前等候”算）
-   * @return 给驾驶员的提示语言键
+   * @return 给驾驶员的提示：有没有人接，没人接时说明原因
    */
-  public String callSignaller(Player player, CallReason reason) {
+  public Component callSignaller(Player player, CallReason reason) {
+    LocaleManager locale = plugin.getLocaleManager();
     DriveSession session = active.get(player.getUniqueId());
     if (session == null) {
-      return "drive.command.stop.not-driving";
+      return locale.component("drive.command.stop.not-driving");
     }
     DriverLink link = session.driverLink();
     if (link == null) {
-      return "drive.command.call.not-dispatch";
+      return locale.component("drive.command.call.not-dispatch");
     }
     SignallerCalls.Outcome outcome =
         signallerCalls.call(
             player.getUniqueId(),
+            CallerRole.DRIVER,
             link.currentTrainName(),
             reason,
             monotonicMillis(),
             signallerLink);
-    return outcome.reached() ? "drive.command.call.called" : "drive.command.call.none";
+    return locale.component(outcome.result().key("drive.command.call"), outcome.result().values());
   }
 
   /** 呼叫冷却用的单调时钟（毫秒）：不受改系统时间影响。 */
@@ -3448,7 +3514,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (tickCounter % current.hudIntervalTicks() == 0) {
       boolean sidebarShown = false;
       if (current.sidebar()) {
-        sidebarShown = sidebar.update(player, session);
+        sidebarShown =
+            sidebar.update(
+                player, session, crew != null && signallerLink.waiting(crew.currentTrainName()));
       } else {
         sidebar.hide(player);
       }

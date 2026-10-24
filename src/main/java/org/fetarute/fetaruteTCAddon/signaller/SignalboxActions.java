@@ -364,7 +364,7 @@ final class SignalboxActions {
     }
   }
 
-  /** 回复最早的那个呼叫：回复要配得上呼叫的原因（{@link CallReplies}），不符的计数并告诉信号员该怎么回。模拟呼叫的回复不发给任何驾驶员。 */
+  /** 回复最早的那个呼叫：回复发给呼叫的那名乘务员，要配得上呼叫的原因（{@link CallReplies}），不符的计数并告诉信号员该怎么回。模拟呼叫的回复不发给任何人。 */
   private void answer(SignalboxState.Reply reply) {
     SignalBox.Call call = box.calls.pollFirst();
     box.replying = false;
@@ -388,7 +388,7 @@ final class SignalboxActions {
       service
           .messenger()
           .alert(
-              call.driver(),
+              call.caller(),
               "signaller.reply." + reply.name().toLowerCase(Locale.ROOT).replace('_', '-'),
               Map.of(
                   "zone",

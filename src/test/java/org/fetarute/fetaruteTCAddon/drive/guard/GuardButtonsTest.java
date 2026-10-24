@@ -63,10 +63,14 @@ class GuardButtonsTest {
   void menuReusesThePanelTextures() {
     assertEquals(
         "drive/panel/end_confirm",
-        GuardMenu.modelKey(GuardMenu.Action.END, new GuardMenu.View(true, false)));
+        GuardMenu.modelKey(GuardMenu.Action.END, new GuardMenu.View(true, false, true)));
     assertEquals(
         "drive/guard/report_used",
-        GuardMenu.modelKey(GuardMenu.Action.REPORT, new GuardMenu.View(false, true)));
+        GuardMenu.modelKey(GuardMenu.Action.REPORT, new GuardMenu.View(false, true, true)));
+    assertEquals(
+        "drive/guard/buzzer",
+        GuardMenu.modelKey(GuardMenu.Action.CALL, new GuardMenu.View(false, false, false)),
+        "没有驾驶员时呼叫信号员，同一个按钮");
     assertEquals(Optional.of(GuardMenu.Action.SEAT), GuardMenu.actionAt(0));
     assertEquals(Optional.empty(), GuardMenu.actionAt(1));
   }

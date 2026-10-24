@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
@@ -245,24 +246,38 @@ final class SignalBox {
   record Hold(String trainName, Instant since) {}
 
   /**
-   * 驾驶员的呼叫。
+   * 乘务员（驾驶员或车掌）的呼叫。
    *
    * @param trainName 列车名
-   * @param driver 驾驶员；模拟呼叫时为空
-   * @param driverName 驾驶员名字
+   * @param caller 呼叫的乘务员；模拟呼叫时为空
+   * @param callerName 呼叫者名字（模拟呼叫为空串）
+   * @param role 驾驶员或车掌（模拟呼叫按驾驶员）
    * @param since 呼叫时刻
    * @param reason 原因
-   * @param drill 是模拟呼叫（操作许可证的练习与考试）：回复与漏接不发给任何驾驶员
+   * @param drill 是模拟呼叫（操作许可证的练习与考试）：回复与漏接不发给任何乘务员
    */
   record Call(
       String trainName,
-      UUID driver,
-      String driverName,
+      UUID caller,
+      String callerName,
+      CallerRole role,
       Instant since,
       CallReason reason,
       boolean drill) {
     Call {
+      callerName = callerName == null ? "" : callerName;
+      role = role == null ? CallerRole.DRIVER : role;
       reason = reason == null ? CallReason.GENERAL : reason;
+    }
+
+    /** 列车改名后的这条呼叫。 */
+    Call renamed(String trainName) {
+      return new Call(trainName, caller, callerName, role, since, reason, drill);
+    }
+
+    /** 换上新写明的原因（排队位置与呼叫时刻不变）。 */
+    Call withReason(CallReason reason) {
+      return new Call(trainName, caller, callerName, role, since, reason, drill);
     }
   }
 

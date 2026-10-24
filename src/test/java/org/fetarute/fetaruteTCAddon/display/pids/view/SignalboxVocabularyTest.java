@@ -8,6 +8,7 @@ import java.util.List;
 import org.fetarute.fetaruteTCAddon.display.pids.fixtures.SignalboxFixtures;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -64,7 +65,8 @@ class SignalboxVocabularyTest {
     SignalboxView.Labels labels =
         new PidsVocabulary(SignalboxFixtures.language("zh_CN")).signalboxLabels();
     assertEquals("值守：<name>", labels.signaller());
-    assertEquals("<train> 呼叫：<reason>", labels.call());
+    assertEquals("<train> <caller>呼叫：<reason>", labels.call());
+    assertEquals("车掌", labels.callers().get(CallerRole.GUARD));
     assertEquals("车门故障", labels.callReasons().get(CallReason.DOORS));
     assertEquals("入口等待 <seconds> 秒", labels.statuses().get(SignalboxState.RowStatus.WAITING));
     assertEquals("进路被 <train> 占用", labels.routeBlockedBy());

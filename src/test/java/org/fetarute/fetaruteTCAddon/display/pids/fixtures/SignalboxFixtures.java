@@ -22,6 +22,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardGeometry;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
@@ -170,7 +172,8 @@ public final class SignalboxFixtures {
             SignalboxState.Button.RELEASE, false,
             SignalboxState.Button.AUTO_PASS, true,
             SignalboxState.Button.MODE, true),
-        Optional.of(new SignalboxState.Call(WAITING, "Driver")),
+        Optional.of(
+            new SignalboxState.Call(WAITING, "Driver", CallerRole.DRIVER, CallReason.GENERAL)),
         false,
         Optional.of(
             new SignalboxState.Notice(

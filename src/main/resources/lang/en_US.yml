@@ -312,6 +312,7 @@ drive:
       power: "Power"
       train: "Train"
       signal: "Signal"
+      signaller: "Signaller"
       next-station: "Next"
       stop-mark: "Stop mark"
       stop: "Stop"
@@ -351,6 +352,9 @@ drive:
         stop: "<red>Stop</red>"
         none: "<gray>No movement authority</gray>"
         ato: "<aqua>ATO driving</aqua>"
+      signaller:
+        waiting: "<yellow>Held at the zone entry</yellow> <gray>Q twice to call</gray>"
+        waiting-guard: "<yellow>Held at the zone entry</yellow> <gray>/fta drive call to call</gray>"
       station:
         none: "<gray>-</gray>"
       schedule:
@@ -689,13 +693,14 @@ drive:
         door-close: "<gray>Select and right-click to close the open doors</gray>"
         report: "<gray>Select and right-click to pick a reason; extends the current step once</gray>"
         confirm: "<gray>Once the starting signal is clear, select and right-click to confirm</gray>"
-        buzzer: "<gray>Select and hold right-click about a second to give the ready-to-start signal (one long); right-click twice within a second to call the driver</gray>"
+        buzzer: "<gray>Select and hold right-click about a second to give the ready-to-start signal (one long); right-click twice within a second to call the driver (the signaller when no driver is on board)</gray>"
         emergency: "<gray>Select and right-click to apply the emergency brake at once</gray>"
     menu:
       title: "Guard Panel"
       item:
         seat: "<aqua>Back to seat</aqua>"
         call: "<yellow>Call driver</yellow>"
+        call-signaller: "<yellow>Call signaller</yellow>"
         report: "<light_purple>Incident report</light_purple>"
         report-used: "<gray>Incident report (none left at this stop)</gray>"
         end: "<red>End duty</red>"
@@ -703,6 +708,7 @@ drive:
       hint:
         seat: "<gray>Teleports you to the guard's seat while the train is stopped; when changing ends, to the cab you are moving to</gray>"
         call: "<gray>Rings twice to call the driver</gray>"
+        call-signaller: "<gray>No driver on board: calls the signaller of the zone the train is in or approaching</gray>"
         report: "<gray>Pick a reason; extends the current step once</gray>"
         end: "<gray>Click twice to end duty; the doors go back to the driver or the station</gray>"
     sidebar:
@@ -719,8 +725,11 @@ drive:
         cab-change: "Change ends"
         notice: "Notice"
         drill: "Drill"
+        signaller: "Signaller"
       value:
         train: "<white><train></white>"
+        signaller-buzzer: "<yellow>Held at the zone entry</yellow> <gray>buzzer twice to call</gray>"
+        signaller-command: "<yellow>Held at the zone entry</yellow> <gray>/fta guard call to call</gray>"
         crew-driver: "<white>Driver <driver></white>"
         crew-ato: "<aqua>ATO</aqua>"
         crew-auto: "<gray>Automatic</gray>"
@@ -837,8 +846,14 @@ drive:
       doors-open: "<red>Not all doors are closed; cannot depart</red>"
       not-confirmed: "<red>Check the starting signal first</red>"
       not-seated: "<red>Return to the guard's seat first</red>"
-    call:
-      no-driver: "<gray>This train has no driver to call</gray>"
+    # Result of a guard's call to the signaller (two rings or the menu: sidebar; /fta guard call: also chat)
+    signaller:
+      called: "<aqua>Called the <white><zone></white> signal box; please wait for a reply</aqua>"
+      pending: "<aqua>Already called the <white><zone></white> signal box; waiting for a reply</aqua>"
+      out-of-zone: "<yellow>Not in or approaching a staffed control zone; the signaller cannot be called</yellow>"
+      out-of-zone-ahead: "<yellow>Not yet approaching a staffed control zone; call again when approaching <white><zones></white></yellow>"
+      none: "<yellow>No signaller is on duty</yellow>"
+      unavailable: "<red>The signaller feature is not enabled</red>"
     report:
       not-at-station: "<gray>Reports can only be made while stopped at a station</gray>"
       used-up: "<red>No reports left at this stop</red>"
@@ -932,6 +947,7 @@ drive:
         "off": "<yellow>/fta guard off</yellow> <gray>End duty</gray>"
         seat: "<yellow>/fta guard seat</yellow> <gray>Back to your seat; when changing ends, to the cab you are moving to</gray>"
         status: "<yellow>/fta guard status</yellow> <gray>Show your duty</gray>"
+        call: "<yellow>/fta guard call [signal|doors|obstruction]</yellow> <gray>Call the signaller, optionally with a reason (waiting at the signal, door fault, something on the line); the train must be in, approaching or waiting at a staffed control zone</gray>"
         stop: "<yellow>/fta guard stop <player></yellow> <gray>Take a guard off duty</gray>"
         tasks: "<yellow>/fta guard tasks [station]</yellow> <gray>Open the guard board and take a guard duty</gray>"
         task: "<yellow>/fta guard task [status|abandon|goto]</yellow> <gray>Check or abandon your guard duty, or go to the train</gray>"
@@ -965,8 +981,12 @@ drive:
       acknowledged: "<green>Signal acknowledged</green>"
     # With no guard on board, two short rings call the signaller (action bar)
     signaller:
-      called: "<aqua>Signaller called; please wait for a reply</aqua>"
+      called: "<aqua>Called the <white><zone></white> signal box; please wait for a reply</aqua>"
+      pending: "<aqua>Already called the <white><zone></white> signal box; waiting for a reply</aqua>"
       none: "<yellow>No signaller is on duty</yellow>"
+      out-of-zone: "<yellow>Not in or approaching a staffed control zone; the signaller cannot be called</yellow>"
+      out-of-zone-ahead: "<yellow>Not yet approaching a staffed control zone; call again when approaching <white><zones></white></yellow>"
+      unavailable: "<red>The signaller feature is not enabled</red>"
     rescue:
       warn: "<prefix> <yellow>The train has not moved for <white><seconds></white> s; resume running soon or it will switch to ATO</yellow>"
       ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
@@ -992,6 +1012,16 @@ drive:
       revoked: "Removed from duty"
       shutdown: "Plugin stopped"
       exam: "Exam over"
+    # Calling the signaller with two rings while stopped (guards may also use the menu): pick a reason (<zone> is the zone called)
+    call-dialog:
+      title: "Call the signaller"
+      body: "Calling the <zone> signal box. Pick a reason; the signaller replies to fit it."
+      cancel: "Cancel"
+      reason:
+        signal: "Waiting at the signal"
+        doors: "Door fault"
+        obstruction: "Something on the line"
+        general: "General"
   task:
     board:
       title: "<dark_gray>Task board · </dark_gray><black><station></black>"
@@ -1554,7 +1584,7 @@ drive:
             chat: "<white>Go off duty:</white><gray> all steps done. Run <white>/fta signal off</white>; the zone goes back to auto and the practice counts.</gray>"
             subtitle: "<yellow>Run /fta signal off</yellow>"
         tips:
-          call: "<prefix> <aqua>Signaller tip</aqua> <gray>A driver is calling: click the call badge in the title bar and pick a reply. An unanswered call counts as missed (costs points in the exam).</gray>"
+          call: "<prefix> <aqua>Signaller tip</aqua> <gray>A driver or guard is calling: click the call badge in the title bar and pick a reply. An unanswered call counts as missed (costs points in the exam).</gray>"
           auto-routed: "<prefix> <aqua>Signaller tip</aqua> <gray>A train waited too long and the system routed it (costs points in the exam). Watch for \"waiting at entry\" in the train list.</gray>"
           call-missed: "<prefix> <aqua>Signaller tip</aqua> <gray>A call went unanswered and counts as missed (costs points in the exam).</gray>"
           to-auto: "<prefix> <aqua>Signaller tip</aqua> <gray>The zone is on auto: the system lets trains through. Switching to auto fails the exam; press \"Switch to manual\" to carry on practising.</gray>"
@@ -1678,7 +1708,7 @@ drive:
       page-2: "<dark_blue><bold>1. Going on duty</bold></dark_blue>\n<black>Sit in the rear cab of a dispatched train and run /fta guard on, or take a duty with /fta guard tasks and sit in the rear cab when it arrives. Your seat is reserved. Hotbar: select, right-click. F: menu. /fta guard off ends duty.</black>"
       page-3: "<dark_blue><bold>2. Station work</bold></dark_blue>\n<black>Once stopped, right-click 1 (left) or 2 (right, by direction of travel) for the platform-side doors and step out. When the sidebar dwell count ends, right-click 3 to close. Opening has 30 s, closing 15 s; on timeout the station does it. Right-click 4 to report: 30 s more.</black>"
       page-4: "<dark_blue><bold>3. Closing and watching</bold></dark_blue>\n<black>While the doors close, stand on the platform by your car (or the one you were moved to) and watch along the train until shut. Then return to your seat. After departure look at the platform or behind until the rear has left. Both watches count.</black>"
-      page-5: "<dark_blue><bold>4. Buzzer and emergency</bold></dark_blue>\n<black>Seated, right-click 6 once the starting signal clears, then hold right-click on 7 for a second (one long). One short: received; two clicks: call the driver. Right-click 9: emergency stop; one long releases it.</black>"
+      page-5: "<dark_blue><bold>4. Buzzer and emergency</bold></dark_blue>\n<black>Seated, right-click 6 once the starting signal clears, then hold right-click on 7 for a second (one long). One short: received; two clicks: call the driver (no driver: the signaller). Right-click 9: emergency stop; one long releases it.</black>"
       page-6: "<dark_blue><bold>5. Terminals and scores</bold></dark_blue>\n<black>At a terminal move to the cab at the other end; you and the driver swap together, and are moved for you when time is short. Timeouts and wrong doors cost 5 points, early closing and missed watches 2; incident reports cost nothing.</black>"
       page-7: "<dark_blue><bold>6. Practice and exam</bold></dark_blue>\n<black>Practice: board a dispatched train and run /fta license practice guard.\nExam: sign up at a station with /fta license exam guard; a trip is assigned. A timeout or wrong door fails.</black>"
     signaller:
@@ -1691,7 +1721,7 @@ drive:
       page-4: "<dark_blue><bold>3. Setting routes</bold></dark_blue>\n<black>A train stops at the entry and waits: the list says \"waiting at entry\" and the entry signal is red. Select it and press \"Set route\"; if another train is in the way, the route stays pending. Approaching trains can be routed in advance. Cancelling a route with a train on approach time-locks the entry for a while. Unattended trains are routed by the system after a while.</black>"
       page-5: "<dark_blue><bold>4. Holds and platforms</bold></dark_blue>\n<black>Select a train dwelling in the zone and press \"Hold\": it will not depart when its dwell ends; \"Release\" lets it go, and holds release on their own at the limit. When the selected train can use another platform, the numbers appear under the buttons; click one to switch. Once the route locks it cannot change.</black>"
       page-6: "<dark_blue><bold>5. Auto pass and modes</bold></dark_blue>\n<black>Select a train and press \"Auto pass\": later trains from the same entry to the same track go through on their own, shown by an A at the entry signal; \"Cancel auto pass\" or clicking the A signal undoes it. \"Switch to auto\" hands the whole zone back to the system; several unattended trains in a row do the same.</black>"
-      page-7: "<dark_blue><bold>6. Calls</bold></dark_blue>\n<black>When a driver calls, the call badge lights up with the reason; click it and reply to fit:\nwaiting at the signal - \"Route is being set\" or \"Train ahead, please wait\";\ndoor fault - \"Acknowledged\";\nsomething on the line - \"Proceed at caution speed\".\nNo reply in time counts as missed; an unfitting one as wrong.</black>"
+      page-7: "<dark_blue><bold>6. Calls</bold></dark_blue>\n<black>When a driver or guard calls, the call badge shows who is calling and why; click it and reply to fit:\nwaiting at the signal - \"Route is being set\" or \"Train ahead, please wait\";\ndoor fault - \"Acknowledged\";\nsomething on the line - \"Proceed at caution speed\".\nNo reply in time counts as missed; an unfitting one as wrong.</black>"
       page-8: "<dark_blue><bold>7. Scores and rewards</bold></dark_blue>\n<black>Each shift starts at 100: auto-routing, missed calls and wrong replies cost 5 each, a train losing time in the zone 2, and two trains from different entries losing too much time together at a junction 3. Rewards count trains routed by hand; pre-routing and keeping time add half a train each, a good junction order a whole one.</black>"
       page-9: "<dark_blue><bold>8. Practice and exam</bold></dark_blue>\n<black>Practice: run /fta license practice signaller, go on duty at a console, follow the steps, then go off duty with /fta signal off to count it.\nExam: run /fta license exam signaller, go on duty in time and route the required number of trains by hand; one simulated call comes in. Auto-routing, missed calls and wrong replies cost points; falling below the pass mark or switching to auto fails.</black>\n<dark_gray>See /fta license for the train count, pass mark and time limit.</dark_gray>"
     driver:
@@ -1707,7 +1737,7 @@ drive:
       page-7: "<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early and stop within the door range, ideally on the mark; move up if short, you cannot reverse. At termini, overrunning by over 3 m forces a stop.\nOnce stopped, press F and open the platform side.</black>"
       page-8: "<dark_blue><bold>7. Departing on time</bold></dark_blue>\n<black>Depart once the doors are closed and the signal allows; early starts are blocked. With a guard aboard, the guard works the doors: wait for the guard's signal.\nThe sidebar shows times and delay; recover lateness within the limit. Scores come at the end.</black>"
       page-9: "<dark_blue><bold>8. Termini and changing ends</bold></dark_blue>\n<black>At the terminus the trip is scored when the doors open; end driving or carry on with the next trip.\nTo change ends, walk to the other cab with the doors open; unmarked seats need confirming. ATO changes ends too.</black>"
-      page-10: "<dark_blue><bold>9. When things go wrong</bold></dark_blue>\n<black>If dispatch holds you, wait for the signal. Use EB only to stop at once. Leaving the seat ends driving, except walking to the other cab at a terminus. Hand back to automatic if stuck.</black>\n<dark_gray>More: Fetarute Wiki.</dark_gray>"
+      page-10: "<dark_blue><bold>9. When things go wrong</bold></dark_blue>\n<black>If held, wait for the signal; Q twice calls the signaller (with a guard aboard: /fta drive call). Use EB only to stop at once. Leaving the seat ends driving, except walking to the other cab at a terminus. Hand back to automatic if stuck.</black>\n<dark_gray>More: Fetarute Wiki.</dark_gray>"
   end:
     left-seat: "<prefix> <yellow>You left the seat; driving has ended</yellow>"
     seat-lost: "<prefix> <red>Could not return to the seat; driving has ended</red>"
@@ -1796,8 +1826,12 @@ drive:
       stopped: "<prefix> <yellow>Driving ended</yellow>"
       not-driving: "<prefix> <red>You are not driving</red>"
     call:
-      called: "<prefix> <aqua>Signaller called; please wait for a reply</aqua>"
+      called: "<prefix> <aqua>Called the <white><zone></white> signal box; please wait for a reply</aqua>"
+      pending: "<prefix> <aqua>Already called the <white><zone></white> signal box; waiting for a reply</aqua>"
       none: "<prefix> <yellow>No signaller is on duty</yellow>"
+      out-of-zone: "<prefix> <yellow>This train is not in, approaching or waiting at a staffed control zone, so the signaller cannot be called</yellow>"
+      out-of-zone-ahead: "<prefix> <yellow>This train is not yet approaching a staffed control zone, so the signaller cannot be called</yellow> <gray>Staffed ahead: <white><zones></white>; call again when approaching</gray>"
+      unavailable: "<prefix> <red>The signaller feature is not enabled</red>"
       not-dispatch: "<prefix> <red>You can only call the signaller while driving a dispatched train</red>"
       bad-reason: "<prefix> <red>The reason must be signal (waiting at the signal), doors (door fault), obstruction (something on the line) or general</red>"
     status: "<prefix> <white><train></white> <gray>|</gray> Notch <yellow><notch></yellow> <gray>|</gray> Speed <white><speed_kmh></white> km/h <gray>(limit <limit_kmh>)</gray> <gray>|</gray> <mode> accel <accel> decel <decel> m/s² <gray>|</gray> <direction> <gray>|</gray> <phase>"
@@ -1912,14 +1946,17 @@ signaller:
       exam: "<prefix> <gray>Exam over; off duty at <white><zone></white>, the zone is back to auto. Go on duty again to keep signalling</gray>"
   call:
     unanswered: "<prefix> <yellow>The <white><zone></white> signal box did not answer the call</yellow>"
-    incoming-signal: "<prefix> <gold>Train <white><train></white> is calling: waiting at the signal</gold> <gray>click the call badge on the console and reply \"Route is being set\" or \"Train ahead, please wait\"</gray>"
-    incoming-signal-bar: "<gold>Train <white><train></white> calling: waiting at the signal</gold>"
-    incoming-doors: "<prefix> <gold>Train <white><train></white> is calling: door fault</gold> <gray>click the call badge on the console and reply \"Acknowledged\"</gray>"
-    incoming-doors-bar: "<gold>Train <white><train></white> calling: door fault</gold>"
-    incoming-obstruction: "<prefix> <gold>Train <white><train></white> is calling: something on the line</gold> <gray>click the call badge on the console and reply \"Proceed at caution speed\"</gray>"
-    incoming-obstruction-bar: "<gold>Train <white><train></white> calling: something on the line</gold>"
-    incoming-general: "<prefix> <gold>Train <white><train></white> is calling the signal box</gold> <gray>click the call badge on the console to reply</gray>"
-    incoming-general-bar: "<gold>Train <white><train></white> calling the signal box</gold>"
+    caller:
+      driver: "Driver"
+      guard: "Guard"
+    incoming-signal: "<prefix> <gold>Train <white><train></white> (<white><caller></white>) is calling: waiting at the signal</gold> <gray>click the call badge on the console and reply \"Route is being set\" or \"Train ahead, please wait\"</gray>"
+    incoming-signal-bar: "<gold>Train <white><train></white> (<caller>) calling: waiting at the signal</gold>"
+    incoming-doors: "<prefix> <gold>Train <white><train></white> (<white><caller></white>) is calling: door fault</gold> <gray>click the call badge on the console and reply \"Acknowledged\"</gray>"
+    incoming-doors-bar: "<gold>Train <white><train></white> (<caller>) calling: door fault</gold>"
+    incoming-obstruction: "<prefix> <gold>Train <white><train></white> (<white><caller></white>) is calling: something on the line</gold> <gray>click the call badge on the console and reply \"Proceed at caution speed\"</gray>"
+    incoming-obstruction-bar: "<gold>Train <white><train></white> (<caller>) calling: something on the line</gold>"
+    incoming-general: "<prefix> <gold>Train <white><train></white> (<white><caller></white>) is calling the signal box</gold> <gray>click the call badge on the console to reply</gray>"
+    incoming-general-bar: "<gold>Train <white><train></white> (<caller>) calling the signal box</gold>"
     wrong-signal: "<prefix> <yellow>The reply did not fit: <white><train></white> reported waiting at the signal; reply \"Route is being set\" (and set it) or \"Train ahead, please wait\"</yellow>"
     wrong-doors: "<prefix> <yellow>The reply did not fit: <white><train></white> reported a door fault; reply \"Acknowledged\"</yellow>"
     wrong-obstruction: "<prefix> <yellow>The reply did not fit: <white><train></white> reported something on the line; reply \"Proceed at caution speed\"</yellow>"
@@ -2015,13 +2052,16 @@ pids:
   board:
     # Signal box console (signalbox-3x5, signalbox-4x8): header, train list, buttons and transient notices
     signalbox:
-      # Header: mode badge, signaller on duty (<name>), driver call badge (<train>)
+      # Header: mode badge, signaller on duty (<name>), call badge (<train>, <caller> is the caller's post)
       mode:
         manual: "Manual"
         auto: "Auto"
       signaller: "On duty: <name>"
       unattended: "Unattended"
-      call: "<train> calling: <reason>"
+      call: "<train> <caller> calling: <reason>"
+      caller:
+        driver: "driver"
+        guard: "guard"
       call-reason:
         signal: "at signal"
         doors: "door fault"

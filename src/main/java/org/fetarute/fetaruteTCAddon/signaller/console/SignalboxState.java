@@ -9,6 +9,7 @@ import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 
 /**
  * 控制台一帧的数据（纯数据、按值比较）：站台屏据此画标题栏的模式牌与值守者、站场图上的进路与信号、列车表、操作区，并推出点击区。
@@ -188,22 +189,19 @@ public record SignalboxState(
   }
 
   /**
-   * 驾驶员的呼叫。
+   * 乘务员的呼叫。
    *
    * @param trainName 呼叫的列车
-   * @param driver 驾驶员名（模拟呼叫为空串）
+   * @param caller 呼叫者名（模拟呼叫为空串）
+   * @param role 驾驶员或车掌（呼叫牌上写出来）
    * @param reason 原因（呼叫牌上写出来，回复要配得上）
    */
-  public record Call(String trainName, String driver, CallReason reason) {
+  public record Call(String trainName, String caller, CallerRole role, CallReason reason) {
     public Call {
       Objects.requireNonNull(trainName, "trainName");
-      Objects.requireNonNull(driver, "driver");
+      Objects.requireNonNull(caller, "caller");
+      Objects.requireNonNull(role, "role");
       reason = reason == null ? CallReason.GENERAL : reason;
-    }
-
-    /** 一般联系。 */
-    public Call(String trainName, String driver) {
-      this(trainName, driver, CallReason.GENERAL);
     }
   }
 

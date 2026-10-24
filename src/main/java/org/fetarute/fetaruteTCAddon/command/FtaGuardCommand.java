@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.command;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -14,6 +15,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoard;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
@@ -30,8 +32,8 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
  * /fta guard 命令注册：坐在调度列车车尾驾驶室的玩家 {@code /fta guard on} 上岗当车掌，{@code off} 离岗，{@code seat}
- * 传送入座（终点站换端时送进要换到的那一端）， {@code status} 查看；{@code tasks [车站]} 打开车掌任务板领取一班车掌，{@code task
- * status|abandon|goto} 查看、放弃任务或前往接班；管理员 {@code stop <玩家>} 撤下车掌。
+ * 传送入座（终点站换端时送进要换到的那一端）， {@code status} 查看，{@code call [原因]} 呼叫信号员；{@code tasks [车站]}
+ * 打开车掌任务板领取一班车掌，{@code task status|abandon|goto} 查看、放弃任务或前往接班；管理员 {@code stop <玩家>} 撤下车掌。
  */
 public final class FtaGuardCommand {
 
@@ -102,6 +104,22 @@ public final class FtaGuardCommand {
         manager
             .commandBuilder("fta")
             .literal("guard")
+            .literal("call")
+            .permission(player)
+            .optional(
+                "reason",
+                StringParser.stringParser(),
+                SuggestionProvider.blockingStrings(
+                    (ctx, input) ->
+                        CommandUx.suggestions(
+                            Arrays.stream(CallReason.values()).map(CallReason::key).toList(),
+                            input.lastRemainingToken())))
+            .handler(
+                ctx -> handleCall(ctx.sender(), ctx.optional("reason").map(String.class::cast))));
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("guard")
             .literal("tasks")
             .permission(player)
             .optional("station", StringParser.quotedStringParser(), stationSuggestions)
@@ -155,7 +173,7 @@ public final class FtaGuardCommand {
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(locale().component("drive.guard.command.help.header"));
     if (sender.hasPermission(DrivePermissions.GUARD)) {
-      for (String sub : List.of("on", "off", "seat", "status", "tasks", "task", "split")) {
+      for (String sub : List.of("on", "off", "seat", "status", "call", "tasks", "task", "split")) {
         sender.sendMessage(locale().component("drive.guard.command.help." + sub));
       }
     }
@@ -219,6 +237,25 @@ public final class FtaGuardCommand {
       return;
     }
     guards.get().seat(player);
+  }
+
+  /** 呼叫信号员：只有值乘中的车掌能用，不论车上有没有驾驶员。可写原因（信号前等候、车门故障、线路异常），不写为一般联系。 */
+  private void handleCall(CommandSender sender, Optional<String> reasonArg) {
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(locale().component("drive.guard.command.player-only"));
+      return;
+    }
+    Optional<CallReason> reason = reasonArg.flatMap(CallReason::parse);
+    if (reasonArg.isPresent() && reason.isEmpty()) {
+      player.sendMessage(locale().component("drive.command.call.bad-reason"));
+      return;
+    }
+    Optional<GuardSessionManager> guards = guards();
+    if (guards.isEmpty()) {
+      player.sendMessage(locale().component("drive.guard.command.not-on-duty"));
+      return;
+    }
+    guards.get().callSignaller(player, reason.orElse(CallReason.GENERAL));
   }
 
   private void handleStatus(CommandSender sender) {

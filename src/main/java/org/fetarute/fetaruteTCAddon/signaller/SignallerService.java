@@ -41,6 +41,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallResult;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerLink;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerScore;
@@ -59,7 +61,7 @@ import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
  *   <li><b>值守</b>：有权限的玩家右键控制台、确认后上岗，控制区转为人工；离控制台超过范围、过了宽限期，或下线、死亡、换游戏模式即下岗，
  *       控制区回到自动（“退回自动”而不是“全部停住”：内核本身是安全的）。
  *   <li><b>控制台</b>（{@link SignalboxConsole}）：站台屏按控制区取一帧数据，点击交回来。
- *   <li><b>呼叫</b>（{@link SignallerLink}）：驾驶员呼叫所在控制区的信号员，信号员在控制台上选一条固定回复。
+ *   <li><b>呼叫</b>（{@link SignallerLink}）：驾驶员或车掌呼叫所在控制区的信号员，信号员在控制台上选一条固定回复。
  * </ul>
  *
  * <p>只在服务器主线程调用。
@@ -361,16 +363,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       List<SignalBox.Call> calls = new ArrayList<>(box.calls);
       box.calls.clear();
       for (SignalBox.Call call : calls) {
-        box.calls.add(
-            oldKey.equals(key(call.trainName()))
-                ? new SignalBox.Call(
-                    display,
-                    call.driver(),
-                    call.driverName(),
-                    call.since(),
-                    call.reason(),
-                    call.drill())
-                : call);
+        box.calls.add(oldKey.equals(key(call.trainName())) ? call.renamed(display) : call);
       }
       if (box.approaching.remove(oldKey)) {
         box.approaching.add(newKey);
@@ -676,10 +669,10 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
           duty.player,
           "signaller.duty.ended." + reason.name().toLowerCase(Locale.ROOT).replace('_', '-'),
           Map.of("zone", zoneName));
-      // 还没回复的呼叫：告诉驾驶员信号楼没回复（下岗不算漏接）
+      // 还没回复的呼叫：告诉呼叫的乘务员信号楼没回复（下岗不算漏接）
       for (SignalBox.Call call : unanswered) {
         if (!call.drill()) {
-          messenger.send(call.driver(), "signaller.call.unanswered", Map.of("zone", zoneName));
+          messenger.send(call.caller(), "signaller.call.unanswered", Map.of("zone", zoneName));
         }
       }
     } catch (RuntimeException ex) {
@@ -1270,7 +1263,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     return changed;
   }
 
-  /** 呼叫：超时没回复算漏接，告诉驾驶员。 */
+  /** 呼叫：超时没回复算漏接，告诉呼叫的乘务员。 */
   private boolean tickCalls(SignalBox box, SignallerConfig settings, Instant now) {
     boolean changed = false;
     while (!box.calls.isEmpty()
@@ -1286,9 +1279,9 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
                 : SignallerExaminer.Event.CALL_MISSED);
       }
       if (!call.drill()) {
-        messenger.send(call.driver(), "signaller.call.unanswered", Map.of("zone", zoneName(box)));
+        messenger.send(call.caller(), "signaller.call.unanswered", Map.of("zone", zoneName(box)));
       }
-      // 回复面板对着的就是这一个：退回按钮，回复不能落到排在后面的驾驶员头上
+      // 回复面板对着的就是这一个：退回按钮，回复不能落到排在后面的乘务员头上
       box.replying = false;
       changed = true;
     }
@@ -1297,71 +1290,220 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
 
   // ─── 呼叫 ──────────────────────────────────────────────────────────────────
 
+  /**
+   * 乘务员呼叫：转给这列车在区内、正接近或在入口等候的那片有人值守的控制区。没写原因、车又正在这片的入口等候时按“信号前等候”算。
+   * 驾驶员与车掌各排各的，回复各回各的；同一名乘务员已在等回复时不再排一条，写明了别的原因就换上（排队位置不变）。
+   */
   @Override
-  public boolean call(UUID driver, String trainName) {
-    return call(driver, trainName, CallReason.GENERAL);
-  }
-
-  /** 带原因的呼叫。没写原因、车又正在这片的入口等候时，按“信号前等候”算；同一列车已在等回复时，后来写明的原因替换先前的（排队位置不变）。 */
-  @Override
-  public boolean call(UUID driver, String trainName, CallReason reason) {
-    String key = key(trainName);
-    if (driver == null || key.isEmpty()) {
-      return false;
+  public CallResult call(UUID caller, CallerRole role, String trainName, CallReason reason) {
+    Objects.requireNonNull(caller, "caller");
+    Objects.requireNonNull(role, "role");
+    CallTarget target = callTarget(trainName);
+    if (target.box() == null) {
+      return target.result();
     }
     CallReason given = reason == null ? CallReason.GENERAL : reason;
-    Instant now = clock.get();
-    for (SignalBox box : boxes.values()) {
-      if (box.duty == null || !concerns(box, key)) {
-        continue;
-      }
-      SignalBox.Waiting waiting = box.waiting.get(key);
-      CallReason effective =
-          given == CallReason.GENERAL && waiting != null && !stale(waiting, now) && box.manual()
-              ? CallReason.SIGNAL
-              : given;
-      List<SignalBox.Call> queued = new ArrayList<>(box.calls);
-      for (int i = 0; i < queued.size(); i++) {
-        SignalBox.Call call = queued.get(i);
-        // 模拟呼叫不是这名驾驶员的：真呼叫另排一条
-        if (!call.drill() && key.equals(key(call.trainName()))) {
-          // 同一列车已经在等回复：不重复排队；写明了别的原因就换上
-          if (given != CallReason.GENERAL && call.reason() != given) {
-            queued.set(
-                i,
-                new SignalBox.Call(
-                    call.trainName(),
-                    call.driver(),
-                    call.driverName(),
-                    call.since(),
-                    given,
-                    call.drill()));
-            box.calls.clear();
-            box.calls.addAll(queued);
-            invalidate(box);
-            alertCall(box, call.trainName(), given);
-          } else if (now.isAfter(call.since().plus(CALL_COOLDOWN))) {
-            alertCall(box, call.trainName(), call.reason());
-          }
-          return true;
-        }
-      }
-      String driverName = world.player(driver).map(SignallerWorld.PlayerSpot::name).orElse("");
-      box.calls.addLast(new SignalBox.Call(trainName, driver, driverName, now, effective, false));
-      alertCall(box, trainName, effective);
-      examine(box, SignallerExaminer.Event.CALL_INCOMING);
-      invalidate(box);
-      debug.accept("SIGNALLER_CALL box=" + box.label() + " train=" + trainName);
-      return true;
-    }
-    return false;
+    return new CallResult(
+        queueCall(target.box(), caller, role, trainName, given, clock.get()),
+        target.result().zones());
   }
 
-  private void alertCall(SignalBox box, String trainName, CallReason reason) {
+  /** 呼叫会落到哪里，不排队：落得到时，这名乘务员已在那片等回复为 {@code PENDING}，否则为 {@code CALLED}。 */
+  @Override
+  public CallResult probe(UUID caller, String trainName) {
+    Objects.requireNonNull(caller, "caller");
+    CallTarget target = callTarget(trainName);
+    if (target.box() == null) {
+      return target.result();
+    }
+    String key = key(trainName);
+    boolean queued =
+        target.box().calls.stream()
+            .anyMatch(
+                call ->
+                    !call.drill()
+                        && caller.equals(call.caller())
+                        && key.equals(key(call.trainName())));
+    return queued
+        ? new CallResult(CallResult.Status.PENDING, target.result().zones())
+        : target.result();
+  }
+
+  /**
+   * 呼叫的去处。
+   *
+   * @param box 接呼叫的信号楼；落不到任何一座时为空
+   * @param result 落得到时为 {@code CALLED} 与那片控制区，否则为落不到的原因
+   */
+  private record CallTarget(SignalBox box, CallResult result) {}
+
+  /** 这列车的呼叫落到哪座信号楼：功能关着、没人值守、列车不在任何一片有人值守的控制区内也没接近时说明原因；不在区内时列出它往后会经过的有人值守的控制区（接近了再叫）。 */
+  private CallTarget callTarget(String trainName) {
+    if (!config.get().enabled()) {
+      return new CallTarget(null, CallResult.of(CallResult.Status.UNAVAILABLE));
+    }
+    List<SignalBox> staffed = new ArrayList<>();
+    for (SignalBox box : boxes.values()) {
+      if (box.duty != null) {
+        staffed.add(box);
+      }
+    }
+    if (staffed.isEmpty()) {
+      return new CallTarget(null, CallResult.of(CallResult.Status.NO_SIGNALLER));
+    }
+    String key = key(trainName);
+    if (!key.isEmpty()) {
+      for (SignalBox box : staffed) {
+        if (concerns(box, key)) {
+          return new CallTarget(
+              box, new CallResult(CallResult.Status.CALLED, List.of(zoneName(box))));
+        }
+      }
+    }
+    return new CallTarget(
+        null, new CallResult(CallResult.Status.OUT_OF_ZONE, zonesAhead(key, staffed)));
+  }
+
+  /** 叫不到时最多列出前方几片有人值守的控制区。 */
+  static final int ZONES_AHEAD = 3;
+
+  /**
+   * 列车沿交路往后会经过的有人值守的控制区名，按先后，最多 {@value #ZONES_AHEAD} 片：从当前位置起把剩下的途经点按最短路展开成图节点，看先走进哪一片。
+   * 认不出列车的交路时为空。
+   *
+   * @param staffed 有人值守的信号楼
+   */
+  private List<String> zonesAhead(String key, List<SignalBox> staffed) {
+    if (key.isEmpty()) {
+      return List.of();
+    }
+    RouteProgressRegistry.RouteProgressEntry entry =
+        world.progress().values().stream()
+            .filter(candidate -> key.equals(key(candidate.trainName())))
+            .findFirst()
+            .orElse(null);
+    Optional<RouteDefinition> route =
+        entry == null || entry.routeUuid() == null
+            ? Optional.empty()
+            : world.route(entry.routeUuid());
+    if (route.isEmpty() || route.get().waypoints().isEmpty()) {
+      return List.of();
+    }
+    record Ahead(int leg, int step, String zone) {}
+    Map<RailGraph, List<List<NodeId>>> legsByGraph = new IdentityHashMap<>();
+    List<Ahead> found = new ArrayList<>();
+    for (SignalBox box : staffed) {
+      ZoneMap map = owned(box);
+      if (map == null) {
+        continue;
+      }
+      List<List<NodeId>> legs =
+          legsByGraph.computeIfAbsent(
+              map.graph(), graph -> legsAhead(graph, entry, route.get().waypoints()));
+      search:
+      for (int leg = 0; leg < legs.size(); leg++) {
+        List<NodeId> nodes = legs.get(leg);
+        for (int step = 0; step < nodes.size(); step++) {
+          if (map.inside(nodes.get(step))) {
+            found.add(new Ahead(leg, step, zoneName(box)));
+            break search;
+          }
+        }
+      }
+    }
+    return found.stream()
+        .sorted(Comparator.comparingInt(Ahead::leg).thenComparingInt(Ahead::step))
+        .map(Ahead::zone)
+        .distinct()
+        .limit(ZONES_AHEAD)
+        .toList();
+  }
+
+  /** 从列车当前位置起，剩下的每一段途经点之间按最短路走过的图节点（不含起点）；图上找不到的一段只记下那个途经点。 */
+  private List<List<NodeId>> legsAhead(
+      RailGraph graph, RouteProgressRegistry.RouteProgressEntry entry, List<NodeId> waypoints) {
+    int current = Math.max(0, Math.min(entry.currentIndex(), waypoints.size() - 1));
+    NodeId from = entry.lastPassedGraphNode().orElseGet(() -> waypoints.get(current));
+    List<List<NodeId>> legs = new ArrayList<>();
+    for (int i = current + 1; i < waypoints.size(); i++) {
+      NodeId to = waypoints.get(i);
+      List<NodeId> nodes = List.of(to);
+      if (graph.findNode(from).isPresent() && graph.findNode(to).isPresent()) {
+        nodes =
+            finder
+                .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
+                .map(path -> path.nodes().subList(1, path.nodes().size()))
+                .filter(path -> !path.isEmpty())
+                .orElse(nodes);
+      }
+      legs.add(nodes);
+      from = to;
+    }
+    return legs;
+  }
+
+  /** 在这座楼排一条呼叫；这名乘务员已在等回复时不重复排。 */
+  private CallResult.Status queueCall(
+      SignalBox box,
+      UUID caller,
+      CallerRole role,
+      String trainName,
+      CallReason given,
+      Instant now) {
+    String key = key(trainName);
+    List<SignalBox.Call> queued = new ArrayList<>(box.calls);
+    for (int i = 0; i < queued.size(); i++) {
+      SignalBox.Call call = queued.get(i);
+      // 模拟呼叫不是哪名乘务员的：真呼叫另排一条
+      if (call.drill() || !caller.equals(call.caller()) || !key.equals(key(call.trainName()))) {
+        continue;
+      }
+      if (given != CallReason.GENERAL && call.reason() != given) {
+        SignalBox.Call updated = call.withReason(given);
+        queued.set(i, updated);
+        box.calls.clear();
+        box.calls.addAll(queued);
+        invalidate(box);
+        alertCall(box, updated);
+        return CallResult.Status.CALLED;
+      }
+      if (now.isAfter(call.since().plus(CALL_COOLDOWN))) {
+        alertCall(box, call);
+      }
+      return CallResult.Status.PENDING;
+    }
+    SignalBox.Waiting waiting = box.waiting.get(key);
+    CallReason effective =
+        given == CallReason.GENERAL && waiting != null && !stale(waiting, now) && box.manual()
+            ? CallReason.SIGNAL
+            : given;
+    String name = world.player(caller).map(SignallerWorld.PlayerSpot::name).orElse("");
+    SignalBox.Call call = new SignalBox.Call(trainName, caller, name, role, now, effective, false);
+    box.calls.addLast(call);
+    alertCall(box, call);
+    examine(box, SignallerExaminer.Event.CALL_INCOMING);
+    invalidate(box);
+    debug.accept("SIGNALLER_CALL box=" + box.label() + " train=" + trainName + " role=" + role);
+    return CallResult.Status.CALLED;
+  }
+
+  private void alertCall(SignalBox box, SignalBox.Call call) {
     messenger.alert(
         box.duty.player,
-        "signaller.call.incoming-" + reason.key(),
-        Map.of("train", world.info(trainName).label(), "zone", zoneName(box)));
+        "signaller.call.incoming-" + call.reason().key(),
+        Map.of(
+            "train",
+            world.info(call.trainName()).label(),
+            "zone",
+            zoneName(box),
+            "caller",
+            callerLabel(call)));
+  }
+
+  /** 呼叫者的写法：岗位加名字（模拟呼叫只有岗位）。 */
+  private String callerLabel(SignalBox.Call call) {
+    String role = messenger.text("signaller.call.caller." + call.role().key());
+    return call.callerName().isBlank() ? role : role + " " + call.callerName();
   }
 
   /**
@@ -1401,8 +1543,9 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     } else {
       return Optional.empty();
     }
-    box.calls.addLast(new SignalBox.Call(train, null, "", now, reason, true));
-    alertCall(box, train, reason);
+    SignalBox.Call call = new SignalBox.Call(train, null, "", CallerRole.DRIVER, now, reason, true);
+    box.calls.addLast(call);
+    alertCall(box, call);
     invalidate(box);
     debug.accept("SIGNALLER_DRILL_CALL box=" + box.label() + " train=" + train + " " + reason);
     return Optional.of(train);

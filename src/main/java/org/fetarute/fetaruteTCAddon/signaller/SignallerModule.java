@@ -191,6 +191,12 @@ public final class SignallerModule implements Listener {
     }
 
     @Override
+    public String text(String key) {
+      LocaleManager manager = locale.get();
+      return manager == null ? key : manager.text(key);
+    }
+
+    @Override
     public void cue(UUID player, Cue cue, Map<String, String> values) {
       Player online = player == null ? null : Bukkit.getPlayer(player);
       LocaleManager manager = locale.get();

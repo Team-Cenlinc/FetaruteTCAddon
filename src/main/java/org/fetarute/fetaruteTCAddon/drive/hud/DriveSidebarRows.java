@@ -62,8 +62,12 @@ public final class DriveSidebarRows {
 
   private DriveSidebarRows() {}
 
-  /** 构建侧边栏全部行。 */
-  public static List<Row> build(DriveSession session, long nowTick) {
+  /**
+   * 构建侧边栏全部行。
+   *
+   * @param signallerWaiting 列车正停在人工控制的控制区入口等信号员排列进路：信号一行下面提示怎么呼叫信号员（车上有车掌时两短铃呼叫的是车掌，只能用命令）
+   */
+  public static List<Row> build(DriveSession session, long nowTick, boolean signallerWaiting) {
     Objects.requireNonNull(session, "session");
     List<Row> rows = new ArrayList<>();
     DriverLink link = session.driverLink();
@@ -78,6 +82,15 @@ public final class DriveSidebarRows {
           session.isAto()
               ? new Row("drive.sidebar.label.signal", "drive.sidebar.value.signal.ato", Map.of())
               : signalRow(link));
+      if (signallerWaiting) {
+        rows.add(
+            new Row(
+                "drive.sidebar.label.signaller",
+                link.guardAboard()
+                    ? "drive.sidebar.value.signaller.waiting-guard"
+                    : "drive.sidebar.value.signaller.waiting",
+                Map.of()));
+      }
       // 终点站等开出下一趟：刚跑完那一趟的下一站、表定时刻与通过站已无意义（晚点会一直往上涨），只留“下一趟”。终到停站的操作提示照常显示。
       boolean awaitingNextTrip = link.turnbackPending();
       rows.add(
