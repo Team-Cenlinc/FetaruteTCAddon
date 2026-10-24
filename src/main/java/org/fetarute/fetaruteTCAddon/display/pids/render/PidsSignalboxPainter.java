@@ -139,12 +139,11 @@ final class PidsSignalboxPainter {
   private static final int DELEGATED_MARGIN = 4;
 
   /**
-   * 让给小区（车站控制）的那几片：围着小区里的节点、两端都在小区里的线与小区站台的站台块画一圈虚线框，框的上沿外写“小区名 ·
-   * 车站控制（信号员）”。画在轨道之后、占用之前，车与占用照常盖在上面。
+   * 让给小区（车站控制）的那几片：围着小区里的节点、两端都在小区里的线与小区站台的站台块画一圈虚线框，框的上沿外写“小区名 · 车站控制（信号员）”，中心工位分出去的写“工位 n ·
+   * 所辖车站（信号员）”。画在轨道之后、占用之前，车与占用照常盖在上面。
    */
   private void drawDelegated(YardGeometry geometry, SignalboxState state) {
     int size = plan.yard().map(PidsLayout.Yard::labelSize).orElse(10);
-    String template = plan.view().labels().delegated();
     PidsTheme theme = p.theme();
     for (SignalboxState.Delegated area : state.delegated()) {
       int[] bounds = {Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE};
@@ -178,6 +177,13 @@ final class PidsSignalboxPainter {
       int right = bounds[2] + DELEGATED_MARGIN;
       int bottom = bounds[3] + DELEGATED_MARGIN;
       dashedFrame(left, top, right, bottom, theme.amber());
+      String template =
+          area.seat().isPresent()
+              ? plan.view()
+                  .labels()
+                  .delegatedWorkstation()
+                  .replace("<seq>", String.valueOf(area.seat().getAsInt()))
+              : plan.view().labels().delegated();
       String text = template.replace("<zone>", area.zone()).replace("<name>", area.signaller());
       int width = p.width(text, size);
       p.fill(left, top - size - 3, width + 4, size + 2, theme.background());

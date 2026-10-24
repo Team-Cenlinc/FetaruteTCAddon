@@ -29,7 +29,7 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
   private static final String COLUMNS =
       "id, world_id, x, y, z, facing, tile_rows, tile_cols, layout_id, page_layouts,"
           + " operator_code, station_code, platforms, line_codes, rotation_operators, zone_code,"
-          + " appearance, mode, created_at, updated_at";
+          + " workstation, appearance, mode, created_at, updated_at";
 
   public JdbcPidsScreenRepository(
       DataSource dataSource,
@@ -79,14 +79,14 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
             + " SET world_id = ?, x = ?, y = ?, z = ?, facing = ?, tile_rows = ?, tile_cols = ?,"
             + " layout_id = ?, page_layouts = ?, operator_code = ?, station_code = ?,"
             + " platforms = ?, line_codes = ?, rotation_operators = ?, zone_code = ?,"
-            + " appearance = ?, mode = ?, updated_at = ?"
+            + " workstation = ?, appearance = ?, mode = ?, updated_at = ?"
             + " WHERE id = ?";
     String insert =
         "INSERT INTO "
             + table("pids_screens")
             + " ("
             + COLUMNS
-            + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     try {
       return inTransaction(
           connection -> {
@@ -128,7 +128,7 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
     }
   }
 
-  /** 绑定 {@code world_id} 到 {@code mode} 共 17 列，返回下一个参数下标。 */
+  /** 绑定 {@code world_id} 到 {@code mode} 共 18 列，返回下一个参数下标。 */
   private int bindFields(PreparedStatement statement, int start, PidsScreen screen)
       throws SQLException {
     int i = start;
@@ -150,6 +150,7 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
     statement.setString(i++, gson.toJson(List.copyOf(screen.lines())));
     statement.setString(i++, screen.rotation().isEmpty() ? null : gson.toJson(screen.rotation()));
     statement.setString(i++, screen.zone().orElse(null));
+    statement.setInt(i++, screen.workstation() ? 1 : 0);
     statement.setString(i++, screen.appearance().name());
     statement.setString(i++, screen.mode().name());
     return i;
@@ -181,7 +182,8 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
         PidsScreen.Appearance.valueOf(rs.getString("appearance")),
         PidsScreen.Mode.valueOf(rs.getString("mode")),
         readInstant(rs, "created_at"),
-        readInstant(rs, "updated_at"));
+        readInstant(rs, "updated_at"),
+        rs.getInt("workstation") != 0);
   }
 
   /**

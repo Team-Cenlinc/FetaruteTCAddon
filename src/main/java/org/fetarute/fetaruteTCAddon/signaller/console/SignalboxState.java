@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -119,15 +120,22 @@ public record SignalboxState(
   /**
    * 嵌在这片控制区里、正由别的信号员值守的小区：这一片让给了小区（车站控制），站场图上围出来，这里的车不进本控制台的列车表。
    *
-   * @param zone 小区名
+   * @param zone 小区名；中心工位分出去的写所辖车站
    * @param signaller 小区的信号员
    * @param nodes 小区里的节点（站场图据此围出范围）
+   * @param seat 中心工位的序号；管理员划好的小区为空
    */
-  public record Delegated(String zone, String signaller, Set<NodeId> nodes) {
+  public record Delegated(String zone, String signaller, Set<NodeId> nodes, OptionalInt seat) {
     public Delegated {
       Objects.requireNonNull(zone, "zone");
       Objects.requireNonNull(signaller, "signaller");
       nodes = Set.copyOf(nodes);
+      seat = seat == null ? OptionalInt.empty() : seat;
+    }
+
+    /** 管理员划好的小区。 */
+    public Delegated(String zone, String signaller, Set<NodeId> nodes) {
+      this(zone, signaller, nodes, OptionalInt.empty());
     }
   }
 

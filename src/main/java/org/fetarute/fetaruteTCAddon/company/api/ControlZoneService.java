@@ -69,7 +69,11 @@ public final class ControlZoneService {
     }
     String trimmedCode = code == null ? "" : code.trim().toUpperCase(Locale.ROOT);
     String trimmedName = name == null ? "" : name.trim();
-    if (trimmedCode.isEmpty() || trimmedCode.contains(":") || trimmedName.isEmpty()) {
+    // “~”留给中心工位的临时小区（“大区代码~序号”）
+    if (trimmedCode.isEmpty()
+        || trimmedCode.contains(":")
+        || trimmedCode.indexOf('~') >= 0
+        || trimmedName.isEmpty()) {
       return Result.of(Status.INVALID);
     }
     if (find(operator, trimmedCode).isPresent()) {

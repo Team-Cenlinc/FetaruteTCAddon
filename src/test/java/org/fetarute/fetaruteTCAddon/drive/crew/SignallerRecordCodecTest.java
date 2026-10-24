@@ -58,12 +58,44 @@ class SignallerRecordCodecTest {
             "ABC",
             java.time.Instant.parse("2026-10-24T08:00:00Z"),
             java.time.Instant.parse("2026-10-24T09:00:00Z"),
-            SignallerShift.Counts.builder().tripsCancelled(2).skipsOrdered(3).build(),
+            SignallerShift.Counts.builder()
+                .tripsCancelled(2)
+                .skipsOrdered(3)
+                .simRight(4)
+                .simWrong(5)
+                .simMissed(6)
+                .build(),
             SignallerShift.EndReason.OFF_DUTY);
     JsonObject root = JsonParser.parseString(SignallerRecordCodec.encode(shift)).getAsJsonObject();
 
     assertEquals(2, root.get("tripsCancelled").getAsInt());
     assertEquals(3, root.get("skipsOrdered").getAsInt());
+    assertEquals(4, root.get("simRight").getAsInt());
+    assertEquals(5, root.get("simWrong").getAsInt());
+    assertEquals(6, root.get("simMissed").getAsInt());
+    assertEquals(null, root.get("parentZone"), "普通控制区不写所属大区");
+  }
+
+  @Test
+  @DisplayName("中心工位上的班次：控制区记临时代码，另记所属大区")
+  void workstationShiftNamesItsParentZone() {
+    SignallerShift shift =
+        new SignallerShift(
+            UUID.randomUUID(),
+            "Sig",
+            "SURC",
+            "BIG~2",
+            java.time.Instant.parse("2026-10-24T08:00:00Z"),
+            java.time.Instant.parse("2026-10-24T09:00:00Z"),
+            SignallerShift.Counts.builder().build(),
+            SignallerShift.EndReason.OFF_DUTY,
+            false,
+            false,
+            "BIG");
+    JsonObject root = JsonParser.parseString(SignallerRecordCodec.encode(shift)).getAsJsonObject();
+
+    assertEquals("BIG~2", root.get("zone").getAsString());
+    assertEquals("BIG", root.get("parentZone").getAsString());
   }
 
   @Test

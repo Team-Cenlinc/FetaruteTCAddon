@@ -107,4 +107,27 @@ class SignallerScoreTest {
     assertEquals(0, SignallerScore.rewardedTrains(shift(2, 5, 0, 0)));
     assertEquals(0, SignallerScore.rewardedTrains(shift(9, 0, 9, 0)));
   }
+
+  @Test
+  @DisplayName("模拟事件：答错、超时各扣 2 分（系统随机出题，比真呼叫轻），答对每次加半列奖励")
+  void simulatedEventsCostLessAndEarnHalfATrain() {
+    SignallerShift shift =
+        new SignallerShift(
+            UUID.fromString("00000000-0000-0000-0000-00000000abcd"),
+            "Sinapole",
+            "SURC",
+            "WSD",
+            START,
+            START.plusSeconds(3600),
+            SignallerShift.Counts.builder()
+                .trainsHandled(4)
+                .simRight(3)
+                .simWrong(2)
+                .simMissed(1)
+                .build(),
+            SignallerShift.EndReason.OFF_DUTY);
+
+    assertEquals(100 - 2 * 2 - 2, SignallerScore.evaluate(shift).points());
+    assertEquals(4 + 0.5 * 3, SignallerScore.rewardUnits(shift));
+  }
 }

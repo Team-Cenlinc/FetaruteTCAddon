@@ -286,18 +286,15 @@ public final class PidsService {
     }
     composer.setControlZones(
         (operator, code) ->
-            controlZones
-                .find(operator, code)
+            signalboxConsole
+                .transientZone(operator, code)
                 .map(
                     found ->
                         new PidsYardZones.Zone(
-                            found.zone().name(),
-                            found.zone().secondaryName(),
-                            new YardScope(
-                                found.operatorCode(),
-                                found.members().stream()
-                                    .map(m -> new YardArea.Member(m.kind(), m.code()))
-                                    .toList()))));
+                            found.name(),
+                            Optional.of(found.subtitle()).filter(text -> !text.isBlank()),
+                            new YardScope(operator, found.members())))
+                .or(() -> directoryZone(operator, code)));
     this.items = new PidsItems(plugin, locale);
     this.frames = new PidsFrames(plugin);
     this.access = new PidsAccess(storage, () -> api.operators().listAllOperators(), logger::warn);
@@ -914,12 +911,34 @@ public final class PidsService {
     Location console = new Location(world, center.x() + 0.5, center.y() + 0.5, center.z() + 0.5);
     try {
       signalboxConsole.press(
-          player, console, screen.operatorCode().get(), screen.zone().get(), target);
+          player,
+          console,
+          screen.id(),
+          screen.workstation(),
+          screen.operatorCode().get(),
+          screen.zone().get(),
+          target);
     } catch (RuntimeException ex) {
       logger.warn("信号员控制台处理点击失败: " + ex);
       return false;
     }
     return true;
+  }
+
+  /** 控制区目录里的一片（站场图屏、控制台绑定的控制区）。 */
+  private Optional<PidsYardZones.Zone> directoryZone(String operator, String code) {
+    return controlZones
+        .find(operator, code)
+        .map(
+            found ->
+                new PidsYardZones.Zone(
+                    found.zone().name(),
+                    found.zone().secondaryName(),
+                    new YardScope(
+                        found.operatorCode(),
+                        found.members().stream()
+                            .map(m -> new YardArea.Member(m.kind(), m.code()))
+                            .toList())));
   }
 
   /** 屏幕所属运营商名下的控制区，按代码排序；屏幕没有所属运营商时为空。 */

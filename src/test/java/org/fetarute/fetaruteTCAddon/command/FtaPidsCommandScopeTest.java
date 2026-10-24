@@ -46,6 +46,7 @@ class FtaPidsCommandScopeTest {
             "fta signal console set screen layout value",
             "fta signal console set screen appearance value",
             "fta signal console set screen mode value",
+            "fta signal console set screen workstation value",
             "fta signal console remove screen",
             "fta signal console remove screen confirm")) {
       assertTrue(paths.contains(expected), () -> expected + " 不在 " + paths);
@@ -67,10 +68,11 @@ class FtaPidsCommandScopeTest {
           paths.stream().anyMatch(path -> path.startsWith("fta pids " + sub)),
           () -> "站台屏应有 " + sub + ": " + paths);
     }
+    assertTrue(paths.stream().noneMatch(path -> path.contains(" workstation")), () -> "" + paths);
     assertEquals(
-        paths(FtaPidsCommand.Scope.CONSOLE).size() + 6,
+        paths(FtaPidsCommand.Scope.CONSOLE).size() + 6 - 1,
         paths.size(),
-        "站台屏比控制台多 stick、station、platform、line、rotate、page 六条");
+        "站台屏比控制台多 stick、station、platform、line、rotate、page 六条，少中心工位 workstation 一条");
   }
 
   private static Set<String> paths(FtaPidsCommand.Scope scope) {

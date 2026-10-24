@@ -84,6 +84,7 @@ public final class SignallerApiImpl implements SignallerApi {
         status.onDutySince(),
         status.waitingTrains(),
         status.permits(),
-        status.heldTrains());
+        status.heldTrains(),
+        status.parentZone());
   }
 }

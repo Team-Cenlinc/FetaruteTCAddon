@@ -601,7 +601,8 @@ public final class PidsVocabulary {
         replies,
         notices,
         primary("signalbox.notice.route-blocked-by"),
-        primary("signalbox.delegated"));
+        primary("signalbox.delegated"),
+        primary("signalbox.delegated-workstation"));
   }
 
   /** 信号员模块未就绪（或控制区查不到）时控制台写的说明。 */

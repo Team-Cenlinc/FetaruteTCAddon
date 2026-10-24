@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -195,5 +196,19 @@ class PidsScreenRepositoryTest {
               .orElseThrow();
       assertTrue(table.contains("UNIQUE (world_id, x, y, z, facing)"), table);
     }
+  }
+
+  /** 控制台的工位标记存得下来；换了别的设置也不丢。 */
+  @Test
+  void theWorkstationMarkRoundTrips() {
+    PidsScreen pending = screens.save(screen(5));
+    assertFalse(screens.findById(pending.id()).orElseThrow().workstation());
+
+    screens.save(pending.withWorkstation(true, now()));
+    PidsScreen loaded = screens.findById(pending.id()).orElseThrow();
+    assertTrue(loaded.workstation());
+
+    screens.save(loaded.withMode(PidsScreen.Mode.TEST_CARD, now()));
+    assertTrue(screens.findById(pending.id()).orElseThrow().workstation(), "换别的设置不丢");
   }
 }

@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 49
+config-version: 50
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -384,6 +384,22 @@ signaller:
   approach-lock-seconds: 30
   # 晚点至少该秒数，信号员才能令列车越过下一个停车站；限 0–900 秒
   skip-min-delay-seconds: 180
+  # 值守中的模拟事件：隔一阵以一列与本楼有关、没有真人乘务员的车的名义来一次呼叫，原因与答案都按那列车此刻的实况。
+  # 事件不改变列车运行，只考判断与沟通：答错或超时扣 2 分，答对加半列奖励。考试与练习中不出题
+  events:
+    enabled: true
+    # 平均隔该秒数出一题（随机）
+    mean-interval-seconds: 300
+    # 两题至少隔该秒数
+    min-gap-seconds: 90
+  # 中心工位（控制台 set workstation on）：大区有人值守时，后来的人在工位上岗，系统从大区剩下的部分切一片相连的车站给后来的人，
+  # 按工作量大致均分。关闭时工位与普通控制台一样
+  workstations:
+    enabled: true
+    # 估工作量时统计接下来该分钟数内在各站停站或通过的表定车次；窗口内整个大区没有表定车次时按站台股道数估
+    load-window-minutes: 60
+    # 每个道岔折算的车次
+    switch-weight: 0.5
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

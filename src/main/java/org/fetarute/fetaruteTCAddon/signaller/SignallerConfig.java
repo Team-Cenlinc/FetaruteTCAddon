@@ -19,6 +19,8 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param approachLockSeconds 接近锁闭：车已在接近或停在入口时取消它的进路，这个入口要过多少秒才能再排进路；0 为不锁，限 0–{@value
  *     #MAX_APPROACH_LOCK_SECONDS} 秒
  * @param skipMinDelaySeconds 晚点至少多少秒才能令越站；限 0–{@value #MAX_SKIP_MIN_DELAY_SECONDS} 秒
+ * @param events 值守中的模拟事件（{@code events} 段）
+ * @param workstations 中心工位（{@code workstations} 段）
  */
 public record SignallerConfig(
     boolean enabled,
@@ -29,7 +31,91 @@ public record SignallerConfig(
     int callTimeoutSeconds,
     int noticeSeconds,
     int approachLockSeconds,
-    int skipMinDelaySeconds) {
+    int skipMinDelaySeconds,
+    Events events,
+    Workstations workstations) {
+
+  /**
+   * 值守中的模拟事件（{@link SignallerEvents}）。
+   *
+   * @param enabled 是否出题
+   * @param meanIntervalSeconds 平均隔多少秒出一题（按指数分布随机）
+   * @param minGapSeconds 两题至少隔多少秒
+   */
+  public record Events(boolean enabled, int meanIntervalSeconds, int minGapSeconds) {
+    public static final Events DEFAULT = new Events(true, 300, 90);
+
+    public Events {
+      meanIntervalSeconds = Math.max(1, meanIntervalSeconds);
+      minGapSeconds = Math.max(0, minGapSeconds);
+    }
+
+    static Events from(ConfigurationSection section) {
+      if (section == null) {
+        return DEFAULT;
+      }
+      return new Events(
+          section.getBoolean("enabled", DEFAULT.enabled()),
+          section.getInt("mean-interval-seconds", DEFAULT.meanIntervalSeconds()),
+          section.getInt("min-gap-seconds", DEFAULT.minGapSeconds()));
+    }
+  }
+
+  /**
+   * 中心工位：大区有人值守时，后来的人在工位上岗，从大区剩下的部分切一片给后来的人（见 {@link ZoneSplitter}、{@link ZoneWorkload}）。
+   *
+   * @param enabled 是否切分；关闭时工位与普通控制台一样
+   * @param loadWindowMinutes 估工作量时统计接下来多少分钟的表定车次
+   * @param switchWeight 每个道岔折算的车次
+   */
+  public record Workstations(boolean enabled, int loadWindowMinutes, double switchWeight) {
+    public static final Workstations DEFAULT = new Workstations(true, 60, 0.5);
+
+    public Workstations {
+      loadWindowMinutes = Math.max(1, Math.min(24 * 60, loadWindowMinutes));
+      switchWeight = Double.isFinite(switchWeight) ? Math.max(0.0, switchWeight) : 0.5;
+    }
+
+    /** 估工作量的统计窗口。 */
+    public Duration loadWindow() {
+      return Duration.ofMinutes(loadWindowMinutes);
+    }
+
+    static Workstations from(ConfigurationSection section) {
+      if (section == null) {
+        return DEFAULT;
+      }
+      return new Workstations(
+          section.getBoolean("enabled", DEFAULT.enabled()),
+          section.getInt("load-window-minutes", DEFAULT.loadWindowMinutes()),
+          section.getDouble("switch-weight", DEFAULT.switchWeight()));
+    }
+  }
+
+  /** 模拟事件与中心工位取默认值。 */
+  public SignallerConfig(
+      boolean enabled,
+      int autoRouteSeconds,
+      int consoleRangeBlocks,
+      int graceSeconds,
+      int maxHoldSeconds,
+      int callTimeoutSeconds,
+      int noticeSeconds,
+      int approachLockSeconds,
+      int skipMinDelaySeconds) {
+    this(
+        enabled,
+        autoRouteSeconds,
+        consoleRangeBlocks,
+        graceSeconds,
+        maxHoldSeconds,
+        callTimeoutSeconds,
+        noticeSeconds,
+        approachLockSeconds,
+        skipMinDelaySeconds,
+        Events.DEFAULT,
+        Workstations.DEFAULT);
+  }
 
   /** 越站晚点门槛的默认值（秒）。 */
   public static final int DEFAULT_SKIP_MIN_DELAY_SECONDS = 180;
@@ -81,6 +167,8 @@ public record SignallerConfig(
     noticeSeconds = Math.max(1, noticeSeconds);
     approachLockSeconds = Math.max(0, Math.min(MAX_APPROACH_LOCK_SECONDS, approachLockSeconds));
     skipMinDelaySeconds = Math.max(0, Math.min(MAX_SKIP_MIN_DELAY_SECONDS, skipMinDelaySeconds));
+    events = events == null ? Events.DEFAULT : events;
+    workstations = workstations == null ? Workstations.DEFAULT : workstations;
   }
 
   public static SignallerConfig defaults() {
@@ -121,6 +209,8 @@ public record SignallerConfig(
         section.getInt("call-timeout-seconds", defaults.callTimeoutSeconds()),
         section.getInt("notice-seconds", defaults.noticeSeconds()),
         section.getInt("approach-lock-seconds", defaults.approachLockSeconds()),
-        section.getInt("skip-min-delay-seconds", defaults.skipMinDelaySeconds()));
+        section.getInt("skip-min-delay-seconds", defaults.skipMinDelaySeconds()),
+        Events.from(section.getConfigurationSection("events")),
+        Workstations.from(section.getConfigurationSection("workstations")));
   }
 }

@@ -2,7 +2,6 @@ package org.fetarute.fetaruteTCAddon.command;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -112,7 +111,7 @@ public final class FtaGuardCommand {
                 SuggestionProvider.blockingStrings(
                     (ctx, input) ->
                         CommandUx.suggestions(
-                            Arrays.stream(CallReason.values()).map(CallReason::key).toList(),
+                            CallReason.crewReasons().stream().map(CallReason::key).toList(),
                             input.lastRemainingToken())))
             .handler(
                 ctx -> handleCall(ctx.sender(), ctx.optional("reason").map(String.class::cast))));

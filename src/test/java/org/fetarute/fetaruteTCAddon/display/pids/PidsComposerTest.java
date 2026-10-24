@@ -1062,6 +1062,42 @@ class PidsComposerTest {
     assertEquals(0, snapshotCalls, "不取到发快照");
   }
 
+  /** 中心工位上有人值守：控制台按信号员模块给的区取数据（在岗那位的临时小区）；不是工位的屏照旧按绑定的区。 */
+  @Test
+  void aStaffedWorkstationDrawsItsHoldersZone() {
+    PidsScreen desk =
+        registerPaged(PidsScreen.Mode.LIVE, "signalbox-3x5")
+            .withZone(Optional.of("north"), NOW)
+            .withWorkstation(true, NOW);
+    registry.put(desk);
+    List<String> asked = new ArrayList<>();
+    composer.setSignalboxConsole(
+        new SignalboxConsole() {
+          @Override
+          public Optional<SignalboxState> state(String operator, String zone) {
+            asked.add(zone);
+            return Optional.of(console(Optional.empty()));
+          }
+
+          @Override
+          public void press(
+              Player player,
+              Location console,
+              String operator,
+              String zone,
+              ConsoleTarget target) {}
+
+          @Override
+          public String zoneFor(java.util.UUID screen, String operator, String zone) {
+            return screen.equals(desk.id()) ? "NORTH~2" : zone;
+          }
+        });
+
+    composer.content(Optional.of(desk.id()), 640, 384).orElseThrow();
+
+    assertEquals(List.of("NORTH~2"), asked);
+  }
+
   @Test
   void theStationATrainWouldSkipIsNamedToo() {
     PidsScreen screen =

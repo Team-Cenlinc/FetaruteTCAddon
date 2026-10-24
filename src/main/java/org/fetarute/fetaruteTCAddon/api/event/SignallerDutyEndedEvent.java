@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.api.event;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import org.bukkit.event.HandlerList;
 
@@ -21,6 +22,7 @@ public final class SignallerDutyEndedEvent extends SignallerEvent {
   private final int holds;
   private final int callsAnswered;
   private final int callsMissed;
+  private final String parentZoneCode;
 
   /**
    * @param start 上岗时刻
@@ -49,6 +51,43 @@ public final class SignallerDutyEndedEvent extends SignallerEvent {
       int holds,
       int callsAnswered,
       int callsMissed) {
+    this(
+        playerId,
+        operatorCode,
+        zoneCode,
+        zoneName,
+        start,
+        end,
+        reason,
+        trainsHandled,
+        routesSet,
+        autoRouted,
+        autoPassed,
+        holds,
+        callsAnswered,
+        callsMissed,
+        null);
+  }
+
+  /**
+   * @param parentZoneCode 在中心工位上值守时所属大区的代码；普通控制区为 {@code null} 或空串
+   */
+  public SignallerDutyEndedEvent(
+      UUID playerId,
+      String operatorCode,
+      String zoneCode,
+      String zoneName,
+      Instant start,
+      Instant end,
+      String reason,
+      int trainsHandled,
+      int routesSet,
+      int autoRouted,
+      int autoPassed,
+      int holds,
+      int callsAnswered,
+      int callsMissed,
+      String parentZoneCode) {
     super(playerId, operatorCode, zoneCode, zoneName);
     this.start = Objects.requireNonNull(start, "start");
     this.end = Objects.requireNonNull(end, "end");
@@ -60,6 +99,7 @@ public final class SignallerDutyEndedEvent extends SignallerEvent {
     this.holds = holds;
     this.callsAnswered = callsAnswered;
     this.callsMissed = callsMissed;
+    this.parentZoneCode = parentZoneCode == null ? "" : parentZoneCode;
   }
 
   /** 上岗时刻。 */
@@ -119,6 +159,14 @@ public final class SignallerDutyEndedEvent extends SignallerEvent {
   /** 超时没回复的呼叫。 */
   public int getCallsMissed() {
     return callsMissed;
+  }
+
+  /**
+   * 在中心工位上值守时所属大区的代码（{@link #getZoneCode()} 为临时代码，见 {@link
+   * SignallerDutyStartEvent#getParentZoneCode()}）；普通控制区为空。
+   */
+  public Optional<String> getParentZoneCode() {
+    return parentZoneCode.isEmpty() ? Optional.empty() : Optional.of(parentZoneCode);
   }
 
   @Override

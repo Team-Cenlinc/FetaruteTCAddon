@@ -202,6 +202,15 @@ public final class FtaPidsCommand {
         "mode",
         SuggestionProvider.suggestingStrings("live", "test"),
         this::changeMode);
+    if (scope == Scope.CONSOLE) {
+      // 中心工位：大区有人值守时，后来的人在这里上岗、分到一片临时小区
+      registerSet(
+          manager,
+          screens,
+          "workstation",
+          SuggestionProvider.suggestingStrings("on", "off"),
+          this::changeWorkstation);
+    }
     manager.command(
         root(manager)
             .literal("remove")
@@ -647,6 +656,17 @@ public final class FtaPidsCommand {
       CommandSender sender, PidsService service, PidsScreen screen, String value) {
     return parseEnum(sender, PidsScreen.Appearance.class, value)
         .map(appearance -> screen.withAppearance(appearance, service.now()));
+  }
+
+  private Optional<PidsScreen> changeWorkstation(
+      CommandSender sender, PidsService service, PidsScreen screen, String value) {
+    String normalized = value.trim().toLowerCase(Locale.ROOT);
+    if (!"on".equals(normalized) && !"off".equals(normalized)) {
+      sender.sendMessage(
+          locale().component("command.pids.set.invalid-value", Map.of("value", value)));
+      return Optional.empty();
+    }
+    return Optional.of(screen.withWorkstation("on".equals(normalized), service.now()));
   }
 
   private Optional<PidsScreen> changeMode(

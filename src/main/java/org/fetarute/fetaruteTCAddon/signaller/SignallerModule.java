@@ -126,8 +126,13 @@ public final class SignallerModule implements Listener {
 
     @Override
     public void started(
-        UUID player, String operator, String zone, String zoneName, boolean manual) {
-      call(new SignallerDutyStartEvent(player, operator, zone, zoneName, manual));
+        UUID player,
+        String operator,
+        String zone,
+        String zoneName,
+        String parentZone,
+        boolean manual) {
+      call(new SignallerDutyStartEvent(player, operator, zone, zoneName, parentZone, manual));
     }
 
     @Override
@@ -147,7 +152,8 @@ public final class SignallerModule implements Listener {
               shift.autoPassed(),
               shift.holds(),
               shift.callsAnswered(),
-              shift.callsMissed()));
+              shift.callsMissed(),
+              shift.parentZone()));
     }
 
     private void call(Event event) {

@@ -400,8 +400,20 @@ final class SignalboxActions {
     if (call == null) {
       return;
     }
-    boolean fits = CallReplies.fits(call.reason(), reply);
-    if (box.duty != null) {
+    box.restartSimHead(call, now);
+    boolean fits = CallReplies.fits(call.reason(), reply, routable(call.trainName()));
+    if (fits && reply == SignalboxState.Reply.ROUTE_SETTING && box.manual()) {
+      box.promises.put(
+          SignallerService.key(call.trainName()),
+          new SignalBox.Promise(call, now.plus(SignallerService.PROMISE)));
+    }
+    if (box.duty != null && call.sim()) {
+      if (fits) {
+        box.duty.simRight++;
+      } else {
+        box.duty.simWrong++;
+      }
+    } else if (box.duty != null) {
       box.duty.callsAnswered++;
       if (!fits) {
         box.duty.callsWrong++;
@@ -409,9 +421,15 @@ final class SignalboxActions {
     }
     service.examine(
         box,
-        call.drill()
-            ? (fits ? SignallerExaminer.Event.DRILL_ANSWERED : SignallerExaminer.Event.DRILL_WRONG)
-            : (fits ? SignallerExaminer.Event.CALL_ANSWERED : SignallerExaminer.Event.CALL_WRONG));
+        call.sim()
+            ? (fits ? SignallerExaminer.Event.SIM_RIGHT : SignallerExaminer.Event.SIM_WRONG)
+            : call.drill()
+                ? (fits
+                    ? SignallerExaminer.Event.DRILL_ANSWERED
+                    : SignallerExaminer.Event.DRILL_WRONG)
+                : (fits
+                    ? SignallerExaminer.Event.CALL_ANSWERED
+                    : SignallerExaminer.Event.CALL_WRONG));
     String train = service.world().info(call.trainName()).label();
     if (!call.drill()) {
       service
@@ -439,6 +457,22 @@ final class SignalboxActions {
         box,
         fits ? SignalboxState.NoticeKind.REPLY_SENT : SignalboxState.NoticeKind.REPLY_WRONG,
         Optional.of(call.trainName()));
+  }
+
+  /** 此刻能给这列车排进路：车没被扣、没在停站，前方区内也没有别的车占着（信号前等候的回复按它判对错）。 */
+  private boolean routable(String trainName) {
+    String key = SignallerService.key(trainName);
+    if (box.holds.containsKey(key)) {
+      return false;
+    }
+    boolean stopped =
+        shown.rows().stream()
+            .anyMatch(
+                row ->
+                    row.trainName().equals(trainName)
+                        && (row.status() == SignalboxState.RowStatus.DWELLING
+                            || row.status() == SignalboxState.RowStatus.HELD));
+    return !stopped && blocker(trainName, key).isEmpty();
   }
 
   /** 取消车次：第一下只记下等着确认，同一个人对同一列车再按一下才取消。两下都按此刻的现场复核：联挂中的一体车、车上有人而车又不在站台上停着时，都不能取消。 */

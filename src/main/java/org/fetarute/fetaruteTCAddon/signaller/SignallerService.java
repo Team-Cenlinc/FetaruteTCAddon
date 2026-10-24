@@ -10,6 +10,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -108,6 +109,9 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
   /** 按过一次“取消车次”后，多久之内再按一下才算确认。 */
   static final Duration CANCEL_CONFIRM = Duration.ofSeconds(5);
 
+  /** 回了“进路正在排列”之后，多久之内要亲手把进路排出去：没排出去补记一次答错（对真人食言，会误导驾驶员）。 */
+  static final Duration PROMISE = Duration.ofSeconds(20);
+
   /** 车上有人时，插播停运后等多久再删车（给乘客自己下车的时间）。 */
   static final Duration CANCEL_COUNTDOWN = Duration.ofSeconds(5);
 
@@ -123,6 +127,16 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
   private final LongSupplier ticks;
   private final SignallerMessenger messenger;
   private final Consumer<String> debug;
+
+  /** 值守中的模拟事件。 */
+  private final SignallerEvents events = new SignallerEvents(this);
+
+  /** 中心工位分出去的临时小区。 */
+  private final TransientZones transients = new TransientZones();
+
+  /** 模拟事件的随机数。 */
+  private java.util.random.RandomGenerator random = java.util.random.RandomGenerator.getDefault();
+
   private final RailGraphPathFinder finder = new RailGraphPathFinder();
 
   private final Map<String, SignalBox> boxes = new LinkedHashMap<>();
@@ -228,7 +242,12 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
         new DutyEvents() {
           @Override
           public void started(
-              UUID player, String operator, String zone, String zoneName, boolean manual) {}
+              UUID player,
+              String operator,
+              String zone,
+              String zoneName,
+              String parentZone,
+              boolean manual) {}
 
           @Override
           public void ended(SignallerShift shift, String zoneName) {}
@@ -237,9 +256,16 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     /**
      * 上岗。
      *
+     * @param parentZone 在中心工位上岗时所属大区的代码（{@code zone} 为临时代码）；普通控制区为空串
      * @param manual 控制区已转为人工（调度图未就绪时暂为自动）
      */
-    void started(UUID player, String operator, String zone, String zoneName, boolean manual);
+    void started(
+        UUID player,
+        String operator,
+        String zone,
+        String zoneName,
+        String parentZone,
+        boolean manual);
 
     /** 下岗（已结算）。 */
     void ended(SignallerShift shift, String zoneName);
@@ -398,6 +424,12 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       if (box.cancelArm != null && oldKey.equals(box.cancelArm.train())) {
         box.cancelArm = new SignalBox.CancelArm(box.cancelArm.player(), newKey, box.cancelArm.at());
       }
+      SignalBox.Promise promise = box.promises.remove(oldKey);
+      if (promise != null) {
+        box.promises.put(
+            newKey, new SignalBox.Promise(promise.call().renamed(display), promise.due()));
+        moved = true;
+      }
       if (box.platformChoices.remove(oldKey)) {
         box.platformChoices.add(newKey);
       }
@@ -439,12 +471,15 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       if (box.cancelArm != null && key.equals(box.cancelArm.train())) {
         box.cancelArm = null;
       }
+      box.promises.remove(key);
       box.platformChoices.remove(key);
       box.approaching.remove(key);
       box.pairs.removeIf(pair -> pair.first.equals(key) || pair.second.equals(key));
       boolean drill =
           box.calls.stream().anyMatch(call -> call.drill() && key.equals(key(call.trainName())));
+      SignalBox.Call head = box.calls.peekFirst();
       if (box.calls.removeIf(call -> key.equals(key(call.trainName())))) {
+        box.restartSimHead(head, clock.get());
         if (drill) {
           examine(box, SignallerExaminer.Event.DRILL_CANCELLED);
         }
@@ -511,7 +546,9 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     ALREADY_ON_DUTY,
     ZONE_TAKEN,
     BUSY_DRIVER,
-    BUSY_GUARD
+    BUSY_GUARD,
+    /** 在工位上请求分一片，复核时大区已切不出来。 */
+    NO_SPLIT
   }
 
   /**
@@ -539,11 +576,16 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       return tell(player, DutyStart.NO_REQUEST, Map.of());
     }
     SignalBox box = boxes.get(request.box());
-    if (box == null || world.zone(box.operator, box.zone).isEmpty()) {
+    if (box == null || zoneOf(box.operator, box.zone).isEmpty()) {
       requests.remove(player);
       return tell(player, DutyStart.ZONE_NOT_FOUND, Map.of());
     }
-    if (box.duty != null) {
+    boolean split =
+        request.split()
+            && config.get().workstations().enabled()
+            && box.duty != null
+            && !box.duty.player.equals(player);
+    if (box.duty != null && !split) {
       return tell(
           player,
           DutyStart.ZONE_TAKEN,
@@ -561,8 +603,39 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     if (busy.filter(role -> role == CrewDuty.Role.GUARD).isPresent()) {
       return tell(player, DutyStart.BUSY_GUARD, Map.of());
     }
+    Optional<Split> assigned = Optional.empty();
+    if (split) {
+      // 两人先后点了同一块空工位：先确认的坐下，后确认的不再另切一片
+      Optional<SignalBox> seated =
+          request.screen() == null ? Optional.empty() : workstationHolder(request.screen());
+      if (seated.isPresent()) {
+        requests.remove(player);
+        return tell(
+            player,
+            DutyStart.ZONE_TAKEN,
+            Map.of("zone", zoneName(seated.get()), "signaller", seated.get().duty.playerName));
+      }
+      // 在工位上分一片：按此刻的情况重算（大区持有人、成员、别的工位都可能变了）
+      assigned = examining(box.duty.player) || examining(player) ? Optional.empty() : split(box);
+      Optional<SignallerWorld.Zone> parent = zoneOf(box.operator, box.zone);
+      if (assigned.isEmpty() || parent.isEmpty()) {
+        requests.remove(player);
+        return tell(player, DutyStart.NO_SPLIT, Map.of("zone", zoneName(box)));
+      }
+      // 切出来的恰好是管理员划好的小区：就在那个小区上岗，免得两片一模一样的区各有人把门
+      Optional<SignallerWorld.Zone> same = sameZone(parent.get(), assigned.get().members());
+      if (same.isPresent() && box(same.get()).duty == null) {
+        box = box(same.get());
+      } else {
+        TransientZones.Entry entry =
+            transients.add(
+                parent.get(), assigned.get().members(), seq -> workstationName(parent.get(), seq));
+        box = box(entry.zone());
+      }
+    }
     requests.remove(player);
     box.duty = new SignalBox.Duty(player, playerName, now, request.console());
+    box.duty.screen = request.screen();
     box.resetToAuto();
     ownershipChanged();
     ZoneMap map = map(box);
@@ -583,12 +656,23 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
             String.valueOf(config.get().graceSeconds())));
     publish();
     try {
-      dutyEvents.started(player, box.operator, box.zone, zoneName(box), map != null);
+      dutyEvents.started(
+          player, box.operator, box.zone, zoneName(box), parentZone(box), map != null);
     } catch (RuntimeException ex) {
       debug.accept("SIGNALLER_DUTY_EVENT_FAILED box=" + box.label() + " error=" + ex);
     }
+    if (assigned.isPresent()) {
+      messenger.send(
+          player,
+          "signaller.workstation.assigned",
+          Map.of(
+              "zone",
+              zoneName(box),
+              "stations",
+              stationNames(box.operator, assigned.get().members())));
+    }
     boolean stations =
-        world.zone(box.operator, box.zone).stream()
+        zoneOf(box.operator, box.zone).stream()
             .flatMap(zone -> zone.members().stream())
             .anyMatch(member -> member.kind() == ControlZoneMember.Kind.STATION);
     try {
@@ -685,10 +769,14 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
                 .conflictsBad(duty.conflictsBad)
                 .tripsCancelled(duty.tripsCancelled)
                 .skipsOrdered(duty.skipsOrdered)
+                .simRight(duty.simRight)
+                .simWrong(duty.simWrong)
+                .simMissed(duty.simMissed)
                 .build(),
             reason,
             examined,
-            practiced);
+            practiced,
+            parentZone(box));
     // 已确认、还在倒计时的取消：下岗后扣车就没了，车会带着已被告知停运的乘客开走，所以就地办完
     settleCancels(box, now, true);
     List<SignalBox.Call> unanswered = new ArrayList<>(box.calls);
@@ -741,6 +829,31 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     } catch (RuntimeException ex) {
       debug.accept("SIGNALLER_EXAMINER_FAILED box=" + box.label() + " error=" + ex);
     }
+    if (TransientZones.isTransient(box.zone)) {
+      // 临时小区的人下岗：这一片还给大区
+      Optional<SignallerWorld.Zone> zone = transients.find(box.operator, box.zone);
+      transients.remove(box.operator, box.zone);
+      boxes.remove(boxKey(box.operator, box.zone));
+      states.remove(boxKey(box.operator, box.zone));
+      ownershipChanged();
+      if (reason != SignallerShift.EndReason.REVOKED) {
+        zone.ifPresent(
+            found ->
+                messenger.send(
+                    duty.player,
+                    "signaller.workstation.returned",
+                    Map.of("stations", stationNames(box.operator, found.members()))));
+      }
+    } else {
+      // 大区的人先下岗：剩下的部分转自动，临时小区照常；告诉还在岗的工位
+      for (TransientZones.Entry entry : transients.under(box.operator, box.zone)) {
+        SignalBox sub = boxes.get(boxKey(entry.zone().operator(), entry.zone().code()));
+        if (sub != null && sub.duty != null) {
+          messenger.send(
+              sub.duty.player, "signaller.workstation.parent-left", Map.of("zone", zoneName));
+        }
+      }
+    }
     wake.forEach(this::reevaluate);
   }
 
@@ -783,6 +896,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
    * @param onDutySince 上岗时刻
    * @param waitingTrains 在入口等许可的车（列车名，按开始等的先后）
    * @param heldTrains 扣着的车（列车名）
+   * @param parentZone 中心工位分出去的临时小区所属的大区；普通控制区为空
    */
   public record BoxStatus(
       String operator,
@@ -796,11 +910,43 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       Optional<UUID> signallerId,
       Optional<Instant> onDutySince,
       List<String> waitingTrains,
-      List<String> heldTrains) {
+      List<String> heldTrains,
+      Optional<String> parentZone) {
 
     public BoxStatus {
       waitingTrains = List.copyOf(waitingTrains);
       heldTrains = List.copyOf(heldTrains);
+      parentZone = parentZone == null ? Optional.empty() : parentZone;
+    }
+
+    /** 普通控制区。 */
+    public BoxStatus(
+        String operator,
+        String zone,
+        String name,
+        SignalboxState.Mode mode,
+        Optional<String> signaller,
+        int waiting,
+        int permits,
+        int holds,
+        Optional<UUID> signallerId,
+        Optional<Instant> onDutySince,
+        List<String> waitingTrains,
+        List<String> heldTrains) {
+      this(
+          operator,
+          zone,
+          name,
+          mode,
+          signaller,
+          waiting,
+          permits,
+          holds,
+          signallerId,
+          onDutySince,
+          waitingTrains,
+          heldTrains,
+          Optional.empty());
     }
   }
 
@@ -830,7 +976,8 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
               Optional.ofNullable(box.duty).map(duty -> duty.player),
               Optional.ofNullable(box.duty).map(duty -> duty.start),
               waiting,
-              box.holds.values().stream().map(SignalBox.Hold::trainName).toList()));
+              box.holds.values().stream().map(SignalBox.Hold::trainName).toList(),
+              Optional.of(parentZone(box)).filter(code -> !code.isEmpty())));
     }
     return out;
   }
@@ -857,8 +1004,9 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     SignallerConfig settings = config.get();
     requests.values().removeIf(request -> now.isAfter(request.at().plus(REQUEST_TTL)));
     prompted.values().removeIf(at -> now.isAfter(at.plus(PROMPT_INTERVAL)));
+    checkTransients();
     for (SignalBox box : List.copyOf(boxes.values())) {
-      if (world.zone(box.operator, box.zone).isEmpty()) {
+      if (zoneOf(box.operator, box.zone).isEmpty()) {
         // 控制区没了（删控制区、删运营商或公司、改运营商代码）：值守的人下岗，楼撤掉
         zoneRemoved(box.operator, box.zone);
         continue;
@@ -876,6 +1024,8 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       changed |= tickWaiting(box, settings, now);
       changed |= tickHolds(box, settings, now);
       changed |= tickCalls(box, settings, now);
+      changed |= tickPromises(box, now);
+      changed |= tickSimulated(box, settings, now);
       changed |= tickSelection(box, now);
       changed |= tickIdle(box);
       box.approachLocks.values().removeIf(until -> now.isAfter(until.plus(LOCK_MEMORY)));
@@ -1364,19 +1514,111 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
         && !now.isBefore(
             box.calls.peekFirst().since().plusSeconds(settings.callTimeoutSeconds()))) {
       SignalBox.Call call = box.calls.pollFirst();
+      box.restartSimHead(call, now);
       if (box.duty != null) {
-        box.duty.callsMissed++;
+        if (call.sim()) {
+          box.duty.simMissed++;
+        } else {
+          box.duty.callsMissed++;
+        }
         examine(
             box,
-            call.drill()
-                ? SignallerExaminer.Event.DRILL_MISSED
-                : SignallerExaminer.Event.CALL_MISSED);
+            call.sim()
+                ? SignallerExaminer.Event.SIM_MISSED
+                : call.drill()
+                    ? SignallerExaminer.Event.DRILL_MISSED
+                    : SignallerExaminer.Event.CALL_MISSED);
       }
       if (!call.drill()) {
         messenger.send(call.caller(), "signaller.call.unanswered", Map.of("zone", zoneName(box)));
       }
       // 回复面板对着的就是这一个：退回按钮，回复不能落到排在后面的乘务员头上
       box.replying = false;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** 值守中的模拟事件：车已跟本楼无关（出区、不在列车表里）的模拟呼叫撤掉、不计漏接；到了时刻再出一题。 */
+  private boolean tickSimulated(SignalBox box, SignallerConfig settings, Instant now) {
+    boolean changed =
+        box.calls.removeIf(call -> call.sim() && !concerns(box, key(call.trainName())));
+    if (changed) {
+      box.replying = false;
+    }
+    try {
+      changed |= events.tick(box, settings.events(), now);
+    } catch (RuntimeException ex) {
+      debug.accept("SIGNALLER_EVENT_FAILED box=" + box.label() + " error=" + ex);
+    }
+    return changed;
+  }
+
+  /**
+   * 以一列车的名义来一次模拟呼叫（值守中的模拟事件）：提醒信号员，回复与超时都不发给任何乘务员，对错另记。
+   *
+   * @param values 来电提醒另带的占位符
+   */
+  void simulateCall(
+      SignalBox box, String trainName, CallReason reason, Map<String, String> values, Instant now) {
+    SignalBox.Call call =
+        new SignalBox.Call(trainName, null, "", CallerRole.DRIVER, now, reason, true, true, values);
+    box.calls.addLast(call);
+    alertCall(box, call);
+    invalidate(box);
+    debug.accept("SIGNALLER_SIM_CALL box=" + box.label() + " train=" + trainName + " " + reason);
+  }
+
+  /** 给模拟事件：随机数（测试可换成固定的）。 */
+  java.util.random.RandomGenerator random() {
+    return random;
+  }
+
+  /** 给测试：换上固定的随机数。 */
+  void setRandom(java.util.random.RandomGenerator next) {
+    this.random = next == null ? java.util.random.RandomGenerator.getDefault() : next;
+  }
+
+  /** 回了“进路正在排列”的呼叫：期限内亲手排了进路（或设了自动通过）算兑现；到期还没排，补记一次答错并告诉信号员。区转了自动时不再追究。 */
+  private boolean tickPromises(SignalBox box, Instant now) {
+    boolean changed = false;
+    for (Iterator<Map.Entry<String, SignalBox.Promise>> it = box.promises.entrySet().iterator();
+        it.hasNext(); ) {
+      Map.Entry<String, SignalBox.Promise> entry = it.next();
+      SignalBox.Permit permit = box.permits.get(entry.getKey());
+      boolean kept =
+          permit != null
+              && (permit.source == SignalBox.Source.SIGNALLER
+                  || permit.source == SignalBox.Source.AUTO_PASS);
+      if (kept || !box.manual()) {
+        it.remove();
+        continue;
+      }
+      if (now.isBefore(entry.getValue().due())) {
+        continue;
+      }
+      it.remove();
+      SignalBox.Call call = entry.getValue().call();
+      if (box.duty != null) {
+        if (call.sim()) {
+          // 回复时已记了答对：食言改记答错，一道题只算一次
+          box.duty.simRight = Math.max(0, box.duty.simRight - 1);
+          box.duty.simWrong++;
+        } else {
+          box.duty.callsWrong++;
+        }
+        examine(
+            box,
+            call.sim()
+                ? SignallerExaminer.Event.SIM_WRONG
+                : call.drill()
+                    ? SignallerExaminer.Event.DRILL_WRONG
+                    : SignallerExaminer.Event.CALL_WRONG);
+        messenger.send(
+            box.duty.player,
+            "signaller.call.unfulfilled",
+            Map.of("train", world.info(call.trainName()).label()));
+      }
       changed = true;
     }
     return changed;
@@ -1573,7 +1815,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
             : given;
     String name = world.player(caller).map(SignallerWorld.PlayerSpot::name).orElse("");
     SignalBox.Call call = new SignalBox.Call(trainName, caller, name, role, now, effective, false);
-    box.calls.addLast(call);
+    enqueueRealCall(box, call);
     alertCall(box, call);
     examine(box, SignallerExaminer.Event.CALL_INCOMING);
     invalidate(box);
@@ -1581,17 +1823,27 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     return CallResult.Status.CALLED;
   }
 
+  /** 真呼叫排在所有模拟事件前面；排到了正在回复的模拟呼叫前面时退回按钮，免得旧画面上的回复落到真人头上。 */
+  private void enqueueRealCall(SignalBox box, SignalBox.Call call) {
+    List<SignalBox.Call> queued = new ArrayList<>(box.calls);
+    int at = 0;
+    while (at < queued.size() && !queued.get(at).sim()) {
+      at++;
+    }
+    queued.add(at, call);
+    if (at == 0 && !box.calls.isEmpty()) {
+      box.replying = false;
+    }
+    box.calls.clear();
+    box.calls.addAll(queued);
+  }
+
   private void alertCall(SignalBox box, SignalBox.Call call) {
-    messenger.alert(
-        box.duty.player,
-        "signaller.call.incoming-" + call.reason().key(),
-        Map.of(
-            "train",
-            world.info(call.trainName()).label(),
-            "zone",
-            zoneName(box),
-            "caller",
-            callerLabel(call)));
+    Map<String, String> values = new HashMap<>(call.values());
+    values.put("train", world.info(call.trainName()).label());
+    values.put("zone", zoneName(box));
+    values.put("caller", callerLabel(call));
+    messenger.alert(box.duty.player, "signaller.call.incoming-" + call.reason().key(), values);
   }
 
   /** 呼叫者的写法：岗位加名字（模拟呼叫只有岗位）。 */
@@ -1741,7 +1993,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
 
   @Override
   public Optional<SignalboxState> state(String operator, String zone) {
-    Optional<SignallerWorld.Zone> found = world.zone(operator, zone);
+    Optional<SignallerWorld.Zone> found = zoneOf(operator, zone);
     if (found.isEmpty()) {
       return Optional.empty();
     }
@@ -1759,6 +2011,18 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
   @Override
   public void press(
       Player player, Location console, String operator, String zone, ConsoleTarget target) {
+    press(player, console, null, false, operator, zone, target);
+  }
+
+  @Override
+  public void press(
+      Player player,
+      Location console,
+      UUID screen,
+      boolean workstation,
+      String operator,
+      String zone,
+      ConsoleTarget target) {
     if (player == null || target == null) {
       return;
     }
@@ -1773,6 +2037,8 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
         player.hasPermission(PERMISSION),
         player.hasPermission(CANCEL_PERMISSION),
         spot,
+        screen,
+        workstation,
         operator,
         zone,
         target);
@@ -1805,14 +2071,52 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       String operator,
       String zone,
       ConsoleTarget target) {
-    Optional<SignallerWorld.Zone> found = world.zone(operator, zone);
+    press(player, playerName, permitted, mayCancel, console, null, false, operator, zone, target);
+  }
+
+  /**
+   * 控制台点击，带屏幕身份（中心工位用）。
+   *
+   * @param screen 被点的屏幕；不知道时为空
+   * @param workstation 这块屏是中心工位：上面有人时点的是在岗那位的区，空着时大区有人值守就请求分一片
+   */
+  void press(
+      UUID player,
+      String playerName,
+      boolean permitted,
+      boolean mayCancel,
+      SignalBox.ConsoleSpot console,
+      UUID screen,
+      boolean workstation,
+      String operator,
+      String zone,
+      ConsoleTarget target) {
+    boolean desk = workstation && screen != null;
+    Optional<SignallerWorld.Zone> found =
+        zoneOf(operator, desk ? zoneFor(screen, operator, zone) : zone);
     if (found.isEmpty()) {
       return;
     }
     SignalBox box = box(found.get());
     if (box.duty == null || !box.duty.player.equals(player)) {
+      if (desk) {
+        Optional<SignalBox> holder = workstationHolder(screen);
+        if (holder.isPresent()) {
+          promptOnce(
+              player,
+              "signaller.workstation.taken",
+              Map.of("signaller", holder.get().duty.playerName));
+          return;
+        }
+        if (box.duty != null
+            && !TransientZones.isTransient(box.zone)
+            && config.get().workstations().enabled()) {
+          requestSplit(box, player, permitted, console, screen);
+          return;
+        }
+      }
       // 没在值守：点哪里都是请求上岗（空白处与左键也一样）
-      requestDuty(box, player, permitted, console);
+      requestDuty(box, player, permitted, console, screen);
       return;
     }
     if (console != null) {
@@ -1831,7 +2135,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
 
   /** 没在值守的玩家点了控制台：已有人值守就告知；否则请他确认上岗。提示每人每 {@link #PROMPT_INTERVAL} 最多一条（一次点击会触发几下，旁观者也会乱点）。 */
   private void requestDuty(
-      SignalBox box, UUID player, boolean permitted, SignalBox.ConsoleSpot console) {
+      SignalBox box, UUID player, boolean permitted, SignalBox.ConsoleSpot console, UUID screen) {
     Instant now = clock.get();
     boolean quiet = prompted.containsKey(player);
     if (box.duty != null) {
@@ -1851,12 +2155,279 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     } else if (dutyOf(player).isPresent() || console == null) {
       return;
     } else {
-      requests.put(player, new DutyRequest(boxKey(box.operator, box.zone), console, now));
+      requests.put(
+          player, new DutyRequest(boxKey(box.operator, box.zone), console, now, screen, false));
       if (!quiet) {
         messenger.send(player, "signaller.duty.prompt", Map.of("zone", zoneName(box)));
       }
     }
     prompted.putIfAbsent(player, now);
+  }
+
+  // ─── 中心工位 ──────────────────────────────────────────────────────────────
+
+  /** 控制区：先查中心工位分出去的临时小区，再查目录。 */
+  Optional<SignallerWorld.Zone> zoneOf(String operator, String code) {
+    Optional<SignallerWorld.Zone> found = transients.find(operator, code);
+    return found.isPresent() ? found : world.zone(operator, code);
+  }
+
+  @Override
+  public String zoneFor(UUID screen, String operator, String zone) {
+    return workstationHolder(screen)
+        .filter(box -> box.operator.equalsIgnoreCase(operator))
+        .map(box -> box.zone)
+        .orElse(zone);
+  }
+
+  @Override
+  public Optional<SignalboxConsole.ConsoleZone> transientZone(String operator, String code) {
+    // 标题栏放不下“大区名 · 工位 n”再加车站：控制台上标题只写“工位 n”，副标题写所辖车站，与大区控制台框上的写法对得上
+    return transients
+        .entry(operator, code)
+        .map(
+            entry ->
+                new SignalboxConsole.ConsoleZone(
+                    messenger
+                        .text("signaller.workstation.title")
+                        .replace("<seq>", String.valueOf(entry.seq())),
+                    shortStationNames(entry.zone().operator(), entry.zone().members()),
+                    entry.zone().members()));
+  }
+
+  /** 在这块工位上值守的楼；工位空着时为空。 */
+  private Optional<SignalBox> workstationHolder(UUID screen) {
+    if (screen == null) {
+      return Optional.empty();
+    }
+    for (SignalBox box : boxes.values()) {
+      if (box.duty != null && screen.equals(box.duty.screen)) {
+        return Optional.of(box);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 提示每人每 {@link #PROMPT_INTERVAL} 最多一条（一次点击会触发几下）。 */
+  private void promptOnce(UUID player, String key, Map<String, String> values) {
+    if (!prompted.containsKey(player)) {
+      messenger.send(player, key, values);
+    }
+    prompted.putIfAbsent(player, clock.get());
+  }
+
+  /** 大区有人值守，有人点了一块空工位：当场算一片候选，提示对方确认上岗（确认时再按当时的情况重算）。 */
+  private void requestSplit(
+      SignalBox parent,
+      UUID player,
+      boolean permitted,
+      SignalBox.ConsoleSpot console,
+      UUID screen) {
+    if (!permitted || dutyOf(player).isPresent() || console == null) {
+      return;
+    }
+    if (!config.get().enabled()) {
+      promptOnce(player, "signaller.duty.start.disabled", Map.of());
+      return;
+    }
+    if (examining(parent.duty.player) || examining(player)) {
+      // 考试与带练只能管整个区：有人在考的大区不切，考试的人也不分
+      promptOnce(player, "signaller.workstation.exam", Map.of("zone", zoneName(parent)));
+      return;
+    }
+    DutyRequest pending = requests.get(player);
+    if (prompted.containsKey(player)
+        && pending != null
+        && pending.split()
+        && pending.box().equals(boxKey(parent.operator, parent.zone))
+        && Objects.equals(pending.screen(), screen)) {
+      // 刚提示过同一片：按住右键的连发与反复点击不再重算（确认上岗时会按当时的情况重算）
+      return;
+    }
+    Optional<Split> split = split(parent);
+    if (split.isEmpty()) {
+      promptOnce(player, "signaller.workstation.none-left", Map.of("zone", zoneName(parent)));
+      return;
+    }
+    requests.put(
+        player,
+        new DutyRequest(boxKey(parent.operator, parent.zone), console, clock.get(), screen, true));
+    promptOnce(
+        player,
+        "signaller.workstation.offer",
+        Map.of(
+            "zone",
+            zoneName(parent),
+            "signaller",
+            parent.duty.playerName,
+            "stations",
+            stationNames(parent.operator, split.get().members()),
+            "share",
+            String.valueOf(Math.round(split.get().share() * 100))));
+  }
+
+  /**
+   * 一片候选临时小区。
+   *
+   * @param members 分出去的成员（按大区里的先后）
+   * @param share 约占大区工作量的比例（0–1）
+   */
+  record Split(List<YardArea.Member> members, double share) {}
+
+  /**
+   * 按中心工位的切法给后来的人算一片（见 {@link ZoneSplitter}）：只从大区剩下、还没人管的部分里切，已分出去的不重切。
+   *
+   * @param parent 有人值守的大区
+   * @return 切不出来（剩下的不足两个单元、图没好、大区不在了）时为空
+   */
+  Optional<Split> split(SignalBox parent) {
+    Optional<SignallerWorld.Zone> zone = world.zone(parent.operator, parent.zone);
+    ZoneMap full = map(parent);
+    if (zone.isEmpty() || full == null || parent.duty == null) {
+      return Optional.empty();
+    }
+    List<YardArea.Member> members = zone.get().members();
+    List<List<YardArea.Member>> fixed = new ArrayList<>();
+    for (SignallerWorld.Zone other : world.zones(parent.operator)) {
+      if (!other.code().equalsIgnoreCase(parent.zone)
+          && other.members().size() < members.size()
+          && members.containsAll(other.members())) {
+        fixed.add(other.members());
+      }
+    }
+    Optional<ZoneUnits> units = ZoneUnits.of(full.graph(), parent.operator, members, fixed);
+    if (units.isEmpty()) {
+      return Optional.empty();
+    }
+    // 已有人管的：嵌在大区里、正有人值守的小区（工位分出去的与管理员划好的）
+    Set<YardArea.Member> manned = new HashSet<>();
+    int people = 1;
+    for (SignalBox other : boxes.values()) {
+      if (other == parent || other.duty == null || !other.operator.equals(parent.operator)) {
+        continue;
+      }
+      ZoneMap inner = map(other);
+      if (inner != null && full.nests(inner)) {
+        zoneOf(other.operator, other.zone).ifPresent(found -> manned.addAll(found.members()));
+        people++;
+      }
+    }
+    List<ZoneUnits.Unit> list = units.get().units();
+    SignallerConfig.Workstations settings = config.get().workstations();
+    double[] workload =
+        ZoneWorkload.of(
+            list,
+            parent.operator,
+            world.timetables(),
+            clock.get(),
+            settings.loadWindow(),
+            settings.switchWeight());
+    List<ZoneSplitter.Unit> loads = new ArrayList<>();
+    Set<Integer> remaining = new LinkedHashSet<>();
+    double total = 0.0;
+    for (int i = 0; i < list.size(); i++) {
+      ZoneUnits.Unit unit = list.get(i);
+      double load = workload[i];
+      total += load;
+      loads.add(new ZoneSplitter.Unit(String.valueOf(i), load, unit.x(), unit.z()));
+      if (unit.members().stream().noneMatch(manned::contains)) {
+        remaining.add(i);
+      }
+    }
+    SignalBox.ConsoleSpot anchor = parent.duty.console;
+    Optional<Set<Integer>> chosen =
+        ZoneSplitter.split(
+            loads,
+            units.get().links(),
+            remaining,
+            people + 1,
+            anchor == null ? 0.0 : anchor.x(),
+            anchor == null ? 0.0 : anchor.z());
+    if (chosen.isEmpty()) {
+      return Optional.empty();
+    }
+    Set<YardArea.Member> picked = new HashSet<>();
+    double load = 0.0;
+    for (int unit : chosen.get()) {
+      picked.addAll(list.get(unit).members());
+      load += loads.get(unit).load();
+    }
+    List<YardArea.Member> ordered = members.stream().filter(picked::contains).toList();
+    return Optional.of(new Split(ordered, total <= 0.0 ? 0.0 : load / total));
+  }
+
+  /** 控制台副标题与工位框上最多列几个车站，再多写“等 N 站”。 */
+  static final int LISTED_STATIONS = 3;
+
+  /** 成员的写法：车站写站名（查不到写站码），车库写代码；按语言文件里的分隔符连起来。 */
+  private String stationNames(String operator, List<YardArea.Member> members) {
+    return String.join(messenger.text("signaller.workstation.separator"), names(operator, members));
+  }
+
+  /** 同 {@link #stationNames}，但只列前 {@value #LISTED_STATIONS} 个，再多写“等 N 站”（控制台上放得下）。 */
+  private String shortStationNames(String operator, List<YardArea.Member> members) {
+    List<String> names = names(operator, members);
+    if (names.size() <= LISTED_STATIONS) {
+      return String.join(messenger.text("signaller.workstation.separator"), names);
+    }
+    return messenger
+        .text("signaller.workstation.more")
+        .replace(
+            "<stations>",
+            String.join(
+                messenger.text("signaller.workstation.separator"),
+                names.subList(0, LISTED_STATIONS)))
+        .replace("<count>", String.valueOf(names.size()))
+        .replace("<more>", String.valueOf(names.size() - LISTED_STATIONS));
+  }
+
+  private List<String> names(String operator, List<YardArea.Member> members) {
+    List<String> out = new ArrayList<>();
+    for (YardArea.Member member : members) {
+      out.add(
+          member.kind() == ControlZoneMember.Kind.STATION
+              ? world.stationName(operator, member.code()).orElse(member.code())
+              : member.code());
+    }
+    return out;
+  }
+
+  /** 嵌在大区里、成员与这一片完全相同的另一个控制区（管理员划好的小区）。 */
+  private Optional<SignallerWorld.Zone> sameZone(
+      SignallerWorld.Zone parent, List<YardArea.Member> members) {
+    Set<YardArea.Member> wanted = Set.copyOf(members);
+    return world.zones(parent.operator()).stream()
+        .filter(zone -> !zone.code().equalsIgnoreCase(parent.code()))
+        .filter(zone -> Set.copyOf(zone.members()).equals(wanted))
+        .findFirst();
+  }
+
+  /** 中心工位分出去的临时小区所属大区的代码；普通控制区为空串。 */
+  private String parentZone(SignalBox box) {
+    return transients.entry(box.operator, box.zone).map(TransientZones.Entry::parent).orElse("");
+  }
+
+  /** 临时小区的名字：“大区名 · 工位 序号”（语言文件里的写法）。 */
+  private String workstationName(SignallerWorld.Zone parent, int seq) {
+    return messenger
+        .text("signaller.workstation.name")
+        .replace("<zone>", parent.name())
+        .replace("<seq>", String.valueOf(seq));
+  }
+
+  /** 大区被删、或管理员改了大区成员使临时小区不再全在里面：在岗的人按“控制区已变更”下岗，再撤销这片。先下岗后撤销，班次与下岗通知里还查得到所属大区与临时名。 */
+  private void checkTransients() {
+    for (TransientZones.Entry entry : transients.all()) {
+      Optional<SignallerWorld.Zone> parent = world.zone(entry.zone().operator(), entry.parent());
+      if (parent.isPresent() && parent.get().members().containsAll(entry.zone().members())) {
+        continue;
+      }
+      SignalBox sub = boxes.get(boxKey(entry.zone().operator(), entry.zone().code()));
+      if (sub != null && sub.duty != null) {
+        endDuty(sub.duty.player, SignallerShift.EndReason.REVOKED);
+      }
+      transients.remove(entry.zone().operator(), entry.zone().code());
+    }
   }
 
   // ─── 给控制台动作与画面用的内部方法 ─────────────────────────────────────────
@@ -2082,11 +2653,19 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     for (SignalBox other : manned) {
       ZoneMap inner = map(other);
       boolean outermost = manned.stream().noneMatch(o -> o != other && map(o).nests(inner));
-      if (outermost) {
-        out.add(
-            new SignalboxState.Delegated(
-                zoneName(other), other.duty.playerName, inner.area().nodes()));
+      if (!outermost) {
+        continue;
       }
+      Optional<TransientZones.Entry> seat = transients.entry(other.operator, other.zone);
+      out.add(
+          seat.isPresent()
+              ? new SignalboxState.Delegated(
+                  shortStationNames(other.operator, seat.get().zone().members()),
+                  other.duty.playerName,
+                  inner.area().nodes(),
+                  java.util.OptionalInt.of(seat.get().seq()))
+              : new SignalboxState.Delegated(
+                  zoneName(other), other.duty.playerName, inner.area().nodes()));
     }
     return out;
   }
@@ -2104,7 +2683,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
    * @param box 信号楼
    */
   ZoneMap map(SignalBox box) {
-    Optional<SignallerWorld.Zone> zone = world.zone(box.operator, box.zone);
+    Optional<SignallerWorld.Zone> zone = zoneOf(box.operator, box.zone);
     if (zone.isEmpty()) {
       box.map = null;
       return null;
@@ -2233,7 +2812,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
   }
 
   String zoneName(SignalBox box) {
-    return world.zone(box.operator, box.zone).map(SignallerWorld.Zone::name).orElse(box.zone);
+    return zoneOf(box.operator, box.zone).map(SignallerWorld.Zone::name).orElse(box.zone);
   }
 
   void invalidate(SignalBox box) {
@@ -2283,8 +2862,11 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
    * @param box 信号楼键
    * @param console 控制台位置
    * @param at 点的时刻
+   * @param screen 点的屏幕（中心工位用）；不知道时为空
+   * @param split 在工位上请求分一片（大区有人值守时）
    */
-  private record DutyRequest(String box, SignalBox.ConsoleSpot console, Instant at) {}
+  private record DutyRequest(
+      String box, SignalBox.ConsoleSpot console, Instant at, UUID screen, boolean split) {}
 
   private record CachedState(long tick, SignalboxState state) {}
 

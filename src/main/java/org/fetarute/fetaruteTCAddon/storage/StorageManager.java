@@ -192,6 +192,7 @@ public final class StorageManager {
     ensurePidsScreenPagesColumn(connection);
     ensurePidsScreenRotationColumn(connection);
     ensurePidsScreenZoneColumn(connection);
+    ensurePidsScreenWorkstationColumn(connection);
     migrateLicenseClassIds(connection);
   }
 
@@ -309,6 +310,25 @@ public final class StorageManager {
       logger.warn("应用兼容性迁移失败: 添加 pids_screens.zone_code: " + ex.getMessage());
     } catch (Exception ex) {
       logger.warn("应用兼容性迁移失败: 添加 pids_screens.zone_code: " + ex.getMessage());
+    }
+  }
+
+  /** 兼容性迁移：为旧版 pids_screens 补齐 workstation 列（控制台是不是中心工位；旧表为空，按不是）。 */
+  private void ensurePidsScreenWorkstationColumn(java.sql.Connection connection) {
+    String screensTable = storageSchema.tablePrefix() + "pids_screens";
+    String sql = "ALTER TABLE " + screensTable + " ADD COLUMN workstation " + dialect.intType();
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: pids_screens.workstation (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.workstation: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.workstation: " + ex.getMessage());
     }
   }
 

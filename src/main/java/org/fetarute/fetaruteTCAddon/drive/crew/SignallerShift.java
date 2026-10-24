@@ -18,6 +18,7 @@ import java.util.UUID;
  * @param endReason 下岗原因
  * @param examined 这一班是信号员考试或练习：不发奖励
  * @param practiced 这一班是信号员练习：也不写记录
+ * @param parentZone 在中心工位上值守时所属大区的代码（{@code zone} 为临时代码）；普通控制区为空串
  */
 public record SignallerShift(
     UUID player,
@@ -29,7 +30,8 @@ public record SignallerShift(
     Counts counts,
     EndReason endReason,
     boolean examined,
-    boolean practiced) {
+    boolean practiced,
+    String parentZone) {
 
   /** 不是考试也不是练习的班次。 */
   public SignallerShift(
@@ -44,6 +46,22 @@ public record SignallerShift(
     this(player, playerName, operator, zone, start, end, counts, endReason, false, false);
   }
 
+  /** 不在中心工位上的班次。 */
+  public SignallerShift(
+      UUID player,
+      String playerName,
+      String operator,
+      String zone,
+      Instant start,
+      Instant end,
+      Counts counts,
+      EndReason endReason,
+      boolean examined,
+      boolean practiced) {
+    this(
+        player, playerName, operator, zone, start, end, counts, endReason, examined, practiced, "");
+  }
+
   public SignallerShift {
     Objects.requireNonNull(player, "player");
     Objects.requireNonNull(start, "start");
@@ -52,6 +70,7 @@ public record SignallerShift(
     playerName = playerName == null ? "" : playerName;
     operator = operator == null ? "" : operator;
     zone = zone == null ? "" : zone;
+    parentZone = parentZone == null ? "" : parentZone;
     counts = counts == null ? Counts.builder().build() : counts;
     examined = examined || practiced;
   }
@@ -74,6 +93,9 @@ public record SignallerShift(
    * @param conflictsBad 交汇排序不当：两车合计多出的晚点超过上限
    * @param tripsCancelled 取消的车次（只记次数，不计分）
    * @param skipsOrdered 令越站的次数（只记次数，不计分）
+   * @param simRight 值守中的模拟事件答对的次数
+   * @param simWrong 模拟事件答错的次数
+   * @param simMissed 模拟事件超时没答的次数
    */
   public record Counts(
       int trainsHandled,
@@ -90,7 +112,10 @@ public record SignallerShift(
       int conflictsGood,
       int conflictsBad,
       int tripsCancelled,
-      int skipsOrdered) {
+      int skipsOrdered,
+      int simRight,
+      int simWrong,
+      int simMissed) {
 
     public Counts {
       trainsHandled = Math.max(0, trainsHandled);
@@ -108,6 +133,9 @@ public record SignallerShift(
       conflictsBad = Math.max(0, conflictsBad);
       tripsCancelled = Math.max(0, tripsCancelled);
       skipsOrdered = Math.max(0, skipsOrdered);
+      simRight = Math.max(0, simRight);
+      simWrong = Math.max(0, simWrong);
+      simMissed = Math.max(0, simMissed);
     }
 
     /** 按名字设各项，没设的为 0。 */
@@ -133,6 +161,9 @@ public record SignallerShift(
     private int conflictsBad;
     private int tripsCancelled;
     private int skipsOrdered;
+    private int simRight;
+    private int simWrong;
+    private int simMissed;
 
     private Builder() {}
 
@@ -211,6 +242,21 @@ public record SignallerShift(
       return this;
     }
 
+    public Builder simRight(int value) {
+      simRight = value;
+      return this;
+    }
+
+    public Builder simWrong(int value) {
+      simWrong = value;
+      return this;
+    }
+
+    public Builder simMissed(int value) {
+      simMissed = value;
+      return this;
+    }
+
     public Counts build() {
       return new Counts(
           trainsHandled,
@@ -227,7 +273,10 @@ public record SignallerShift(
           conflictsGood,
           conflictsBad,
           tripsCancelled,
-          skipsOrdered);
+          skipsOrdered,
+          simRight,
+          simWrong,
+          simMissed);
     }
   }
 
@@ -289,6 +338,18 @@ public record SignallerShift(
 
   public int skipsOrdered() {
     return counts.skipsOrdered();
+  }
+
+  public int simRight() {
+    return counts.simRight();
+  }
+
+  public int simWrong() {
+    return counts.simWrong();
+  }
+
+  public int simMissed() {
+    return counts.simMissed();
   }
 
   /** 班次时长；时钟回拨时为 0。 */

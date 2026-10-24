@@ -65,6 +65,10 @@ class ControlZoneServiceTest {
     assertEquals(
         Status.INVALID, service.create(operator, "A:B", "甲", Optional.empty(), ANYONE).status());
     assertEquals(
+        Status.INVALID,
+        service.create(operator, "NORTH~2", "甲", Optional.empty(), ANYONE).status(),
+        "“~”留给中心工位的临时小区");
+    assertEquals(
         Status.INVALID, service.create(operator, "A", " ", Optional.empty(), ANYONE).status());
     assertEquals(
         Status.NO_PERMISSION,

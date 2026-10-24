@@ -209,4 +209,31 @@ class SignallerSettlementTest {
     assertEquals(1, host.warnings.size());
     assertDoesNotThrow(() -> settlement(host).settle(null));
   }
+
+  @Test
+  @DisplayName("出过模拟事件的班次多报一行：答对、答错、超时各几次")
+  void simulatedEventsGetTheirOwnLine() {
+    FakeHost host = new FakeHost();
+    SignallerShift shift =
+        new SignallerShift(
+            PLAYER,
+            "Sinapole",
+            "SURC",
+            "WSD",
+            START,
+            START.plusSeconds(1800),
+            SignallerShift.Counts.builder()
+                .trainsHandled(4)
+                .simRight(3)
+                .simWrong(1)
+                .simMissed(2)
+                .build(),
+            SignallerShift.EndReason.LEFT_CONSOLE);
+
+    settlement(host).settle(shift);
+
+    int at = host.told.indexOf("drive.signaller.result.simulated");
+    assertEquals(host.told.indexOf("drive.signaller.result.detail") + 1, at, "紧跟明细一行");
+    assertEquals(Map.of("right", "3", "wrong", "1", "missed", "2"), host.values.get(at));
+  }
 }

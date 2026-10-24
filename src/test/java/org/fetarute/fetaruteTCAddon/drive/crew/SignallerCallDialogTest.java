@@ -28,7 +28,7 @@ class SignallerCallDialogTest {
         List.of(CallReason.DOORS, CallReason.OBSTRUCTION, CallReason.SIGNAL, CallReason.GENERAL),
         elsewhere);
     for (List<CallReason> order : List.of(waiting, elsewhere)) {
-      assertEquals(EnumSet.allOf(CallReason.class), EnumSet.copyOf(order));
+      assertEquals(EnumSet.copyOf(CallReason.crewReasons()), EnumSet.copyOf(order), "询问与报告只给模拟事件用");
       assertEquals(CallReason.GENERAL, order.get(order.size() - 1));
     }
   }
@@ -48,7 +48,7 @@ class SignallerCallDialogTest {
                 SignallerCallDialog.KEYS + ".title",
                 SignallerCallDialog.KEYS + ".body",
                 SignallerCallDialog.KEYS + ".cancel"));
-    for (CallReason reason : CallReason.values()) {
+    for (CallReason reason : CallReason.crewReasons()) {
       keys.add(SignallerCallDialog.KEYS + ".reason." + reason.key());
     }
     for (String key : keys) {

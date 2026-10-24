@@ -35,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
  * @param mode 显示模式
  * @param createdAt 创建时刻
  * @param updatedAt 最后修改时刻
+ * @param workstation 控制台是中心工位：大区有人值守时，后来的人在这里上岗、分到一片临时小区，屏幕画在岗那位的区（见信号员模块的中心工位）
  */
 public record PidsScreen(
     UUID id,
@@ -53,7 +54,8 @@ public record PidsScreen(
     Appearance appearance,
     Mode mode,
     Instant createdAt,
-    Instant updatedAt) {
+    Instant updatedAt,
+    boolean workstation) {
 
   /** 多选切换里表示“全部”的取值。 */
   public static final String ALL = "all";
@@ -91,6 +93,46 @@ public record PidsScreen(
     Objects.requireNonNull(mode, "mode");
     Objects.requireNonNull(createdAt, "createdAt");
     Objects.requireNonNull(updatedAt, "updatedAt");
+  }
+
+  /** 不是工位的屏幕。 */
+  public PidsScreen(
+      UUID id,
+      UUID worldId,
+      Position anchor,
+      PidsFacing facing,
+      int tileRows,
+      int tileCols,
+      List<String> layoutIds,
+      Optional<PidsStationKey> station,
+      Optional<String> operator,
+      Set<String> platforms,
+      Set<String> lines,
+      List<String> rotation,
+      Optional<String> zone,
+      Appearance appearance,
+      Mode mode,
+      Instant createdAt,
+      Instant updatedAt) {
+    this(
+        id,
+        worldId,
+        anchor,
+        facing,
+        tileRows,
+        tileCols,
+        layoutIds,
+        station,
+        operator,
+        platforms,
+        lines,
+        rotation,
+        zone,
+        appearance,
+        mode,
+        createdAt,
+        updatedAt,
+        false);
   }
 
   /** 不绑控制区的屏幕。 */
@@ -341,7 +383,8 @@ public record PidsScreen(
         appearance,
         mode,
         createdAt,
-        now);
+        now,
+        workstation);
   }
 
   /** 不绑车站、只绑运营商（线路运行状况屏、控制区站场图屏）：清掉车站与站台，换上新的线路过滤；运营商变了时控制区一并解绑。 */
@@ -363,7 +406,8 @@ public record PidsScreen(
         appearance,
         mode,
         createdAt,
-        now);
+        now,
+        workstation);
   }
 
   /** 换绑控制区（站场图屏用）；空表示不绑，只画绑定的车站。 */
@@ -385,7 +429,8 @@ public record PidsScreen(
         appearance,
         mode,
         createdAt,
-        now);
+        now,
+        workstation);
   }
 
   /** 改绑后的运营商是否不变：控制区按运营商记，换了运营商就不再绑。 */
@@ -418,7 +463,8 @@ public record PidsScreen(
         appearance,
         mode,
         createdAt,
-        now);
+        now,
+        workstation);
   }
 
   /** 换按运营商轮播的清单（见 {@link #toggleRotation}）；不再轮播的运营商在线路过滤里写的 {@code 运营商:线路} 一并去掉（屏幕所属运营商的保留）。 */
@@ -450,7 +496,8 @@ public record PidsScreen(
         appearance,
         mode,
         createdAt,
-        now);
+        now,
+        workstation);
   }
 
   /** 换外观。 */
@@ -472,7 +519,31 @@ public record PidsScreen(
         appearance,
         mode,
         createdAt,
-        now);
+        now,
+        workstation);
+  }
+
+  /** 标记或取消中心工位。 */
+  public PidsScreen withWorkstation(boolean workstation, Instant now) {
+    return new PidsScreen(
+        id,
+        worldId,
+        anchor,
+        facing,
+        tileRows,
+        tileCols,
+        layoutIds,
+        station,
+        operator,
+        platforms,
+        lines,
+        rotation,
+        zone,
+        appearance,
+        mode,
+        createdAt,
+        now,
+        workstation);
   }
 
   /** 换显示模式。 */
@@ -494,7 +565,8 @@ public record PidsScreen(
         appearance,
         mode,
         createdAt,
-        now);
+        now,
+        workstation);
   }
 
   /**

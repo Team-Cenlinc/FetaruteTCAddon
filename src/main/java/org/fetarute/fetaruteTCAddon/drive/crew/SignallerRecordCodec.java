@@ -61,6 +61,9 @@ public final class SignallerRecordCodec {
     root.addProperty("role", "signaller");
     root.addProperty("operator", shift.operator());
     root.addProperty("zone", shift.zone());
+    if (!shift.parentZone().isEmpty()) {
+      root.addProperty("parentZone", shift.parentZone());
+    }
     root.addProperty("durationSeconds", shift.duration().toSeconds());
     root.addProperty("trainsHandled", shift.trainsHandled());
     root.addProperty("routesSet", shift.routesSet());
@@ -77,6 +80,9 @@ public final class SignallerRecordCodec {
     root.addProperty("conflictsBad", shift.conflictsBad());
     root.addProperty("tripsCancelled", shift.tripsCancelled());
     root.addProperty("skipsOrdered", shift.skipsOrdered());
+    root.addProperty("simRight", shift.simRight());
+    root.addProperty("simWrong", shift.simWrong());
+    root.addProperty("simMissed", shift.simMissed());
     root.addProperty("endReason", shift.endReason().name().toLowerCase(Locale.ROOT));
     return root.toString();
   }

@@ -81,6 +81,12 @@ public interface SignallerExaminer {
     CALL_WRONG,
     /** 呼叫超时没回复。 */
     CALL_MISSED,
+    /** 值守中的模拟事件答对了。 */
+    SIM_RIGHT,
+    /** 值守中的模拟事件答错了（含回了“进路正在排列”却没排）。 */
+    SIM_WRONG,
+    /** 值守中的模拟事件超时没答。 */
+    SIM_MISSED,
     /** 模拟呼叫（{@code SignallerService#drillCall}）回复对了。 */
     DRILL_ANSWERED,
     /** 模拟呼叫回复与原因不符。 */

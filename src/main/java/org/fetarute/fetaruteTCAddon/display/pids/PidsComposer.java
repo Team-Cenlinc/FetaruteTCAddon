@@ -426,7 +426,7 @@ public final class PidsComposer {
       placeholder = Optional.of(vocabulary.signalboxNoZone());
     } else {
       try {
-        state = signalboxConsole.state(operator.get(), screen.zone().get());
+        state = signalboxConsole.state(operator.get(), drawnZone(screen).orElseThrow());
       } catch (RuntimeException ex) {
         state = Optional.empty();
       }
@@ -471,12 +471,26 @@ public final class PidsComposer {
     return renderer.signalboxTarget(key.layout(), key.view(), x, y);
   }
 
+  /** 控制台与站场图要画的区：中心工位上有人值守时画在岗那位的区（临时小区），否则画绑定的区。 */
+  private Optional<String> drawnZone(PidsScreen screen) {
+    if (screen.zone().isEmpty() || screen.operatorCode().isEmpty() || !screen.workstation()) {
+      return screen.zone();
+    }
+    try {
+      String drawn =
+          signalboxConsole.zoneFor(screen.id(), screen.operatorCode().get(), screen.zone().get());
+      return Optional.of(drawn == null ? screen.zone().get() : drawn);
+    } catch (RuntimeException ex) {
+      return screen.zone();
+    }
+  }
+
   /** 站场图屏的一帧：绑了控制区时以控制区为准，标题写控制区名。 */
   private PidsYardView yardView(PidsScreen screen, PidsLayout layout) {
     PidsLayout.Yard widget = layout.yard().orElseThrow();
     PidsYardView view;
     if (screen.zone().isPresent()) {
-      String code = screen.zone().get();
+      String code = drawnZone(screen).orElseThrow();
       Optional<PidsYardZones.Zone> found =
           controlZones.find(screen.operatorCode().orElseThrow(), code);
       YardPicture picture =

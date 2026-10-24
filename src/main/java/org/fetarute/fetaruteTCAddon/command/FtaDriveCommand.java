@@ -229,9 +229,7 @@ public final class FtaDriveCommand {
                 SuggestionProvider.blockingStrings(
                     (ctx, input) ->
                         CommandUx.suggestions(
-                            java.util.Arrays.stream(CallReason.values())
-                                .map(CallReason::key)
-                                .toList(),
+                            CallReason.crewReasons().stream().map(CallReason::key).toList(),
                             input.lastRemainingToken())))
             .handler(
                 ctx -> handleCall(ctx.sender(), ctx.optional("reason").map(String.class::cast))));

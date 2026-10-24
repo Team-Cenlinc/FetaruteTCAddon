@@ -22,10 +22,11 @@ class CallRepliesTest {
 
   @Test
   void eachReasonHasItsReplies() {
-    assertEquals(Set.of(Reply.ROUTE_SETTING, Reply.WAIT), fitting(CallReason.SIGNAL));
-    assertEquals(Set.of(Reply.ACK), fitting(CallReason.DOORS));
-    assertEquals(Set.of(Reply.CAUTION), fitting(CallReason.OBSTRUCTION));
-    assertEquals(EnumSet.allOf(Reply.class), fitting(CallReason.GENERAL));
+    assertEquals(Set.of(Reply.ROUTE_SETTING), fitting(CallReason.SIGNAL, true), "此刻排得了");
+    assertEquals(Set.of(Reply.WAIT), fitting(CallReason.SIGNAL, false), "前方有车");
+    assertEquals(Set.of(Reply.ACK), fitting(CallReason.DOORS, true));
+    assertEquals(Set.of(Reply.CAUTION), fitting(CallReason.OBSTRUCTION, false));
+    assertEquals(EnumSet.allOf(Reply.class), fitting(CallReason.GENERAL, true));
   }
 
   /** 每种原因的来电提醒（聊天与动作栏）、回错时的说明（一般联系没有回错）、呼叫牌上的写法、呼叫者岗位的写法，以及提示音、结算明细与命令的文案都有。 */
@@ -61,10 +62,10 @@ class CallRepliesTest {
     }
   }
 
-  private static Set<Reply> fitting(CallReason reason) {
+  private static Set<Reply> fitting(CallReason reason, boolean routable) {
     Set<Reply> out = EnumSet.noneOf(Reply.class);
     for (Reply reply : Reply.values()) {
-      if (CallReplies.fits(reason, reply)) {
+      if (CallReplies.fits(reason, reply, routable)) {
         out.add(reply);
       }
     }

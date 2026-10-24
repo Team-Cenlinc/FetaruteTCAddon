@@ -63,6 +63,8 @@ public record SignalboxView(
    * @param notices 临时提示；带列车的含 {@code <train>}，进路被占用另见 {@code routeBlockedBy}
    * @param routeBlockedBy 进路被某列车占用，含 {@code <train>}
    * @param delegated 站场图上让给小区（车站控制）的那一片的标注，含 {@code <zone>}（小区名）与 {@code <name>}（小区的信号员）
+   * @param delegatedWorkstation 让给中心工位的那一片的标注，含 {@code <seq>}（工位序号）、{@code <zone>}（所辖车站）与 {@code
+   *     <name>}（工位的信号员）
    */
   public record Labels(
       String manual,
@@ -92,7 +94,8 @@ public record SignalboxView(
       Map<SignalboxState.Reply, Names> replies,
       Map<SignalboxState.NoticeKind, String> notices,
       String routeBlockedBy,
-      String delegated) {
+      String delegated,
+      String delegatedWorkstation) {
 
     public Labels {
       callers = Map.copyOf(callers);

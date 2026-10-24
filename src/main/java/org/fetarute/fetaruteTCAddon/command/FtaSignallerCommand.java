@@ -120,7 +120,9 @@ public final class FtaSignallerCommand {
                       "zone",
                       box.zone(),
                       "name",
-                      box.name(),
+                      box.parentZone().isPresent()
+                          ? box.name() + locale().text("signaller.command.status.transient")
+                          : box.name(),
                       "mode",
                       locale().text("signaller.mode." + box.mode().name().toLowerCase(Locale.ROOT)),
                       "signaller",

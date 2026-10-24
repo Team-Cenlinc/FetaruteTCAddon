@@ -61,6 +61,8 @@ public interface SignallerApi {
    * @param waitingTrains 在入口等许可的车（列车名，按开始等的先后）
    * @param permits 已给、车还没驶离控制区的许可数
    * @param heldTrains 信号员扣在站里的车（列车名）
+   * @param parentZoneCode 中心工位分出去的临时小区所属大区的代码：大区有人值守时后来的人在工位上分到一片，{@code zoneCode} 是它的临时代码（形如
+   *     {@code 大区代码~2}，只在内存里），下岗后这座楼随之消失。普通控制区为空
    */
   record SignalBoxView(
       String operatorCode,
@@ -72,7 +74,8 @@ public interface SignallerApi {
       Optional<Instant> onDutySince,
       List<String> waitingTrains,
       int permits,
-      List<String> heldTrains) {
+      List<String> heldTrains,
+      Optional<String> parentZoneCode) {
 
     public SignalBoxView {
       Objects.requireNonNull(operatorCode, "operatorCode");
@@ -85,6 +88,33 @@ public interface SignallerApi {
       waitingTrains = waitingTrains == null ? List.of() : List.copyOf(waitingTrains);
       permits = Math.max(0, permits);
       heldTrains = heldTrains == null ? List.of() : List.copyOf(heldTrains);
+      parentZoneCode = parentZoneCode == null ? Optional.empty() : parentZoneCode;
+    }
+
+    /** 普通控制区。 */
+    public SignalBoxView(
+        String operatorCode,
+        String zoneCode,
+        String name,
+        Mode mode,
+        Optional<UUID> signallerId,
+        Optional<String> signallerName,
+        Optional<Instant> onDutySince,
+        List<String> waitingTrains,
+        int permits,
+        List<String> heldTrains) {
+      this(
+          operatorCode,
+          zoneCode,
+          name,
+          mode,
+          signallerId,
+          signallerName,
+          onDutySince,
+          waitingTrains,
+          permits,
+          heldTrains,
+          Optional.empty());
     }
   }
 

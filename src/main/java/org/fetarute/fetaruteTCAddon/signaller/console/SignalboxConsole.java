@@ -1,8 +1,11 @@
 package org.fetarute.fetaruteTCAddon.signaller.console;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 
 /**
  * 控制台（{@code signalbox-*} 布局的站台屏）与信号员模块之间的接缝：站台屏每秒最多取一次一帧数据，玩家点击时把点到的东西交回来。
@@ -43,4 +46,56 @@ public interface SignalboxConsole {
    * @param target 点到的东西
    */
   void press(Player player, Location console, String operator, String zone, ConsoleTarget target);
+
+  /**
+   * 同 {@link #press(Player, Location, String, String,
+   * ConsoleTarget)}，带上屏幕身份：中心工位上有人时点的是在岗那位的区，空着时大区有人值守就请求分一片。
+   *
+   * @param screen 被点的屏幕
+   * @param workstation 这块屏是中心工位
+   */
+  default void press(
+      Player player,
+      Location console,
+      UUID screen,
+      boolean workstation,
+      String operator,
+      String zone,
+      ConsoleTarget target) {
+    press(player, console, operator, zone, target);
+  }
+
+  /**
+   * 这块屏此刻该画哪个区：中心工位上有人值守时画在岗那位的区（临时小区），否则画绑定的区。
+   *
+   * @param screen 屏幕
+   * @param operator 运营商代码
+   * @param zone 屏幕绑定的控制区代码
+   */
+  default String zoneFor(UUID screen, String operator, String zone) {
+    return zone;
+  }
+
+  /**
+   * 中心工位分出去的临时小区（不在控制区目录里，站场图按它的成员画）。
+   *
+   * @return 不是临时小区时为空
+   */
+  default Optional<ConsoleZone> transientZone(String operator, String code) {
+    return Optional.empty();
+  }
+
+  /**
+   * 站场图要画的一片：名字与成员。
+   *
+   * @param name 名字（标题）
+   * @param subtitle 副标题（中心工位写所辖车站，太多时写“等 N 站”）；没有时为空串
+   * @param members 成员车站与车库
+   */
+  record ConsoleZone(String name, String subtitle, List<YardArea.Member> members) {
+    public ConsoleZone {
+      subtitle = subtitle == null ? "" : subtitle;
+      members = List.copyOf(members);
+    }
+  }
 }

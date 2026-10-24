@@ -949,8 +949,8 @@ public class BoardListener implements Listener {
 
 | 事件 | 时机 |
 |------|------|
-| `SignallerDutyStartEvent` | 上岗（点了控制台、确认上岗之后）；`isManual()` 为控制区已转人工（调度图未就绪时为 false，暂为自动） |
-| `SignallerDutyEndedEvent` | 下岗（这一班已结算，控制区回到自动）；含上下岗时刻、原因（`OFF_DUTY`、`LEFT_CONSOLE`、`QUIT`、`INCAPACITATED`、`REVOKED`、`SHUTDOWN`，信号员考试交卷或了结时为 `EXAM`）与这一班的计数：经手车数、亲手排列的进路、代排、自动通过、扣车、回复与漏接的呼叫 |
+| `SignallerDutyStartEvent` | 上岗（点了控制台、确认上岗之后）；`isManual()` 为控制区已转人工（调度图未就绪时为 false，暂为自动）。在中心工位上岗时（大区有人值守、后来的人分到一片临时小区），`getZoneCode()` 为临时代码（形如 `大区代码~2`，只在内存里、不在控制区目录里），`getZoneName()` 为临时名，`getParentZoneCode()` 为所属大区；普通控制区 `getParentZoneCode()` 为空 |
+| `SignallerDutyEndedEvent` | 下岗（这一班已结算，控制区回到自动）；含上下岗时刻、原因（`OFF_DUTY`、`LEFT_CONSOLE`、`QUIT`、`INCAPACITATED`、`REVOKED`、`SHUTDOWN`，信号员考试交卷或了结时为 `EXAM`）与这一班的计数：经手车数、亲手排列的进路、代排、自动通过、扣车、回复与漏接的呼叫；`getParentZoneCode()` 同上岗事件 |
 
 ---
 
@@ -1101,7 +1101,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
-| 1.15.0 | 新增 `FetaruteApi#signaller()` 与 `SignallerApi`（各信号楼的模式、值守者、在入口等信号员的车、许可数与扣着的车；可在任意线程调用）及信号员事件（`SignallerDutyStartEvent`、`SignallerDutyEndedEvent`）。`DriveApi#records` 不含信号员的班次（驾驶记录里 `mode` 为 `SIGNALLER` 的那些）；站牌行为不变 |
+| 1.15.0 | 新增 `FetaruteApi#signaller()` 与 `SignallerApi`（各信号楼的模式、值守者、在入口等信号员的车、许可数与扣着的车；可在任意线程调用）及信号员事件（`SignallerDutyStartEvent`、`SignallerDutyEndedEvent`，带 `getParentZoneCode()`：中心工位上的临时小区所属的大区）。`DriveApi#records` 不含信号员的班次（驾驶记录里 `mode` 为 `SIGNALLER` 的那些）；站牌行为不变 |
 | 1.14.0 | 新增 `FetaruteApi#guard()` 与 `GuardApi`（车掌任务、值乘、记录）及车掌事件（`GuardTaskClaimEvent`、`GuardDutyStartEvent`、`GuardStopWorkedEvent`、`GuardDepartureSignalEvent`、`GuardEmergencyStopEvent`、`GuardIncidentReportEvent`、`GuardTripScoredEvent`、`GuardTaskFinishedEvent`、`GuardDutyEndedEvent`）。`DriveApi#records` 照旧返回该玩家的全部记录，车掌的记录 `mode` 为 `GUARD`。新增 `FetaruteApi#call()` 与 `CallApi`（车站上能叫车的方向、叫车单）及叫车事件（`TrainCallPlacedEvent`、`TrainCallDispatchedEvent`、`TrainCallArrivedEvent`、`TrainCallEndedEvent`）。`TimetableApi.Duty` 加 `splitFromTripCode`（由解编开始的交路：从哪一班的列车上解下）与 `joinsTripCode`（以联挂结束的交路：并入哪一班的列车），旧构造器保留。`EtaApi.BoardRow` 加 `division`（运行中列车在本站或前方分行，或刚在本站拆开；新记录 `EtaApi.Division`、`EtaApi.DivisionPart`）与 `joining`（回程支线的车在前方联挂、`destination` 为联挂后主干的终点，或主干在本站联挂；新记录 `EtaApi.Joining`），保留 1.9.0 起的全参构造器（不分行、不联挂）。会分行的列车 `destination` 写开得更远的一段 |
 | 1.9.0 | 站牌行结构化。**记录新增字段**：`EtaApi.BoardRow` 增加 `etaEpochMillis`（附 `eta()`）、`phase`（新枚举 `EtaApi.BoardPhase`）、`stopSequence`、`passing`、`terminating`、`outOfService`、`trainName`、`delaySeconds`、`platformPending`、`platformCandidates`；保留 1.8.0 的全参构造器作为次级构造器（时刻为 0、阶段为 `EN_ROUTE`、序号为 -1、`outOfService` 按主目的地 ID 是否为 `OUT_OF_SERVICE` 推断），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量；`Optional` 分量传 `null` 时规整为空。`EtaApi.BoardRow` 另增 `platformPlanned` 与 `cars`（新记录 `EtaApi.CarLoad`，附 `vacantSeats()`）；`TimetableApi.Departure` 增加 `plannedNodeId`（动态站台的计划股道），保留 1.8.0 与 1.7.0 的构造器。`RouteApi.RouteDetail` 增加 `via`（显式配置的经由站码，未配置为空列表），保留 1.8.0 的五参构造器。**新方法**：`TimetableApi#cancellations(from, to)`（按计划始发时刻查已取消车次，新记录 `TimetableApi.CancelledTrip`）、
 `TrainApi#listAllActiveTrains(boolean includeEta)`（为 false 时不算 ETA，接口带默认实现）。**新事件**：`TrainPlatformAssignedEvent`（站台定下来或变了）。**行为变更**：`getBoard` 列出停在本站的列车（`AT_STATION`）；时刻表预测排除已取消的车次；动态站台尚未选台时 `platform` 为计划站台或 `-`（此前为占位股道）；折返站上已知下一趟的来车按下一趟列出 |

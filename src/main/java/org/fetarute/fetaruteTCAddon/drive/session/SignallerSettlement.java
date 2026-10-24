@@ -121,6 +121,18 @@ final class SignallerSettlement implements SignallerShift.Settlement {
             String.valueOf(shift.conflictsBad()),
             "wrong",
             String.valueOf(shift.callsWrong())));
+    if (shift.simRight() + shift.simWrong() + shift.simMissed() > 0) {
+      host.tell(
+          shift.player(),
+          "drive.signaller.result.simulated",
+          Map.of(
+              "right",
+              String.valueOf(shift.simRight()),
+              "wrong",
+              String.valueOf(shift.simWrong()),
+              "missed",
+              String.valueOf(shift.simMissed())));
+    }
     DriveSessionManager.rewardMessageKey(paid, false)
         .ifPresent(
             key ->

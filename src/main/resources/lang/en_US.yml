@@ -1010,6 +1010,7 @@ drive:
     result:
       summary: "<prefix> <white>Signaller shift ended: zone <aqua><zone></aqua>, score <yellow><points></yellow>, grade <gold><grade></gold>; handled <white><trains></white> train(s), <white><auto></white> of them routed automatically after timing out</white>"
       detail: "<prefix> <gray><white><pre></white> pre-routed · <white><kept></white> kept on time · <white><lost></white> lost time in the zone · junction order good <white><good></white>, poor <white><bad></white> · <white><wrong></white> wrong replies</gray>"
+      simulated: "<prefix> <gray>Simulated events: <white><right></white> right · <white><wrong></white> wrong · <white><missed></white> timed out</gray>"
       no-trains: "<prefix> <gray>No trains passed through zone <white><zone></white> during this shift; no score or reward</gray>"
     end:
       off-duty: "Off duty"
@@ -1922,6 +1923,7 @@ signaller:
       header: "<prefix> <dark_aqua>Signal boxes</dark_aqua>"
       line: "<gray>-</gray> <white><name></white> <gray>(<operator>:<zone>)</gray> <aqua><mode></aqua> <gray>Signaller:</gray> <white><signaller></white> <gray>waiting <white><waiting></white> · permits <white><permits></white> · held <white><holds></white></gray>"
       empty: "<prefix> <gray>No signal box is in use</gray>"
+      transient: " (temporary)"
       nobody: "nobody"
   duty:
     prompt: "<prefix> <white>Control zone <aqua><zone></aqua> is unstaffed.</white> <click:run_command:'/fta signal on'><hover:show_text:'<gray>Click to run:</gray> <white>/fta signal on</white>'><green>[Go on duty]</green></hover></click>"
@@ -1937,6 +1939,7 @@ signaller:
       zone-taken: "<prefix> <red>Control zone <white><zone></white> is already staffed by <white><signaller></white></red>"
       busy-driver: "<prefix> <red>You are driving or hold a driving task, so you cannot staff a signal box at the same time</red>"
       busy-guard: "<prefix> <red>You are working as a guard or hold a guard task, so you cannot staff a signal box at the same time</red>"
+      no-split: "<prefix> <red>No stations of <white><zone></white> are left to split off</red>"
     away: "<prefix> <yellow>You left the <white><zone></white> console; return within <white><grace></white> seconds or the duty ends</yellow>"
     away-bar: "<yellow>Away from the console; duty ends in <white><grace></white> s</yellow>"
     back: "<prefix> <green>Back at the <white><zone></white> console</green>"
@@ -1952,6 +1955,18 @@ signaller:
       revoked: "<prefix> <yellow>Control zone <white><zone></white> was changed; the duty ends</yellow>"
       shutdown: "<prefix> <gray>The signaller feature stopped; off duty at <white><zone></white></gray>"
       exam: "<prefix> <gray>Exam over; off duty at <white><zone></white>, the zone is back to auto. Go on duty again to keep signalling</gray>"
+  workstation:
+    name: "<zone> · desk <seq>"
+    title: "Desk <seq>"
+    separator: ", "
+    more: "<stations> and <more> more"
+    offer: "<prefix> <white><aqua><zone></aqua> is staffed by <white><signaller></white>. You can take: <yellow><stations></yellow> (about <white><share></white>% of the zone's work)</white> <click:run_command:'/fta signal on'><hover:show_text:'<gray>Click to run:</gray> <white>/fta signal on</white>'><green>[Go on duty]</green></hover></click>"
+    assigned: "<prefix> <green>You staff <aqua><zone></aqua>: <white><stations></white>.</green> <gray>Trains coming in from the wider zone need your route; when you go off duty these stations return to it</gray>"
+    returned: "<prefix> <gray><white><stations></white> returned to the wider zone</gray>"
+    taken: "<prefix> <yellow>This desk is in use by <white><signaller></white>; please use another desk</yellow>"
+    none-left: "<prefix> <yellow>No stations of <white><zone></white> are left to split off</yellow>"
+    exam: "<prefix> <yellow>Someone in <white><zone></white> is taking an exam or practising; desks are not assigned now</yellow>"
+    parent-left: "<prefix> <gray>The signaller of <white><zone></white> went off duty; the rest of the zone is automatic now and your stations stay with you</gray>"
   call:
     unanswered: "<prefix> <yellow>The <white><zone></white> signal box did not answer the call</yellow>"
     caller:
@@ -1965,9 +1980,16 @@ signaller:
     incoming-obstruction-bar: "<gold>Train <white><train></white> (<caller>) calling: something on the line</gold>"
     incoming-general: "<prefix> <gold>Train <white><train></white> (<white><caller></white>) is calling the signal box</gold> <gray>click the call badge on the console to reply</gray>"
     incoming-general-bar: "<gold>Train <white><train></white> (<caller>) calling the signal box</gold>"
-    wrong-signal: "<prefix> <yellow>The reply did not fit: <white><train></white> reported waiting at the signal; reply \"Route is being set\" (and set it) or \"Train ahead, please wait\"</yellow>"
+    incoming-query: "<prefix> <gold>Train <white><train></white> (<white><caller></white>) calling the signal box: stopped and waiting, asking what is ahead</gold> <gray>Click the call badge; if it is held or a train is ahead, reply \"Train ahead, please wait\"</gray>"
+    incoming-query-bar: "<gold>Train <white><train></white> (<caller>) asking: stopped and waiting</gold>"
+    incoming-report: "<prefix> <gold>Train <white><train></white> (<white><caller></white>) reporting: stopped at <white><station></white> track <white><track></white></gold> <gray>Click the call badge and reply \"Received\"</gray>"
+    incoming-report-bar: "<gold>Train <white><train></white> (<caller>) reporting: stopped at <station> track <track></gold>"
+    wrong-signal: "<prefix> <yellow>The reply did not fit: <white><train></white> is waiting at the signal. If the way ahead in the zone is clear, reply \"Route is being set\" and set it; if a train is ahead, reply \"Train ahead, please wait\"</yellow>"
+    unfulfilled: "<prefix> <yellow>You told <white><train></white> \"Route is being set\" but set no route within 20 seconds; counted as a wrong reply</yellow>"
     wrong-doors: "<prefix> <yellow>The reply did not fit: <white><train></white> reported a door fault; reply \"Acknowledged\"</yellow>"
     wrong-obstruction: "<prefix> <yellow>The reply did not fit: <white><train></white> reported something on the line; reply \"Proceed at caution speed\"</yellow>"
+    wrong-query: "<prefix> <yellow>The reply did not fit: <white><train></white> is stopped and asking what is ahead. If it is held or a train is ahead, reply \"Train ahead, please wait\"; if the way is clear, reply \"Route is being set\" and set it</yellow>"
+    wrong-report: "<prefix> <yellow>The reply did not fit: <white><train></white> reported it has stopped; reply \"Received\"</yellow>"
   # Passive alerts while on duty (chat, action bar and a chime)
   alert:
     waiting: "<prefix> <gold>Train <white><train></white> has waited <white><seconds></white> s at the <white><zone></white> entry</gold> <gray>It will be auto-routed when the time limit is reached</gray>"
@@ -2089,6 +2111,8 @@ pids:
         doors: "door fault"
         obstruction: "line issue"
         general: "contact"
+        query: "query"
+        report: "report"
       # Train list column headers
       header:
         train: "Train"
@@ -2109,6 +2133,7 @@ pids:
       skipping: "<status> · skip <station>"
       # Area handed to a staffed nested zone; <zone> is its name, <name> its signaller
       delegated: "<zone> · station control (<name>)"
+      delegated-workstation: "Desk <seq> · <zone> (<name>)"
       on-time: "On time"
       no-trains: "No trains in the control zone"
       # Buttons: primary 12 px over secondary 10 px, 100 px wide

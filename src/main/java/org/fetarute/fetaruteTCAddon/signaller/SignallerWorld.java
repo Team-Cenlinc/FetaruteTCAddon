@@ -12,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerTrainDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 
 /** 信号员模块看到的外部世界：控制区目录、调度图、占用、列车进度与玩家位置。只读（除了 {@link #reevaluate} 与改停股道），只在主线程调用； 测试用假的实现。 */
@@ -54,6 +55,31 @@ interface SignallerWorld {
 
   /** 在线玩家此刻的位置与状态；不在线时为空。 */
   Optional<PlayerSpot> player(UUID player);
+
+  /** 这个运营商名下的全部控制区（认出嵌在大区里、管理员划好的小区用）。 */
+  default List<Zone> zones(String operator) {
+    return List.of();
+  }
+
+  /** 车上有真人驾驶员或车掌：值守中的模拟事件不借这样的车出题，免得真人收到莫名其妙的对话。 */
+  default boolean crewed(String trainName) {
+    return false;
+  }
+
+  /** 已发布的时刻表（中心工位估工作量用，见 {@link ZoneWorkload}）；时刻表功能没开时为空。 */
+  default List<Timetable> timetables() {
+    return List.of();
+  }
+
+  /** 车站的站名；查不到时为空。 */
+  default Optional<String> stationName(String operator, String code) {
+    return Optional.empty();
+  }
+
+  /** 调度图节点所在车站的站名；不是车站节点或查不到时为空。 */
+  default Optional<String> stationNameOfNode(String nodeId) {
+    return Optional.empty();
+  }
 
   /**
    * 控制区。

@@ -14,6 +14,7 @@ import java.util.function.Supplier;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -25,6 +26,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatform
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerTrainDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
@@ -69,6 +71,24 @@ final class DispatcherSignallerWorld implements SignallerWorld {
                     found.members().stream()
                         .map(member -> new YardArea.Member(member.kind(), member.code()))
                         .toList()));
+  }
+
+  @Override
+  public List<Zone> zones(String operator) {
+    if (operator == null) {
+      return List.of();
+    }
+    return plugin.getControlZoneDirectory().listByOperator(operator).stream()
+        .map(
+            found ->
+                new Zone(
+                    found.operatorCode(),
+                    found.code(),
+                    found.zone().name(),
+                    found.members().stream()
+                        .map(member -> new YardArea.Member(member.kind(), member.code()))
+                        .toList()))
+        .toList();
   }
 
   @Override
@@ -179,6 +199,48 @@ final class DispatcherSignallerWorld implements SignallerWorld {
   @Override
   public SignallerTrainDesk trains() {
     return trains;
+  }
+
+  @Override
+  public boolean crewed(String trainName) {
+    var drive = plugin.getDriveSessionManager();
+    if (drive == null || trainName == null) {
+      return false;
+    }
+    return drive.driverSide().driverOf(trainName).isPresent()
+        || drive.guards().flatMap(guards -> guards.guardOfTrainName(trainName)).isPresent();
+  }
+
+  @Override
+  public List<Timetable> timetables() {
+    return plugin
+        .getTimetableService()
+        .map(TimetableService::publishedTimetables)
+        .orElse(List.of());
+  }
+
+  @Override
+  public Optional<String> stationName(String operator, String code) {
+    if (operator == null || code == null) {
+      return Optional.empty();
+    }
+    return plugin
+        .getStationDirectory()
+        .flatMap(
+            directory ->
+                directory.snapshot().stations().stream()
+                    .filter(entry -> entry.operator().code().equalsIgnoreCase(operator))
+                    .filter(entry -> entry.code().equalsIgnoreCase(code))
+                    .findFirst())
+        .map(StationDirectory.StationEntry::name);
+  }
+
+  @Override
+  public Optional<String> stationNameOfNode(String nodeId) {
+    return plugin
+        .getStationDirectory()
+        .flatMap(directory -> directory.snapshot().stationOfNode(nodeId))
+        .map(entry -> entry.station().name());
   }
 
   @Override

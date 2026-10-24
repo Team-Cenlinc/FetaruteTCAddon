@@ -247,6 +247,24 @@ public final class YardFixtures {
         nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
   }
 
+  /** 一条东西向的直线上三个站：ABC 1 道 ─ 区间点 IB（ABC→DEF）─ DEF 1 道 ─ 区间点 IC（DEF→GHI）─ GHI 1 道。 */
+  public static SimpleRailGraph corridorOfThree() {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, IB, NodeType.WAYPOINT, 100, 0, false);
+    node(nodes, Q1, NodeType.STATION, 200, 0, false);
+    node(nodes, IC, NodeType.WAYPOINT, 300, 0, false);
+    node(nodes, G1, NodeType.STATION, 400, 0, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, IB, straight(0, 100, 0), false);
+    edge(edges, footprints, Set.of(), IB, Q1, straight(100, 200, 0), false);
+    edge(edges, footprints, Set.of(), Q1, IC, straight(200, 300, 0), false);
+    edge(edges, footprints, Set.of(), IC, G1, straight(300, 400, 0), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
   public static final NodeId TO_XYZ = NodeId.of("SURC:ABC:XYZ:1:01");
   public static final NodeId TO_XYZ_FAR = NodeId.of("SURC:ABC:XYZ:1:02");
   public static final NodeId DEF_TO_XYZ = NodeId.of("SURC:DEF:XYZ:1:01");

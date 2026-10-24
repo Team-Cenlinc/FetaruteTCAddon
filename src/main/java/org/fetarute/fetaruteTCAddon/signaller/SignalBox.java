@@ -46,6 +46,9 @@ final class SignalBox {
   /** 选中的车不再跟这座楼有关（出了区、不在列车表里）的起始时刻；还在时为空。 */
   Instant selectedMissingSince;
 
+  /** 下一次出模拟事件的时刻（见 {@link SignallerEvents}）；上岗后第一拍定下，下岗清掉。 */
+  Instant nextEventAt;
+
   /** 上一次点控制台的时刻：按住右键时客户端会连发，紧跟着上一下的点击不算（见 {@link SignallerService#HELD_REPEAT}）。 */
   Instant lastClick;
 
@@ -70,6 +73,9 @@ final class SignalBox {
 
   /** 已确认取消、正在倒计时的车（车上有人，先插播停运再删）：列车键 → 倒计时。 */
   final Map<String, PendingCancel> cancelling = new LinkedHashMap<>();
+
+  /** 回了“进路正在排列”、还没兑现的呼叫：列车键 → 那条呼叫与兑现期限（见 {@link SignallerService#PROMISE}）。 */
+  final Map<String, Promise> promises = new LinkedHashMap<>();
 
   /** 待回复的呼叫，先到先回。 */
   final Deque<Call> calls = new ArrayDeque<>();
@@ -118,6 +124,7 @@ final class SignalBox {
     platformChoices.clear();
     selected = null;
     selectedMissingSince = null;
+    nextEventAt = null;
     lastClick = null;
     replying = false;
     approachLocks.clear();
@@ -266,6 +273,14 @@ final class SignalBox {
   record PendingCancel(String trainName, Instant due) {}
 
   /**
+   * 回了“进路正在排列”的呼叫：期限内要亲手把进路排出去。
+   *
+   * @param call 那条呼叫
+   * @param due 兑现期限
+   */
+  record Promise(Call call, Instant due) {}
+
+  /**
    * 乘务员（驾驶员或车掌）的呼叫。
    *
    * @param trainName 列车名
@@ -274,7 +289,9 @@ final class SignalBox {
    * @param role 驾驶员或车掌（模拟呼叫按驾驶员）
    * @param since 呼叫时刻
    * @param reason 原因
-   * @param drill 是模拟呼叫（操作许可证的练习与考试）：回复与漏接不发给任何乘务员
+   * @param drill 是模拟呼叫（操作许可证的练习与考试，或值守中的模拟事件）：回复与漏接不发给任何乘务员
+   * @param sim 是值守中的模拟事件（{@link SignallerEvents}）：对错另记，不混进真呼叫的计数
+   * @param values 来电提醒另带的占位符（报告停妥的车站与股道）
    */
   record Call(
       String trainName,
@@ -283,21 +300,54 @@ final class SignalBox {
       CallerRole role,
       Instant since,
       CallReason reason,
-      boolean drill) {
+      boolean drill,
+      boolean sim,
+      Map<String, String> values) {
     Call {
       callerName = callerName == null ? "" : callerName;
       role = role == null ? CallerRole.DRIVER : role;
       reason = reason == null ? CallReason.GENERAL : reason;
+      values = values == null ? Map.of() : Map.copyOf(values);
+    }
+
+    /** 乘务员的呼叫，或练习与考试的模拟呼叫。 */
+    Call(
+        String trainName,
+        UUID caller,
+        String callerName,
+        CallerRole role,
+        Instant since,
+        CallReason reason,
+        boolean drill) {
+      this(trainName, caller, callerName, role, since, reason, drill, false, Map.of());
     }
 
     /** 列车改名后的这条呼叫。 */
     Call renamed(String trainName) {
-      return new Call(trainName, caller, callerName, role, since, reason, drill);
+      return new Call(trainName, caller, callerName, role, since, reason, drill, sim, values);
     }
 
     /** 换上新写明的原因（排队位置与呼叫时刻不变）。 */
     Call withReason(CallReason reason) {
-      return new Call(trainName, caller, callerName, role, since, reason, drill);
+      return new Call(trainName, caller, callerName, role, since, reason, drill, sim, values);
+    }
+
+    /** 从这一刻起重新计时。 */
+    Call restartedAt(Instant now) {
+      return new Call(trainName, caller, callerName, role, now, reason, drill, sim, values);
+    }
+  }
+
+  /**
+   * 排在最前的呼叫走了（回复、漏接或撤掉）以后调用：轮到的若是模拟呼叫，从此刻起计时。真呼叫排在模拟呼叫前面，信号员先回真人是对的，模拟呼叫不该因此超时。
+   *
+   * @param before 走之前排在最前的呼叫；队列空时为 {@code null}
+   */
+  void restartSimHead(Call before, Instant now) {
+    Call head = calls.peekFirst();
+    if (head != null && head != before && head.sim() && head.since().isBefore(now)) {
+      calls.pollFirst();
+      calls.addFirst(head.restartedAt(now));
     }
   }
 
@@ -330,6 +380,9 @@ final class SignalBox {
     final String playerName;
     final Instant start;
     ConsoleSpot console;
+
+    /** 上岗时点的那块中心工位（屏幕）；不是在工位上岗时为空。工位据此改画这个人的区，一块工位只容一人。 */
+    UUID screen;
 
     /** 离开控制台范围的起始时刻；在范围内时为空。 */
     Instant awaySince;
@@ -370,6 +423,13 @@ final class SignalBox {
 
     /** 令越站的次数。 */
     int skipsOrdered;
+
+    /** 值守中的模拟事件答对、答错、超时的次数（不混进真呼叫的计数）。 */
+    int simRight;
+
+    int simWrong;
+
+    int simMissed;
 
     Duty(UUID player, String playerName, Instant start, ConsoleSpot console) {
       this.player = player;
