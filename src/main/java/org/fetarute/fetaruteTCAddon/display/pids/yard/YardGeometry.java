@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.display.pids.yard;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -25,6 +26,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorDirection;
 
 /**
@@ -36,18 +38,22 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorDirect
  *       （东西走向的站东在右、北在上，南北走向的南在右、东在上），弯道与几个车站之间的拐弯都拉直；分叉岔出去的各股各用自己的脊线定里程（接着分叉处）与上下，
  *       和来路垂直的支线上的车站照样分得出股道上下与开门方向，各股整体按实地位置一上一下、不互相穿插。
  *       其余的链从接在已排好节点上的那一点起、顺着离开的方向排，按垂足定先后；垂足挪不动（斜着岔出去的支线）或挪得比轨道长得多（和脊线几乎垂直的库线）时
- *       改按轨道长度接着排；经线路分叉接得上的链先接。两头都接在已排好的线上、从一头排出去会把另一头拉开 {@value #BRIDGE_STRETCH_BLOCKS}
+ *       改按轨道长度接着排，之后与脊线平行的区间再逐段收回到垂足上（复线的两条不因一段弯道整条错开）；经线路分叉接得上的链先接。两头都接在已排好的线上、从一头排出去会把另一头拉开
+ *       {@value #BRIDGE_STRETCH_BLOCKS}
  *       格以上的链（三角线的联络线、迂回线）改在两头之间排：两头一路朝一个方向时途经车站的站台与咽喉对齐本站、其余按轨道长度均摊；两头离开的走向相反（U 形，
  *       例如联络线从两站靠分叉的一头出站）时按各点的垂足排成两段、在折返点断开成两行，站台留在本站，联络线从站台靠分叉的一头伸出去再拐过去，
  *       不从站台上横穿。互不相连的几片轨道各取各的脊线，从最长的一片起，依次按各自脊线中点在离它最近、已经摆好的那片脊线上的位置摆放。
  *       相邻两处的距离按平方根压缩，长直线段缩短、道岔密集的咽喉相对拉开，并保证每段跨行的区间有足够的横向距离画成 45°；链中间只连两段直股的经过点（区间点、咽喉点）
  *       不单独占位置，按里程插在前后两点之间。
- *   <li>行：道岔看各条区间离开它的走向，最接近一条直线的两条是直股，另一条是侧股，从道岔处拐出去；两条区间朝同一侧离开的节点没有直股。 线路分叉不分主次：相隔不超过 {@value
- *       #JUNCTION_GAP_BLOCKS} 格的几组道岔并成一群，往外各股沿线最先到的车站或出口有三处以上不同时，
- *       来路那一行在群里结束，岔出去的各股（哪怕有一股在实地是直着走的）都在群外各起一行、从分叉处朝同一方向斜着分开，画成 Y 形。直股连成的一条链整条占一行，
+ *   <li>行：道岔看各条区间离开它的走向，最接近一条直线的两条是直股，另一条是侧股，从道岔处拐出去；两条区间朝同一侧离开的节点没有直股。
+ *       同一区间相邻两个区间点之间经过的道岔，按这条区间连成直股（几何上分不出时正线照线路走）。线路分叉不分主次：相隔不超过 {@value #JUNCTION_GAP_BLOCKS}
+ *       格的几组道岔并成一群，往外各股按行车方向（不在道岔处折返）最先到的车站、车库或出口有三处以上不同时，
+ *       来路那一行在群里结束，岔出去的各股（哪怕有一股在实地是直着走的）都在群外各起一行、从分叉处朝同一方向斜着分开，画成 Y 形；
+ *       只是来路在区内、另外只有一处通往区内、其余是出口时不算分叉，两处之间经群里的道岔连成直股（接不上时仍算分叉），出口从旁边岔出。直股连成的一条链整条占一行，
  *       几个车站之间的同一条正线因此画成一条直线；落在同一条股道延长线上（横向偏差不到 {@value #SAME_ROW_BLOCKS} 格）的站台股道并为一行，分叉岔出去的链除外。
  *       各行按横向位置从上到下压进尽量少的层：横向范围不重叠的行共用一层，首尾相接的两行（各至少 {@value #ROW_SHARE_BLOCKS}
- *       格长）接在同一层；接上后画出的水平线与别的区间重叠时，这几行改为不接、重排。层距最多 {@value #ROW_GAP} 像素，层多要压缩层距时上下各留出一块侧式站台的位置。
+ *       格长）接在同一层；接上后画出的水平线与别的区间重叠时，这几行改为不接、重排。没连着上面哪一行的行再往下压到紧挨着下面与它重叠的一行。层距最多 {@value #ROW_GAP}
+ *       像素，层多要压缩层距时上下各留出一块侧式站台的位置。
  *   <li>区间：两端同层画一条水平线；不同层画水平线加一段 45° 斜线，斜线贴着分出这条侧股的道岔，判断不出时放在中间；水平部分不顺着同一层别的股道走，
  *       也不和前面已排好的区间的水平部分叠在一起，几种摆法都不行或横向距离不够 45° 时直接连斜线。
  *   <li>车库：照画库线的车库记下库线与分岔道岔所占的范围和各条库线的尽头（画法加虚线框、库名、库号与车挡）；库线超过 {@value #MAX_DEPOT_TRACKS}
@@ -80,6 +86,12 @@ public final class YardGeometry {
 
   /** 判断道岔直股、侧股时，沿每条区间看多远（格）：道岔叉开的角度小，太近分不出来。 */
   static final double BRANCH_PROBE_BLOCKS = 16.0;
+
+  /** 同一去向的出口末端彼此横竖都在这么多像素以内时只标一次去向（从同一片咽喉岔出的另见 Layout#exitPieces）。 */
+  static final int EXIT_LABEL_REACH = 3 * ROW_GAP;
+
+  /** 上一个节点的里程与垂足错开、本段与脊线平行时往垂足收，但这一步至少要走这么多倍区间长（不挤到上一个节点上）。 */
+  static final double MIN_CATCH_UP = 0.2;
 
   /** 判断走向时略过道岔近旁这么多格（道岔那一格各股共用）。 */
   static final double BRANCH_SKIP_BLOCKS = 2.0;
@@ -552,7 +564,7 @@ public final class YardGeometry {
     List<Link> links = new ArrayList<>();
     boolean partial = false;
     for (EdgeId edge : area.edges().stream().sorted().toList()) {
-      Set<RailFootprintCell> cells = footprints.getOrDefault(edge, Set.of());
+      Set<RailFootprintCell> cells = sortedCells(footprints.getOrDefault(edge, Set.of()));
       partial |= cells.isEmpty();
       if (spots.containsKey(edge.a().value()) && spots.containsKey(edge.b().value())) {
         links.add(new Link(edge, edge.a().value(), edge.b().value(), cells));
@@ -565,7 +577,7 @@ public final class YardGeometry {
         continue;
       }
       Set<RailFootprintCell> near = new LinkedHashSet<>();
-      for (RailFootprintCell cell : footprints.getOrDefault(exit.edge(), Set.of())) {
+      for (RailFootprintCell cell : sortedCells(footprints.getOrDefault(exit.edge(), Set.of()))) {
         if (distance(center(cell), inner) <= STUB_BLOCKS) {
           near.add(cell);
         }
@@ -625,9 +637,61 @@ public final class YardGeometry {
                 }
               });
     }
-    exitOf.keySet().forEach(key -> endOf.put(key, "X:" + key));
-    return new Layout(spots, links, rect, doors, railAt, area, throatOf, endOf)
+    // 出口按通往的车站算一处：复线的两条出口去同一站，咽喉不因此被当成线路分叉；认不出去向的各算各的
+    exitOf.forEach((key, exit) -> endOf.put(key, "X:" + exit.towards().orElse(key)));
+    // 区间点（含出口外端那一个）在哪条区间上、第几个：排直股时按区间连起相邻的两个
+    Map<String, IntervalMark> intervals = new LinkedHashMap<>();
+    for (String key : spots.keySet()) {
+      YardArea.Exit exit = exitOf.get(key);
+      NodeId id = exit == null ? NodeId.of(key) : exit.outer();
+      graph
+          .findNode(id)
+          .filter(node -> node.type() != NodeType.SWITCHER)
+          .flatMap(RailNode::waypointMetadata)
+          .flatMap(IntervalMark::of)
+          .ifPresent(mark -> intervals.put(key, mark));
+    }
+    return new Layout(spots, links, rect, doors, railAt, area, throatOf, endOf, intervals)
         .build(area, exitOf, stationName, partial);
+  }
+
+  /**
+   * 区间点在区间上的位置。
+   *
+   * @param route 区间（运营商:起点:终点，大写）
+   * @param track 股道号
+   * @param sequence 序号
+   */
+  private record IntervalMark(String route, int track, int sequence) {
+
+    static Optional<IntervalMark> of(WaypointMetadata metadata) {
+      if (metadata.kind() != WaypointKind.INTERVAL || metadata.sequence().isEmpty()) {
+        return Optional.empty();
+      }
+      try {
+        int sequence = Integer.parseInt(metadata.sequence().get().trim());
+        String route =
+            (metadata.operator()
+                    + ":"
+                    + metadata.originStation()
+                    + ":"
+                    + metadata.destinationStation().orElse(""))
+                .toUpperCase(Locale.ROOT);
+        return Optional.of(new IntervalMark(route, metadata.trackNumber(), sequence));
+      } catch (NumberFormatException ex) {
+        return Optional.empty();
+      }
+    }
+  }
+
+  /** 轨道方块按坐标排好：调度图给的集合遍历次序每次启动都可能不同，按它求和、排序会在平局处翻来翻去，同一张图画出不一样的站场。排布里遍历方块一律经过这里。 */
+  private static Set<RailFootprintCell> sortedCells(Set<RailFootprintCell> cells) {
+    return Collections.unmodifiableSet(new LinkedHashSet<>(cells.stream().sorted().toList()));
+  }
+
+  /** 保持给定次序的不可变集合（{@link Set#copyOf} 的遍历次序每次启动都不同，排布不能用它）。 */
+  private static <T> Set<T> ordered(Collection<T> items) {
+    return Collections.unmodifiableSet(new LinkedHashSet<>(items));
   }
 
   /**
@@ -682,8 +746,15 @@ public final class YardGeometry {
     private final Map<String, String> throatOf;
     private final Map<String, Collapsed> collapsed;
     private final Map<String, String> endOf;
+    private final Map<String, IntervalMark> intervals;
     private final Map<Link, Double> lengths = new HashMap<>();
     private final Map<String, Junction> junctionOf = new HashMap<>();
+    // 各个分叉按找到的先后（遍历分叉一律用它，不用 junctionOf 的值集合）
+    private final List<Junction> junctions = new ArrayList<>();
+    // 按进路定下的直股，优先于按几何判的（先后见构造函数）
+    private final Map<String, Set<Link>> forcedThrough = new HashMap<>();
+    // 节点 → 量它的垂足用的那条脊线（分叉岔出去的各股各有一条）
+    private final Map<String, Frame> frameOf = new HashMap<>();
     // U 形的链在折返点断开成两行（见 turnBack）
     private final Set<Link> rowBreaks = new HashSet<>();
     // 断开处那条区间：折返在里程小的一侧（true）还是大的一侧，折返点，实地折返最远处的里程（见 turnExtents）
@@ -702,6 +773,7 @@ public final class YardGeometry {
      * @param area 站场
      * @param throatOf 车库咽喉节点 → 所属车库代码
      * @param endOf 节点 → 它属于的车站（{@code S:站码}）、车库（{@code D:库码}）或出口（{@code X:出口}），分叉判定用
+     * @param intervals 区间点（出口末端按它外端的区间点）→ 在区间上的位置
      */
     Layout(
         Map<String, Spot> spots,
@@ -711,7 +783,8 @@ public final class YardGeometry {
         Function<RailFootprintCell, Set<EdgeId>> railAt,
         YardArea area,
         Map<String, String> throatOf,
-        Map<String, String> endOf) {
+        Map<String, String> endOf,
+        Map<String, IntervalMark> intervals) {
       this.spots = spots;
       this.links = links;
       this.rect = rect;
@@ -720,22 +793,32 @@ public final class YardGeometry {
       this.area = area;
       this.throatOf = throatOf;
       this.endOf = new HashMap<>(endOf);
+      this.intervals = intervals;
       index();
       this.collapsed = collapse();
       index();
       this.collapsed.keySet().forEach(key -> this.endOf.put(key, "D:" + key));
+      // 直股按优先级定，后一级只补前一级没定的节点：
+      // 1. 道岔群里区内两处之间的进路（findJunctions 里的 routeThrough）；
+      // 2. 同一区间相邻两个区间点之间的进路（followIntervals，跳过分叉群与第 1 级定过的节点）；
+      // 3. 其余按道岔几何（throughLinks），分叉群里岔出去的各股不当直股
       findJunctions();
+      followIntervals();
       for (Spot spot : spots.values()) {
         Junction junction = junctionOf.get(spot.key());
         List<Link> mine = around.getOrDefault(spot.key(), List.of());
         // 分叉处岔出去的各股不当直股：来路连进群里，岔出去的各股在群外各起一行
         through.put(
             spot.key(),
-            throughLinks(
-                spot,
-                junction == null
-                    ? mine
-                    : mine.stream().filter(link -> !junction.branches().contains(link)).toList()));
+            forcedThrough.containsKey(spot.key())
+                ? forcedThrough.get(spot.key())
+                : throughLinks(
+                    spot,
+                    junction == null
+                        ? mine
+                        : mine.stream()
+                            .filter(link -> !junction.branches().contains(link))
+                            .toList()));
       }
       Map<String, String> component = components();
       Map<String, List<Chain>> byComponent = new LinkedHashMap<>();
@@ -766,7 +849,9 @@ public final class YardGeometry {
         for (Chain chain : part) {
           for (String key : chain.spots()) {
             Spot spot = spots.get(key);
-            Frame.Located at = branchFrames.getOrDefault(key, frame).locate(spot.x(), spot.z());
+            Frame local = branchFrames.getOrDefault(key, frame);
+            Frame.Located at = local.locate(spot.x(), spot.z());
+            frameOf.put(key, local);
             located.put(key, at);
             vOf.put(key, at.v());
           }
@@ -1359,7 +1444,7 @@ public final class YardGeometry {
     private Optional<Chain> stemOf(List<Chain> chains) {
       Set<Chain> mine = new HashSet<>(chains);
       Set<Chain> stems = new HashSet<>();
-      for (Junction junction : Set.copyOf(junctionOf.values())) {
+      for (Junction junction : junctions) {
         for (Link link : junction.stem()) {
           Chain chain = chainOf.get(outer(junction, link));
           if (mine.contains(chain)) {
@@ -1435,7 +1520,7 @@ public final class YardGeometry {
           stemOf(part)
               .flatMap(
                   stem ->
-                      Set.copyOf(junctionOf.values()).stream()
+                      junctions.stream()
                           .filter(
                               candidate ->
                                   candidate.stem().stream()
@@ -1576,17 +1661,28 @@ public final class YardGeometry {
     /**
      * 下一个节点：垂足朝前挪了半个到一个半区间长时取垂足（与脊线平行的股道与脊线对齐），否则按轨道长度接着排——垂足挪不动是斜着岔出去的支线，
      * 挪得比轨道还长很多是垂足落到了脊线的别处（例如和脊线几乎垂直的库线）。
+     *
+     * <p>上一个节点在弯道里按轨道长度排过、与它的垂足错开时，后面与脊线平行的区间（垂足自己朝前挪了半个到一个半区间长）逐段把这点落差收回来： 每段走的里程夹在 {@value
+     * #MIN_CATCH_UP} 到 {@value #MAX_PROJECTED_STEP} 倍区间长之间、尽量落到垂足上，
+     * 不把落差一路带下去（否则复线的另一条整条错开，两站之间的渡线被拉歪），也不往回退、不挤到上一个节点上。
      */
     private void next(String from, String to, Link link, double sign) {
       double before = uOf.get(from);
       double projected = located.get(to).u();
       double length = Math.max(1.0, trackLength(link));
       double moved = sign * (projected - before);
-      uOf.put(
-          to,
-          moved >= 0.5 * length && moved <= MAX_PROJECTED_STEP * length
-              ? projected
-              : before + sign * length);
+      // 与脊线平行与否只在两头量垂足用的是同一条脊线时才比（分叉处两头可能分属来路与支股两条脊线，两套里程不能相减）
+      boolean sameFrame = frameOf.get(from) == frameOf.get(to);
+      double parallel = sign * (projected - located.get(from).u());
+      double step;
+      if (moved >= 0.5 * length && moved <= MAX_PROJECTED_STEP * length) {
+        step = moved;
+      } else if (sameFrame && parallel >= 0.5 * length && parallel <= MAX_PROJECTED_STEP * length) {
+        step = Math.max(MIN_CATCH_UP * length, Math.min(MAX_PROJECTED_STEP * length, moved));
+      } else {
+        step = length;
+      }
+      uOf.put(to, before + sign * step);
     }
 
     /** 区间沿轨道的点：{@code from} 一头、按先后排好的轨道方块、另一头。没有方块时只有两头。 */
@@ -1625,7 +1721,7 @@ public final class YardGeometry {
       area.tracks().forEach(track -> platformKeys.add(track.node().value()));
       // 分叉岔出去的几行不与来路首尾相接成一层（画成 Y 形，几股平级）
       Set<Row> separate = new HashSet<>();
-      for (Junction junction : Set.copyOf(junctionOf.values())) {
+      for (Junction junction : junctions) {
         for (Link link : junction.branches()) {
           separate.add(rows.get(outer(junction, link)));
         }
@@ -1669,7 +1765,11 @@ public final class YardGeometry {
       }
       List<Platform> platforms = platforms(area, rows, points, spans, diagonals, stationName);
       int middle = rect.left() + rect.width() / 2;
-      Map<String, Label> exits = new LinkedHashMap<>();
+      // 同一去向的几条出口只标一次：挨在一起的（复线两条），或从同一片咽喉岔出的（几条去同一处的线从同一组道岔分出去）；
+      // 离得远、又不在同一片咽喉的（同一车站从两处出区）各标各的
+      Map<String, String> pieceOf = exitPieces(exitOf);
+      record Labelled(Label label, String piece) {}
+      List<Labelled> labelled = new ArrayList<>();
       exitOf.forEach(
           (key, exit) ->
               exit.towards()
@@ -1678,10 +1778,21 @@ public final class YardGeometry {
                         Point at = points.get(key);
                         String text = stationName.apply(code);
                         boolean right = at.x() > middle;
-                        exits.putIfAbsent(
-                            text + (right ? "|R" : "|L"),
-                            new Label(at, text, right, Optional.of(code)));
+                        String piece = pieceOf.get(key);
+                        boolean shown =
+                            labelled.stream()
+                                .anyMatch(
+                                    other ->
+                                        other.label().text().equals(text)
+                                            && ((other.label().alignRight() == right
+                                                    && near(other.label().at(), at))
+                                                || piece.equals(other.piece())));
+                        if (!shown) {
+                          labelled.add(
+                              new Labelled(new Label(at, text, right, Optional.of(code)), piece));
+                        }
                       }));
+      List<Label> exits = labelled.stream().map(Labelled::label).toList();
       List<Stub> stubs = new ArrayList<>();
       Map<String, Point> nodes = new HashMap<>();
       for (Link link : links) {
@@ -1700,16 +1811,51 @@ public final class YardGeometry {
       collapsed.forEach(
           (key, depot) -> depots.add(panel(key, depot, points, stationName, paths, cells)));
       return new YardGeometry(
-          paths,
-          platforms,
-          List.copyOf(exits.values()),
-          depots,
-          cells,
-          partial,
-          stubs,
-          nodes,
-          drawn,
-          along);
+          paths, platforms, List.copyOf(exits), depots, cells, partial, stubs, nodes, drawn, along);
+    }
+
+    private static boolean near(Point a, Point b) {
+      return Math.abs(a.x() - b.x()) <= EXIT_LABEL_REACH
+          && Math.abs(a.y() - b.y()) <= EXIT_LABEL_REACH;
+    }
+
+    /**
+     * 出口所在的咽喉分片：经道岔、区间点连着（不经车站、车库）的节点算一片，出口归到它在区内那一头所在的一片；几条出口通到区外同一个节点（例如一个区间点既接着站台端、
+     * 又接着站外的道岔）时也算一片。
+     *
+     * @return 出口末端的键 → 所在那一片的代表
+     */
+    private Map<String, String> exitPieces(Map<String, YardArea.Exit> exitOf) {
+      Map<String, String> parent = new HashMap<>();
+      for (String key : spots.keySet()) {
+        if (!endOf.containsKey(key)) {
+          parent.put(key, key);
+        }
+      }
+      for (Link link : links) {
+        if (parent.containsKey(link.a()) && parent.containsKey(link.b())) {
+          union(parent, link.a(), link.b());
+        }
+      }
+      exitOf.forEach(
+          (key, exit) -> {
+            String outer = "outer:" + exit.outer().value();
+            parent.putIfAbsent(outer, outer);
+            if (parent.containsKey(exit.inner().value())) {
+              union(parent, exit.inner().value(), outer);
+            }
+          });
+      Map<String, String> out = new HashMap<>();
+      exitOf.forEach((key, exit) -> out.put(key, root(parent, "outer:" + exit.outer().value())));
+      return out;
+    }
+
+    private static void union(Map<String, String> parent, String first, String second) {
+      String a = root(parent, first);
+      String b = root(parent, second);
+      if (!a.equals(b)) {
+        parent.put(a.compareTo(b) < 0 ? b : a, a.compareTo(b) < 0 ? a : b);
+      }
     }
 
     /** 照画库线的车库：库线、紧挨库线的库内咽喉点，以及有两条以上区间连进来的分岔道岔，按彼此相连分片，每片一个范围。 库名只写在库线最多的那片上（另几片名字为空）。 */
@@ -2162,37 +2308,95 @@ public final class YardGeometry {
     }
 
     /**
-     * 直股：只连两条区间的节点两条都是（两条朝同一边离开的 V 形除外）；只连一条的就是那一条；三条以上的取离开方向最接近一直线的两条。
+     * 直股：只连两条区间的节点两条都是（两条朝同一边离开的 V 形除外）；只连一条的就是那一条；三条以上的先看道岔所在的轨道方块：从相对两面接出去的两条就是直股
+     * （轨道只能从方块的四个面接出去，直股在道岔处就是直着过去的）；认不出各条从哪一面接出去、或相对两面的两条朝同一边离开（V 形，例如两条渡线汇到中间一段）时，
+     * 取离开方向最接近一直线的两条。
      *
-     * <p>离开方向取这条区间离节点 {@value #BRANCH_PROBE_BLOCKS} 格以内轨道方块的重心；没有方块时取另一头节点的方向。
+     * <p>离开方向取这条区间离节点 {@value #BRANCH_PROBE_BLOCKS} 格以内轨道方块的重心；没有方块时取另一头节点的方向。重心会被出了道岔就拐弯的正线带偏好几度，
+     * 缓的渡线与弯走的正线这样分不清，所以先看接出去的面。
      */
     private Set<Link> throughLinks(Spot spot, List<Link> mine) {
       if (mine.size() == 2) {
         // 两条区间朝同一边离开（V 形，道岔的第三条腿不在图上）：不算直股，否则这一行会折回来、线叠在一起
         double[] a = direction(spot, mine.get(0));
         double[] b = direction(spot, mine.get(1));
-        return a[0] * b[0] + a[1] * b[1] > 0 ? Set.of() : Set.copyOf(mine);
+        return a[0] * b[0] + a[1] * b[1] > 0 ? Set.of() : ordered(mine);
       }
       if (mine.size() < 2) {
-        return Set.copyOf(mine);
+        return ordered(mine);
       }
       List<double[]> directions = mine.stream().map(link -> direction(spot, link)).toList();
-      int bestI = 0;
-      int bestJ = 1;
+      int[] faces = mine.stream().mapToInt(link -> face(spot, link)).toArray();
+      int bestI = -1;
+      int bestJ = -1;
       double best = Double.MAX_VALUE;
-      for (int i = 0; i < mine.size(); i++) {
-        for (int j = i + 1; j < mine.size(); j++) {
-          double dot =
-              directions.get(i)[0] * directions.get(j)[0]
-                  + directions.get(i)[1] * directions.get(j)[1];
-          if (dot < best) {
-            best = dot;
-            bestI = i;
-            bestJ = j;
+      for (boolean byFace : new boolean[] {true, false}) {
+        for (int i = 0; i < mine.size(); i++) {
+          for (int j = i + 1; j < mine.size(); j++) {
+            double dot =
+                directions.get(i)[0] * directions.get(j)[0]
+                    + directions.get(i)[1] * directions.get(j)[1];
+            boolean opposed = faces[i] >= 0 && faces[j] >= 0 && (faces[i] ^ 1) == faces[j];
+            if (byFace && (!opposed || dot >= 0.0)) {
+              continue;
+            }
+            if (dot < best) {
+              best = dot;
+              bestI = i;
+              bestJ = j;
+            }
           }
         }
+        if (bestI >= 0) {
+          break;
+        }
       }
-      return Set.of(mine.get(bestI), mine.get(bestJ));
+      return ordered(List.of(mine.get(bestI), mine.get(bestJ)));
+    }
+
+    /** 轨道方块的四个面：东、西、南、北（相对的两面下标只差最低位）。 */
+    private static final int[][] FACES = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+    /**
+     * 区间从节点所在的轨道方块哪一面接出去（{@link #FACES} 的下标）：那一面的邻格是它的，并且从邻格还接着往外有它的格子。道岔周围的几格常被各条区间都带上，
+     * 只看邻格分不出是哪一条的；认不出、或不止一面像时为 -1。
+     */
+    private static int face(Spot spot, Link link) {
+      int x = (int) Math.floor(spot.x());
+      int z = (int) Math.floor(spot.z());
+      Set<Long> columns = new HashSet<>();
+      for (RailFootprintCell cell : link.cells()) {
+        columns.add(column(cell.x(), cell.z()));
+      }
+      int found = -1;
+      for (int k = 0; k < FACES.length; k++) {
+        int nx = x + FACES[k][0];
+        int nz = z + FACES[k][1];
+        if (!columns.contains(column(nx, nz))) {
+          continue;
+        }
+        boolean onward = false;
+        for (int[] step : FACES) {
+          int ox = nx + step[0];
+          int oz = nz + step[1];
+          // 往外接着的格子：不是道岔本身，也不是道岔的另一个邻格
+          if (Math.abs(ox - x) + Math.abs(oz - z) >= 2 && columns.contains(column(ox, oz))) {
+            onward = true;
+          }
+        }
+        if (onward) {
+          if (found >= 0) {
+            return -1;
+          }
+          found = k;
+        }
+      }
+      return found;
+    }
+
+    /** 轨道方块所在的一列（不分高低，坡道上的邻格也认）。 */
+    private static long column(int x, int z) {
+      return ((long) x << 32) ^ (z & 0xffffffffL);
     }
 
     /**
@@ -2214,7 +2418,7 @@ public final class YardGeometry {
     /**
      * 找线路分叉：不属于车站、车库、出口而连着三条以上区间的节点，彼此之间的区间不长于 {@value #JUNCTION_GAP_BLOCKS}
      * 格的并成一群（复线分叉常由几组道岔组成）；这一群往外伸出的区间沿线最先到达的车站或出口有三处以上不同（去车库的不算）就是分叉。
-     * 通往同一车站不同股道的咽喉、上下行之间的渡线往外只到两处，不算。
+     * 通往同一车站不同股道的咽喉、上下行之间的渡线往外只到两处，不算；出口按通往的车站算，复线的两条出口去同一站只算一处。
      *
      * <p>分叉的几股不分主次：来路连进群里，群内的道岔顺着来路排；岔出去的各股都在群外起新行、各占一层，从群里朝同一方向分开，画成 Y 形，不把哪一股当成来路的直线延续。
      */
@@ -2281,51 +2485,283 @@ public final class YardGeometry {
             stemEnd = entry.getKey();
           }
         }
-        Set<Link> stem = Set.copyOf(legs.get(stemEnd));
-        Set<Link> branches = new HashSet<>();
+        // 来路在区内、往外只有另一股通往区内、其余都是出口：不是线路分叉，是正线旁岔出区外的支线。正线经群里的道岔直着接过去（见 routeThrough），
+        // 出口照常从旁边岔出。来路本身是出口（区内只有岔出去的两股）、或两处之间接不上进路时，照样是分叉
+        List<String> inZone = legs.keySet().stream().filter(end -> !end.startsWith("X:")).toList();
+        if (inZone.size() == 2
+            && inZone.contains(stemEnd)
+            && routeThrough(group, legs.get(inZone.get(0)), legs.get(inZone.get(1)), inner)) {
+          continue;
+        }
+        Set<Link> stem = ordered(legs.get(stemEnd));
+        List<Link> branches = new ArrayList<>();
         List<Set<Link>> branchGroups = new ArrayList<>();
         for (Map.Entry<String, List<Link>> entry : legs.entrySet()) {
           if (!entry.getKey().equals(stemEnd)) {
             branches.addAll(entry.getValue());
-            branchGroups.add(Set.copyOf(entry.getValue()));
+            branchGroups.add(ordered(entry.getValue()));
           }
         }
         Junction junction =
-            new Junction(Set.copyOf(group), stem, Set.copyOf(branches), List.copyOf(branchGroups));
+            new Junction(ordered(group), stem, ordered(branches), List.copyOf(branchGroups));
+        junctions.add(junction);
         group.forEach(key -> junctionOf.put(key, junction));
       }
     }
 
-    /** 从群里的 {@code from} 经 {@code first} 往外走（不再进这一群），沿轨道最近的车站、车库或出口。 */
-    private Optional<String> nearestEnd(Set<String> group, String from, Link first) {
-      record Visit(String key, double distance) {}
-      PriorityQueue<Visit> queue = new PriorityQueue<>(Comparator.comparingDouble(Visit::distance));
-      Map<String, Double> best = new HashMap<>();
-      String start = first.other(from);
-      best.put(start, length(first));
-      queue.add(new Visit(start, length(first)));
-      while (!queue.isEmpty()) {
-        Visit visit = queue.poll();
-        if (visit.distance() > best.get(visit.key())) {
+    /**
+     * 区间点的名字写着区间（运营商:起点:终点）、股道与序号：同一区间相邻两个区间点（序号不必连续：同一股道上下一个有的，或整条区间里下一个有的）之间经过的道岔，按这条区间连成直股。
+     * 道岔两股与来路的夹角只差一两度、几何上分不出直股侧股时，正线因此照线路画成直线；同一区间中途换股道（序号接着数、股道号变了）照样接上。
+     * 两两配对时先配同一股道的，再按路程从短到长；进路按行车方向走（不在道岔处折返）、只经道岔一类节点，各条进路不共用节点，经过分叉群或已定下直股的节点的不用。
+     * 出口外端的区间点也算：出口因此接在它进站的那一行上。
+     */
+    private void followIntervals() {
+      record Candidate(
+          String from, String to, List<Link> links, boolean sameTrack, double length) {}
+      // 区间 → 序号 → 区间点；区间 + 股道 → 序号 → 区间点（同一股道上下一个有的序号）
+      Map<String, java.util.TreeMap<Integer, List<String>>> byRoute = new LinkedHashMap<>();
+      Map<String, java.util.TreeMap<Integer, List<String>>> byTrack = new LinkedHashMap<>();
+      intervals.forEach(
+          (key, mark) -> {
+            byRoute
+                .computeIfAbsent(mark.route(), ignored -> new java.util.TreeMap<>())
+                .computeIfAbsent(mark.sequence(), ignored -> new ArrayList<>())
+                .add(key);
+            byTrack
+                .computeIfAbsent(
+                    mark.route() + "#" + mark.track(), ignored -> new java.util.TreeMap<>())
+                .computeIfAbsent(mark.sequence(), ignored -> new ArrayList<>())
+                .add(key);
+          });
+      List<Candidate> candidates = new ArrayList<>();
+      intervals.forEach(
+          (from, mark) -> {
+            // 下一个：同一股道上序号最近的，和整条区间里序号最近的（中途换股道时序号接着数）
+            Set<String> targets = new LinkedHashSet<>();
+            Optional.ofNullable(
+                    byTrack.get(mark.route() + "#" + mark.track()).higherEntry(mark.sequence()))
+                .ifPresent(entry -> targets.addAll(entry.getValue()));
+            Optional.ofNullable(byRoute.get(mark.route()).higherEntry(mark.sequence()))
+                .ifPresent(entry -> targets.addAll(entry.getValue()));
+            if (targets.isEmpty()) {
+              return;
+            }
+            // 只经道岔一类节点（不是车站、车库、出口或区间点）
+            Map<String, Reach> reached =
+                walk(
+                    from,
+                    null,
+                    key -> true,
+                    key -> !endOf.containsKey(key) && !intervals.containsKey(key));
+            for (String to : targets) {
+              Reach reach = reached.get(to);
+              if (reach != null && !reach.links().isEmpty()) {
+                candidates.add(
+                    new Candidate(
+                        from,
+                        to,
+                        reach.links(),
+                        mark.track() == intervals.get(to).track(),
+                        reach.distance()));
+              }
+            }
+          });
+      candidates.sort(
+          Comparator.comparing((Candidate c) -> !c.sameTrack())
+              .thenComparingDouble(Candidate::length)
+              .thenComparing(Candidate::from)
+              .thenComparing(Candidate::to));
+      Set<String> usedFrom = new HashSet<>();
+      Set<String> usedTo = new HashSet<>();
+      Set<String> usedNodes = new HashSet<>();
+      Map<String, List<Link>> continuing = new LinkedHashMap<>();
+      for (Candidate candidate : candidates) {
+        if (usedFrom.contains(candidate.from()) || usedTo.contains(candidate.to())) {
           continue;
         }
-        String end = endOf.get(visit.key());
-        if (end != null) {
-          return Optional.of(end);
+        List<String> along = nodesAlong(candidate.from(), candidate.links());
+        List<String> between = along.subList(1, along.size() - 1);
+        if (between.stream()
+            .anyMatch(
+                key ->
+                    usedNodes.contains(key)
+                        || junctionOf.containsKey(key)
+                        || forcedThrough.containsKey(key))) {
+          continue;
         }
-        for (Link link : around.getOrDefault(visit.key(), List.of())) {
-          String next = link.other(visit.key());
-          if (group.contains(next)) {
+        usedFrom.add(candidate.from());
+        usedTo.add(candidate.to());
+        usedNodes.addAll(between);
+        continuing
+            .computeIfAbsent(candidate.from(), ignored -> new ArrayList<>())
+            .add(candidate.links().get(0));
+        continuing
+            .computeIfAbsent(candidate.to(), ignored -> new ArrayList<>())
+            .add(candidate.links().get(candidate.links().size() - 1));
+        for (int i = 0; i < between.size(); i++) {
+          continuing.put(
+              between.get(i), List.of(candidate.links().get(i), candidate.links().get(i + 1)));
+        }
+      }
+      continuing.forEach(
+          (key, both) -> {
+            if (both.size() == 2
+                && both.get(0) != both.get(1)
+                && !junctionOf.containsKey(key)
+                && !forcedThrough.containsKey(key)
+                && !turnsBack(key, both.get(0), both.get(1))) {
+              forcedThrough.put(key, ordered(both));
+            }
+          });
+    }
+
+    /**
+     * 道岔群往外只有两处通往区内（其余是出口）时，把两处的各股经群内的道岔两两接起来，接上的进路在途经各节点上定为直股（不按道岔的几何走向）：
+     * 实地往出口一侧是直着走、往区内一侧是拐过去时，正线也照样连成一条链、画成一条直线，出口从旁边岔出。进路按行车方向走（不在道岔处折返）， 两两配对时先取群内路程最短的，各条进路不共用节点。
+     * 一股走到另一处某一股的外端时只认最短的那条：经别的股更近（例如这股绕远路汇进来）就不接，那股的道岔交给几何定直股。
+     *
+     * @param group 群里的节点
+     * @param from 一处的各股
+     * @param to 另一处的各股
+     * @param inner 往外伸出的区间 → 它在群里的那一头
+     * @return 接上了至少一条进路
+     */
+    private boolean routeThrough(
+        Set<String> group, List<Link> from, List<Link> to, Map<Link, String> inner) {
+      record Candidate(List<String> nodes, List<Link> links, double length) {}
+      List<Candidate> candidates = new ArrayList<>();
+      for (Link a : from) {
+        for (Link b : to) {
+          String exit = b.other(inner.get(b));
+          // 从 a 进群，只经群里的节点，经 b 出群；走到 b 外端最近的不是经 b（另一股更近）时不接：
+          // 绕远路的那股强接成直股会把它整条拉成一行，交给道岔几何定直股反而画得对
+          Reach reach =
+              walk(inner.get(a), a, key -> group.contains(key) || key.equals(exit), group::contains)
+                  .get(exit);
+          if (reach == null || reach.links().get(reach.links().size() - 1) != b) {
             continue;
           }
+          List<Link> links = new ArrayList<>(List.of(a));
+          links.addAll(reach.links());
+          List<String> nodes = nodesAlong(inner.get(a), reach.links());
+          candidates.add(
+              new Candidate(nodes.subList(0, nodes.size() - 1), links, reach.distance()));
+        }
+      }
+      candidates.sort(Comparator.comparingDouble(Candidate::length));
+      Set<Link> usedLegs = new HashSet<>();
+      Set<String> usedNodes = new HashSet<>();
+      for (Candidate candidate : candidates) {
+        Link a = candidate.links().get(0);
+        Link b = candidate.links().get(candidate.links().size() - 1);
+        if (usedLegs.contains(a)
+            || usedLegs.contains(b)
+            || candidate.nodes().stream().anyMatch(usedNodes::contains)) {
+          continue;
+        }
+        usedLegs.add(a);
+        usedLegs.add(b);
+        usedNodes.addAll(candidate.nodes());
+        for (int i = 0; i < candidate.nodes().size(); i++) {
+          forcedThrough.put(
+              candidate.nodes().get(i),
+              ordered(List.of(candidate.links().get(i), candidate.links().get(i + 1))));
+        }
+      }
+      return !usedLegs.isEmpty();
+    }
+
+    /** 从 {@code from} 起依次经过 {@code links} 走到的各节点（含两头）。 */
+    private static List<String> nodesAlong(String from, List<Link> links) {
+      List<String> nodes = new ArrayList<>(List.of(from));
+      for (Link link : links) {
+        nodes.add(link.other(nodes.get(nodes.size() - 1)));
+      }
+      return nodes;
+    }
+
+    /** 在节点处从 {@code in} 换到 {@code out} 是折返：两条区间朝同一边离开（V 形，车走不通）。 */
+    private boolean turnsBack(String key, Link in, Link out) {
+      double[] a = direction(spots.get(key), in);
+      double[] b = direction(spots.get(key), out);
+      return a[0] * b[0] + a[1] * b[1] > 0;
+    }
+
+    /**
+     * 走到一个节点的最短路。
+     *
+     * @param distance 沿轨道的距离（格）
+     * @param links 从起点起依次经过的区间
+     */
+    private record Reach(double distance, List<Link> links) {}
+
+    /**
+     * 从 {@code start} 沿轨道按行车方向走（到一个节点后不折返：不沿与进来那条区间朝同一边离开的区间走），按距离从近到远记下走到的各节点的最短路。
+     *
+     * @param start 起点
+     * @param arrived 进到起点的那条区间（起点各方向都能走时为 null）
+     * @param enter 能走进的节点
+     * @param pass 走进后还能接着往前走的节点（起点总能）；不能的只记下、不再往前
+     * @return 走到的节点 → 最短路，按距离从近到远
+     */
+    private Map<String, Reach> walk(
+        String start,
+        Link arrived,
+        java.util.function.Predicate<String> enter,
+        java.util.function.Predicate<String> pass) {
+      record State(String key, Link via) {}
+      record Visit(State state, double distance) {}
+      Map<State, Double> best = new HashMap<>();
+      Map<State, State> previous = new HashMap<>();
+      PriorityQueue<Visit> queue = new PriorityQueue<>(Comparator.comparingDouble(Visit::distance));
+      State origin = new State(start, arrived);
+      best.put(origin, 0.0);
+      queue.add(new Visit(origin, 0.0));
+      Map<String, Reach> reached = new LinkedHashMap<>();
+      while (!queue.isEmpty()) {
+        Visit visit = queue.poll();
+        State at = visit.state();
+        if (visit.distance() > best.get(at)) {
+          continue;
+        }
+        if (!reached.containsKey(at.key())) {
+          List<Link> links = new ArrayList<>();
+          for (State step = at; previous.containsKey(step); step = previous.get(step)) {
+            links.add(0, step.via());
+          }
+          reached.put(at.key(), new Reach(visit.distance(), List.copyOf(links)));
+        }
+        if (!at.equals(origin) && !pass.test(at.key())) {
+          continue;
+        }
+        for (Link link : around.getOrDefault(at.key(), List.of())) {
+          String next = link.other(at.key());
+          if (link == at.via()
+              || !enter.test(next)
+              || (at.via() != null && turnsBack(at.key(), at.via(), link))) {
+            continue;
+          }
+          State state = new State(next, link);
           double distance = visit.distance() + length(link);
-          if (distance < best.getOrDefault(next, Double.MAX_VALUE)) {
-            best.put(next, distance);
-            queue.add(new Visit(next, distance));
+          if (distance < best.getOrDefault(state, Double.MAX_VALUE)) {
+            best.put(state, distance);
+            previous.put(state, at);
+            queue.add(new Visit(state, distance));
           }
         }
       }
-      return Optional.empty();
+      return reached;
+    }
+
+    /** 从群里的 {@code from} 经 {@code first} 往外按行车方向走（不再进这一群、不在道岔处折返），沿轨道最近的车站、车库或出口。 */
+    private Optional<String> nearestEnd(Set<String> group, String from, Link first) {
+      return walk(
+              first.other(from), first, key -> !group.contains(key), key -> !endOf.containsKey(key))
+          .keySet()
+          .stream()
+          .filter(endOf::containsKey)
+          .findFirst()
+          .map(endOf::get);
     }
 
     private double length(Link link) {
@@ -2357,7 +2793,7 @@ public final class YardGeometry {
     }
 
     /**
-     * 行：直股连成的一条链整条占一行，几个车站之间的同一条正线因此画成一条直线。站台股道所在的链先排，落在同一条股道延长线上的站台股道并为一行；
+     * 行：直股连成的一条链整条占一行，几个车站之间的同一条正线因此画成一条直线。站台股道所在的链先排，落在同一条股道延长线上的站台股道并为一行（并进来会与这一行已有的一段横向重叠的不并）；
      * 其余的链各占一行。行的横向位置取起头的站台股道，没有站台的链取链上各节点的平均。分叉岔出去的链不与别的链并行：它的站台哪怕正落在来路的延长线上也另起一行。
      */
     private Map<String, Row> rows(YardArea area) {
@@ -2365,7 +2801,7 @@ public final class YardGeometry {
       List<Row> seeds = new ArrayList<>();
       List<Spot> seedSpots = new ArrayList<>();
       Set<Chain> branched = new HashSet<>();
-      for (Junction junction : Set.copyOf(junctionOf.values())) {
+      for (Junction junction : junctions) {
         for (Link link : junction.branches()) {
           branched.add(chainOf.get(outer(junction, link)));
         }
@@ -2376,15 +2812,24 @@ public final class YardGeometry {
               .filter(Objects::nonNull)
               .sorted(Comparator.comparingDouble(s -> vOf.get(s.key())))
               .toList();
+      // 各行已占的里程范围：并进来的一段与它们横向重叠时不并（否则两条股道画在同一行的同一处）
+      Map<Row, List<double[]>> taken = new HashMap<>();
       for (Spot spot : platforms) {
         if (rowOf.containsKey(spot.key())) {
           continue;
         }
+        List<String> run = runOf(spot.key());
+        double[] range = {
+          run.stream().mapToDouble(uOf::get).min().orElse(0.0),
+          run.stream().mapToDouble(uOf::get).max().orElse(0.0)
+        };
         Row row = null;
         for (int i = 0; i < seeds.size(); i++) {
           if (inLine(seedSpots.get(i), spot)
               && !branched.contains(chainOf.get(spot.key()))
-              && !branched.contains(chainOf.get(seedSpots.get(i).key()))) {
+              && !branched.contains(chainOf.get(seedSpots.get(i).key()))
+              && taken.get(seeds.get(i)).stream()
+                  .noneMatch(other -> overlaps(other, range, -0.5))) {
             row = seeds.get(i);
           }
         }
@@ -2393,20 +2838,67 @@ public final class YardGeometry {
           seeds.add(row);
           seedSpots.add(spot);
         }
-        for (String key : runOf(spot.key())) {
+        taken.computeIfAbsent(row, ignored -> new ArrayList<>()).add(range);
+        for (String key : run) {
           rowOf.put(key, row);
         }
       }
+      // 其余各段：只接在一行上的（出口短线、尽头侧线）按它离接点的横向偏移排在那一行旁边——横向位置只和接点比，不和别处量的比
+      // （股道出了站常收拢，站台处与咽喉处的横向位置差得远）；接点须与它用同一条脊线量。接在几行之间的（渡线中段）和接不上已有行的，
+      // 按自身横向位置：几行的行位置各在自己的站台处量，彼此不能拿来推算
+      List<List<String>> pending = new ArrayList<>();
       for (Chain chain : chains) {
         for (List<String> run : runs(chain)) {
-          if (rowOf.containsKey(run.get(0))) {
-            continue;
+          if (!rowOf.containsKey(run.get(0))) {
+            pending.add(run);
           }
-          Row row = new Row(run.stream().mapToDouble(vOf::get).average().orElse(0.0));
-          run.forEach(key -> rowOf.put(key, row));
         }
       }
+      boolean progress = true;
+      while (!pending.isEmpty() && progress) {
+        progress = false;
+        for (java.util.Iterator<List<String>> it = pending.iterator(); it.hasNext(); ) {
+          List<String> run = it.next();
+          List<String> anchors = anchorsOf(run, rowOf);
+          if (anchors.isEmpty()) {
+            continue;
+          }
+          double v = run.stream().mapToDouble(vOf::get).average().orElse(0.0);
+          boolean oneRow = anchors.stream().map(rowOf::get).distinct().count() == 1;
+          Row row =
+              new Row(
+                  oneRow
+                      ? anchors.stream()
+                          .mapToDouble(anchor -> rowOf.get(anchor).v() + v - vOf.get(anchor))
+                          .average()
+                          .orElse(v)
+                      : v);
+          run.forEach(key -> rowOf.put(key, row));
+          it.remove();
+          progress = true;
+        }
+      }
+      for (List<String> run : pending) {
+        Row row = new Row(run.stream().mapToDouble(vOf::get).average().orElse(0.0));
+        run.forEach(key -> rowOf.put(key, row));
+      }
       return rowOf;
+    }
+
+    /** 一段经区间直接连着的、已排进行里的各节点（与这一段用同一条脊线量横向位置），按段内先后。 */
+    private List<String> anchorsOf(List<String> run, Map<String, Row> rowOf) {
+      List<String> anchors = new ArrayList<>();
+      for (String key : run) {
+        for (Link link : around.getOrDefault(key, List.of())) {
+          String other = link.other(key);
+          if (!run.contains(other)
+              && rowOf.containsKey(other)
+              && frameOf.get(other) == frameOf.get(key)) {
+            anchors.add(other);
+          }
+        }
+      }
+      return anchors;
     }
 
     /** 链在 {@link #rowBreaks} 处断开后的几段，按链上先后。 */
@@ -2540,10 +3032,13 @@ public final class YardGeometry {
     private Map<Row, Integer> levels(Map<String, Row> rowOf, Set<Row> separate) {
       Map<Row, double[]> own = new HashMap<>();
       Map<Row, double[]> drawn = new HashMap<>();
+      // 行按对象身份存，横向位置与左端都相同时按行里最小的节点键排，次序不随启动变
+      Map<Row, String> firstKey = new HashMap<>();
       rowOf.forEach(
           (key, row) -> {
             widen(own, row, uOf.get(key));
             widen(drawn, row, uOf.get(key));
+            firstKey.merge(row, key, (a, b) -> a.compareTo(b) <= 0 ? a : b);
           });
       Map<Row, Set<Row>> linked = new HashMap<>();
       for (Link link : links) {
@@ -2559,7 +3054,9 @@ public final class YardGeometry {
       List<Row> ordered =
           own.keySet().stream()
               .sorted(
-                  Comparator.comparingDouble(Row::v).thenComparingDouble(row -> own.get(row)[0]))
+                  Comparator.comparingDouble(Row::v)
+                      .thenComparingDouble(row -> own.get(row)[0])
+                      .thenComparing(firstKey::get))
               .toList();
       // 首尾相接只认两头都有一段长度的行：道岔群里只有一个节点的行若也算，几段短线会在同一层上叠在一起
       java.util.function.BiPredicate<Row, Row> clash =
@@ -2581,9 +3078,14 @@ public final class YardGeometry {
         }
         level.put(row, at);
       }
-      // 自下而上再走一遍：每行往下压到紧挨着与它重叠的下一行，侧线贴着它岔出的正线，不浮到最上面
+      // 自下而上再走一遍：每行往下压到紧挨着与它重叠的下一行，侧线贴着它岔出的正线，不浮到最上面。
+      // 经区间连着上面某一行的不压：它已经贴着自己的正线了，再压会越过别的行、贴到另一股分叉的股道旁边去
       for (int i = ordered.size() - 2; i >= 0; i--) {
         Row row = ordered.get(i);
+        int at = level.get(row);
+        if (linked.getOrDefault(row, Set.of()).stream().anyMatch(other -> level.get(other) < at)) {
+          continue;
+        }
         int limit = Integer.MAX_VALUE;
         for (int j = i + 1; j < ordered.size(); j++) {
           Row below = ordered.get(j);

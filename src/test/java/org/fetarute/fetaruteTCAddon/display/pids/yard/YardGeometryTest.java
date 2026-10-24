@@ -11,7 +11,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -528,9 +531,12 @@ class YardGeometryTest {
     }
   }
 
-  /** 中途岔出的线另起一行；几个车站的站台各带站码，站名写不下时改写站码。 */
+  /**
+   * 控制区只有 ABC、DEF：经道岔连起两站的是区内的正线，画在同一行（实地直着走的是去区外 XYZ 的一股也一样），去 XYZ 的一股只是出口，从道岔斜着岔出。
+   * 几个车站的站台各带站码，站名写不下时改写站码。
+   */
   @Test
-  void aBranchingLineGetsItsOwnRow() {
+  void aLineLeavingTheZoneBranchesOffTheMainLine() {
     YardGeometry geometry =
         zone(
             YardFixtures.junction(),
@@ -538,11 +544,250 @@ class YardGeometryTest {
             YardArea.Member.station("DEF"));
     YardGeometry.Point abc = geometry.pointOf(cell(0, 0, false)).orElseThrow();
     YardGeometry.Point def = geometry.pointOf(cell(200, 40, false)).orElseThrow();
+    YardGeometry.Point junction = geometry.nodeAt(YardFixtures.JUNCTION).orElseThrow();
+    YardGeometry.Path exit =
+        path(geometry, EdgeId.undirected(YardFixtures.JUNCTION, YardFixtures.TO_XYZ_FAR));
 
-    assertTrue(def.y() != abc.y(), () -> "两站不在同一行: " + abc + " " + def);
+    assertEquals(abc.y(), def.y(), () -> "两站在同一行: " + abc + " " + def);
+    assertEquals(abc.y(), junction.y(), () -> "道岔在正线那一行: " + junction);
+    assertTrue(
+        exit.segments().stream().anyMatch(s -> s.y0() != s.y1()), () -> "去 XYZ 的出口从道岔岔出: " + exit);
     assertEquals(
         Set.of(Optional.of("ABC"), Optional.of("DEF")),
         geometry.platforms().stream().map(YardGeometry.Platform::code).collect(Collectors.toSet()));
+  }
+
+  /** 分叉的两股对称斜出、只有一股通往区内时，来路、分叉道岔与区内那一股画成一条直线。 */
+  @Test
+  void aForkWithOneBranchInTheZoneIsDrawnStraightThrough() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.fork(false),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"));
+    YardGeometry.Point stem = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point fork = geometry.nodeAt(YardFixtures.FORK).orElseThrow();
+    YardGeometry.Point def = geometry.nodeAt(YardFixtures.Q1).orElseThrow();
+
+    assertEquals(stem.y(), fork.y(), () -> "分叉道岔在来路那一行: " + stem + " " + fork);
+    assertEquals(stem.y(), def.y(), () -> "DEF 接着来路直着画: " + stem + " " + def);
+  }
+
+  /** 复线的一条中途绕一大圈（按轨道长度排会比另一条超前一大截）：绕出来以后几段内重新与另一条对齐，两头车站的两条股道上下对齐。 */
+  @Test
+  void aParallelTrackRealignsAfterADetour() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.doubleTrackLoop(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.station("GHI"));
+    int abc1 = geometry.nodeAt(P1).orElseThrow().x();
+    int abc2 = geometry.nodeAt(P2).orElseThrow().x();
+    int def1 = geometry.nodeAt(YardFixtures.Q1).orElseThrow().x();
+    int def2 = geometry.nodeAt(YardFixtures.Q2).orElseThrow().x();
+
+    assertEquals(abc1, abc2, "ABC 两条股道对齐");
+    assertEquals(def1, def2, "DEF 两条股道对齐");
+  }
+
+  /**
+   * 同一区间相邻两个区间点之间经过的道岔按区间连成直股：哪怕实地直着走的是另一条股道的区间点，ABC 1 道仍与同一股道通往的 DEF 1 道画在一行； 1
+   * 道的序号中间缺一个（另一条股道上正好有那个序号）也一样。
+   */
+  @Test
+  void consecutiveIntervalWaypointsMakeTheThroughRoute() {
+    for (boolean gap : List.of(false, true)) {
+      YardGeometry geometry =
+          zone(
+              YardFixtures.intervalTurnout(gap),
+              YardArea.Member.station("ABC"),
+              YardArea.Member.station("DEF"));
+      YardGeometry.Point abc = geometry.nodeAt(P1).orElseThrow();
+      YardGeometry.Point turnout = geometry.nodeAt(YardFixtures.TURNOUT).orElseThrow();
+      YardGeometry.Point def1 = geometry.nodeAt(YardFixtures.Q1).orElseThrow();
+      YardGeometry.Point def2 = geometry.nodeAt(YardFixtures.Q2).orElseThrow();
+      String label = gap ? "序号缺一个" : "序号连续";
+
+      assertEquals(abc.y(), turnout.y(), () -> label + ": 道岔在 1 道那一行 " + abc + " " + turnout);
+      assertEquals(abc.y(), def1.y(), () -> label + ": DEF 1 道接着 ABC 1 道 " + abc + " " + def1);
+      assertTrue(def2.y() != abc.y(), () -> label + ": DEF 2 道从道岔岔出、另起一行 " + def2);
+    }
+  }
+
+  /** 分叉的一股进站前先经过一组往回岔出区外的道岔：出口沿轨道虽然更近，但要折返才走得到，这一股仍算通往 XYZ 站，分叉照样画成 Y 形（来路一行、两股各起一行）。 */
+  @Test
+  void aBranchPassingAnExitTurnoutStillLeadsToItsStation() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.forkPastExit(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.station("XYZ"));
+    YardGeometry.Point stem = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point fork = geometry.nodeAt(YardFixtures.FORK).orElseThrow();
+    YardGeometry.Point def = geometry.nodeAt(YardFixtures.Q1).orElseThrow();
+    YardGeometry.Point xyz = geometry.nodeAt(YardFixtures.X1).orElseThrow();
+    String where = "ABC " + stem + " 分叉 " + fork + " DEF " + def + " XYZ " + xyz;
+
+    assertEquals(stem.y(), fork.y(), () -> "分叉道岔在来路那一行: " + where);
+    assertTrue(def.y() != stem.y(), () -> "去 DEF 的一股另起一层: " + where);
+    assertTrue(xyz.y() != stem.y(), () -> "去 XYZ 的一股另起一层: " + where);
+    assertTrue(def.y() != xyz.y(), () -> "两股不在同一层: " + where);
+  }
+
+  /** 来路在区外、区内只有岔出去的两股：仍是线路分叉（两股平级），两股都不接着来路画成直线，各起一层。 */
+  @Test
+  void aForkWhoseStemLeavesTheZoneIsStillAFork() {
+    for (boolean straightOn : List.of(false, true)) {
+      YardGeometry geometry =
+          zone(
+              YardFixtures.forkFromOutside(straightOn),
+              YardArea.Member.station("DEF"),
+              YardArea.Member.station("XYZ"));
+      YardGeometry.Point fork = geometry.nodeAt(YardFixtures.FORK).orElseThrow();
+      YardGeometry.Point def = geometry.nodeAt(YardFixtures.Q1).orElseThrow();
+      YardGeometry.Point xyz = geometry.nodeAt(YardFixtures.X1).orElseThrow();
+      String where =
+          (straightOn ? "一股顺着来路直走" : "两股对称斜出") + ": 分叉 " + fork + " DEF " + def + " XYZ " + xyz;
+
+      assertTrue(def.y() != fork.y(), () -> "去 DEF 的一股另起一层: " + where);
+      assertTrue(xyz.y() != fork.y(), () -> "去 XYZ 的一股另起一层: " + where);
+      assertTrue(def.y() != xyz.y(), () -> "两股不在同一层: " + where);
+    }
+  }
+
+  /** 出口从站外收拢处往外侧岔出：按它离道岔的横向偏移排，画在 1 道外侧（上方），不按整片的横向位置落到 1、2 道之间。 */
+  @Test
+  void anExitStubSitsOnTheSideItLeavesTheThroat() {
+    YardGeometry geometry = geometry(YardFixtures.throatExit());
+    YardGeometry.Point one = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point two = geometry.nodeAt(P2).orElseThrow();
+    YardGeometry.Point fork = geometry.nodeAt(YardFixtures.THROAT_SWITCH).orElseThrow();
+    YardGeometry.Point exit = geometry.exits().get(0).at();
+    String where = "1 道 " + one + " 2 道 " + two + " 道岔 " + fork + " 出口 " + exit;
+
+    assertTrue(one.y() < two.y(), () -> "1 道在北、画在上: " + where);
+    assertTrue(exit.y() < fork.y(), () -> "出口往北岔出、画在 1 道上方: " + where);
+  }
+
+  /**
+   * 渡线后两股汇成单线，2 道绕远路才汇进来：从 2 道经渡线换 1 道去汇合点更近，2 道不强接成直通汇合点的直股（强接会把绕行段整条拉成一行、把 1 道挤反）， 1 道直通汇合点去
+   * DEF，各节点自西向东。
+   */
+  @Test
+  void aTrackThatDetoursToTheMergeIsNotForcedStraight() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.crossoverBeforeMerge(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"));
+    YardGeometry.Point one = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point two = geometry.nodeAt(P2).orElseThrow();
+    YardGeometry.Point cross = geometry.nodeAt(YardFixtures.CROSS_TWO).orElseThrow();
+    YardGeometry.Point merge = geometry.nodeAt(YardFixtures.CROSSOVER_MERGE).orElseThrow();
+    YardGeometry.Point def = geometry.nodeAt(YardFixtures.Q1).orElseThrow();
+    String where = "1 道 " + one + " 2 道 " + two + " 渡线 " + cross + " 汇合 " + merge + " DEF " + def;
+
+    assertEquals(one.y(), merge.y(), () -> "1 道直通汇合点: " + where);
+    assertEquals(one.y(), def.y(), () -> "DEF 接着 1 道: " + where);
+    assertEquals(two.y(), cross.y(), () -> "2 道道岔在 2 道那一行: " + where);
+    assertTrue(
+        one.x() < cross.x() && cross.x() < merge.x() && merge.x() < def.x(),
+        () -> "自西向东: " + where);
+  }
+
+  /** 道岔的直股按轨道方块上接出去的面定：正线出了道岔就拐弯、岔线很缓时，按附近轨道的重心会把岔线当直股，正线就断成两行。 */
+  @Test
+  void theStraightOfASwitchIsTheRailThatLeavesOppositeTheWayIn() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.curvingMainLine(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"));
+    YardGeometry.Point abc = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point main = geometry.nodeAt(YardFixtures.Q1).orElseThrow();
+    YardGeometry.Point branch = geometry.nodeAt(YardFixtures.Q2).orElseThrow();
+    String where = "ABC 1 道 " + abc + " DEF 1 道 " + main + " DEF 2 道 " + branch;
+
+    assertEquals(abc.y(), main.y(), () -> "正线接着来路画成一行: " + where);
+    assertTrue(branch.y() < abc.y(), () -> "岔线从北面岔出、画在上方: " + where);
+  }
+
+  /** 复线的两条出口同去一站，咽喉不当线路分叉：两股各自直着出站，出口短线接在各自那一行上、不斜着岔出去。 */
+  @Test
+  void twoExitsToTheSameStationLeaveStraight() {
+    YardGeometry geometry = geometry(YardFixtures.doubleTrackThroat());
+    YardGeometry.Point one = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point two = geometry.nodeAt(P2).orElseThrow();
+    List<YardGeometry.Stub> stubs = geometry.stubs();
+    String where = "1 道 " + one + " 2 道 " + two + " 出口 " + stubs;
+
+    assertEquals(2, stubs.size(), () -> where);
+    for (YardGeometry.Stub stub : stubs) {
+      assertEquals(stub.inner().y(), stub.toward().y(), () -> "出口直着出去: " + where);
+    }
+    assertEquals(
+        Set.of(one.y(), two.y()),
+        stubs.stream().map(stub -> stub.inner().y()).collect(Collectors.toSet()),
+        () -> "两条出口各在 1、2 道那一行: " + where);
+  }
+
+  /** 只连着正线的侧线紧贴正线：不因下面有横跨全站的长侧线、旁边一层被别的侧线占着，就被往下压到别的侧线那一层。 */
+  @Test
+  void aSidingStaysRightUnderTheLineItLeaves() {
+    YardGeometry geometry = geometry(YardFixtures.sidings());
+    YardGeometry.Point main = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point left = geometry.nodeAt(YardFixtures.SIDING_LEFT).orElseThrow();
+    YardGeometry.Point under = geometry.nodeAt(YardFixtures.SIDING_UNDER_LEFT).orElseThrow();
+    YardGeometry.Point right = geometry.nodeAt(YardFixtures.SIDING_RIGHT).orElseThrow();
+    String where = "正线 " + main + " 西侧线 " + left + " 其下 " + under + " 东侧线 " + right;
+
+    assertTrue(left.y() > main.y() && under.y() > left.y(), () -> "西头两条侧线依次在下: " + where);
+    assertEquals(left.y(), right.y(), () -> "东头侧线与西头侧线同在正线下一层: " + where);
+  }
+
+  /** 排布不随轨道方块的遍历次序变：调度图给的集合次序每次启动都可能不同，同一张图要画成一样。 */
+  @Test
+  void layoutDoesNotDependOnTheOrderOfFootprintCells() {
+    List<SimpleRailGraph> graphs =
+        List.of(
+            YardFixtures.graph(),
+            YardFixtures.scissors(),
+            YardFixtures.triangle(),
+            YardFixtures.junction(),
+            YardFixtures.doubleTrackLoop(),
+            YardFixtures.tiedSpur());
+    List<YardArea.Member> members =
+        List.of(
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.station("GHI"),
+            YardArea.Member.station("XYZ"));
+    for (SimpleRailGraph graph : graphs) {
+      YardArea area = YardArea.of(graph, "SURC", members).orElseThrow();
+      YardGeometry ascending = withCellOrder(graph, area, false);
+      YardGeometry descending = withCellOrder(graph, area, true);
+
+      assertEquals(ascending.paths(), descending.paths());
+      assertEquals(ascending.platforms(), descending.platforms());
+      assertEquals(ascending.stubs(), descending.stubs());
+    }
+  }
+
+  private static YardGeometry withCellOrder(
+      SimpleRailGraph graph, YardArea area, boolean descending) {
+    Map<EdgeId, Set<RailFootprintCell>> cells = new LinkedHashMap<>();
+    graph
+        .interlockingState()
+        .footprintCellsByEdge()
+        .forEach(
+            (edge, set) -> {
+              List<RailFootprintCell> sorted = new ArrayList<>(set);
+              sorted.sort(descending ? Comparator.reverseOrder() : Comparator.naturalOrder());
+              cells.put(edge, new LinkedHashSet<>(sorted));
+            });
+    return YardGeometry.of(graph, area, cells, RECT, code -> code);
   }
 
   /** 不同区间的水平线不在同一行上重叠（端点相接不算），否则看不出是两条线。 */

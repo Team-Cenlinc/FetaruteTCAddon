@@ -157,6 +157,18 @@ class YardAreaTest {
             .collect(Collectors.toMap(YardArea.Exit::edge, YardArea.Exit::towards)));
   }
 
+  /** 站台与本站咽喉之间隔着区间点：它夹在区内两处之间、不往外伸，留在区内，站台与咽喉不断开；伸向区外的区间点照样是出口。 */
+  @Test
+  void anIntervalPointBetweenAPlatformAndItsThroatStaysInside() {
+    YardArea area = YardArea.of(YardFixtures.doubleTrackThroat(), "SURC", "ABC").orElseThrow();
+
+    assertTrue(area.nodes().contains(YardFixtures.THROAT_INTERVAL), () -> "区内节点: " + area.nodes());
+    assertEquals(
+        Set.of(YardFixtures.THROAT_ONE, YardFixtures.THROAT_TWO),
+        area.exits().stream().map(YardArea.Exit::inner).collect(Collectors.toSet()),
+        "出口只在渡线道岔往东");
+  }
+
   /** 两条线汇合后同去一站：从一站到另一站要在道岔后折返，不算相通，两站各自成片。 */
   @Test
   void mergingLinesDoNotBridgeTheirStations() {

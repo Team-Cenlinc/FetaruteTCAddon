@@ -6,6 +6,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -34,7 +35,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
  *   <li>沿区间向外展开：道岔与无名目的地节点算区内，但离最近的起点超过 {@value #MAX_RADIUS_BLOCKS} 格的不算，免得没有区间点隔开的正线把整条线都卷进来；
  *       两端都是成员车站的区间点也算区内，几个车站因此连成一张图。
  *   <li>控制区里的两个车站之间若经过别的区间（例如一条线在另一条线的区间中途岔出），只有一端是成员车站的区间点与经由它们走到的道岔先试着算进来；
- *       只留下把两个不同成员连起来的几片，再把其中走不回区内的支线一段段剪掉。只有一个成员时不会多出节点。
+ *       只留下把两个不同成员连起来的几片，以及四周全是区内节点、夹在区内两处之间的几片（例如站台与本站咽喉之间的头一个区间点），再把其中走不回区内的支线一段段剪掉。
  *   <li>碰到其余的区间点、别的车站、车库或跨世界节点就停下，这条区间记为出口，只画靠区内的一小段。
  *   <li>节点超过 {@value #MAX_NODES} 个时不再展开。
  * </ul>
@@ -245,7 +246,10 @@ public record YardArea(
     }
   }
 
-  /** 只留连起两个不同成员的几片：试着算进来的节点按彼此相连分片，每片看它碰到的第一轮区内节点各属哪个成员（按第一轮区内的连通片认），碰不到两个不同成员的整片去掉。 */
+  /**
+   * 只留连起两个不同成员的几片：试着算进来的节点按彼此相连分片，每片看它碰到的第一轮区内节点各属哪个成员（按第一轮区内的连通片认），碰不到两个不同成员的整片去掉。
+   * 四周全是第一轮区内节点、碰到两个以上的一片也留下：它夹在区内两处之间（例如站台与本站咽喉之间隔着的区间点），不往区外伸，去掉了站台与咽喉就断开了。
+   */
   private static void keepBridges(
       RailGraph graph,
       Set<NodeId> inner,
@@ -269,20 +273,27 @@ public record YardArea(
       }
       Set<NodeId> group = new LinkedHashSet<>(List.of(start));
       Set<String> touched = new LinkedHashSet<>();
+      Set<NodeId> bounds = new HashSet<>();
+      boolean enclosed = true;
       Deque<NodeId> queue = new ArrayDeque<>(List.of(start));
       while (!queue.isEmpty()) {
         NodeId id = queue.poll();
         for (RailEdge edge : graph.edgesFrom(id)) {
           NodeId other = edge.from().equals(id) ? edge.to() : edge.from();
-          if (tentative.contains(other) && visited.add(other)) {
-            group.add(other);
-            queue.add(other);
+          if (tentative.contains(other)) {
+            if (visited.add(other)) {
+              group.add(other);
+              queue.add(other);
+            }
           } else if (definite.contains(other)) {
             touched.addAll(membersOf.getOrDefault(piece.get(other), Set.of()));
+            bounds.add(other);
+          } else {
+            enclosed = false;
           }
         }
       }
-      if (touched.size() < 2) {
+      if (touched.size() < 2 && !(enclosed && bounds.size() >= 2)) {
         inner.removeAll(group);
         tentative.removeAll(group);
       }
