@@ -382,6 +382,8 @@ signaller:
   # 接近锁闭：车已在接近（或已停在入口）时取消它的进路，这个入口要过该秒数才能再排进路（系统代排与自动通过也等它）；
   # 现实的时间锁闭，防止信号在车头前反复变化。0 为不锁；限 0–180 秒
   approach-lock-seconds: 30
+  # 晚点至少该秒数，信号员才能令列车越过下一个停车站；限 0–900 秒
+  skip-min-delay-seconds: 180
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

@@ -4,7 +4,6 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
-import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -47,10 +46,17 @@ final class SignalBox {
   /** 选中的车不再跟这座楼有关（出了区、不在列车表里）的起始时刻；还在时为空。 */
   Instant selectedMissingSince;
 
-  /** 切换类按钮（人工与自动、自动通过）上一次生效的时刻：按住右键时客户端会连发，紧接着的重复按下不算。 */
-  final Map<SignalboxState.Button, Instant> toggled = new EnumMap<>(SignalboxState.Button.class);
+  /** 上一次点控制台的时刻：按住右键时客户端会连发，紧跟着上一下的点击不算（见 {@link SignallerService#HELD_REPEAT}）。 */
+  Instant lastClick;
 
   boolean replying;
+
+  /** 操作区换成了选中车的列车操作（第二页）。 */
+  boolean trainOps;
+
+  /** 按过一次“取消车次”、等着确认的那一下；没有时为空。 */
+  CancelArm cancelArm;
+
   Notice notice;
 
   /** 已给的许可：列车键 → 许可。 */
@@ -61,6 +67,9 @@ final class SignalBox {
 
   /** 扣在站里的车：列车键 → 扣车开始。 */
   final Map<String, Hold> holds = new LinkedHashMap<>();
+
+  /** 已确认取消、正在倒计时的车（车上有人，先插播停运再删）：列车键 → 倒计时。 */
+  final Map<String, PendingCancel> cancelling = new LinkedHashMap<>();
 
   /** 待回复的呼叫，先到先回。 */
   final Deque<Call> calls = new ArrayDeque<>();
@@ -109,7 +118,7 @@ final class SignalBox {
     platformChoices.clear();
     selected = null;
     selectedMissingSince = null;
-    toggled.clear();
+    lastClick = null;
     replying = false;
     approachLocks.clear();
     pairs.clear();
@@ -170,6 +179,9 @@ final class SignalBox {
 
     /** 锁闭时晚点读数的版本：出区时版本没变（其间没停过站）就不比。 */
     Optional<String> entryStamp = Optional.empty();
+
+    /** 在区内被令越站：越站省下的时间会让正点放行、交汇排序虚高，出区时这两项都不评。 */
+    boolean skipOrdered;
 
     /** 在区内被扣车扣了多少秒：扣车是信号员有意的调整，比晚点时减掉。 */
     long heldSeconds;
@@ -246,6 +258,14 @@ final class SignalBox {
   record Hold(String trainName, Instant since) {}
 
   /**
+   * 已确认取消、正在倒计时的车。
+   *
+   * @param trainName 列车名
+   * @param due 到这个时刻删车
+   */
+  record PendingCancel(String trainName, Instant due) {}
+
+  /**
    * 乘务员（驾驶员或车掌）的呼叫。
    *
    * @param trainName 列车名
@@ -290,6 +310,20 @@ final class SignalBox {
    */
   record Notice(SignalboxState.NoticeKind kind, Optional<String> train, Instant until) {}
 
+  /**
+   * 按过一次“取消车次”：谁按的、对哪列车、什么时候。
+   *
+   * @param player 按的人
+   * @param train 列车键
+   * @param at 按下的时刻
+   */
+  record CancelArm(UUID player, String train, Instant at) {
+    /** 此刻还等着确认（没过 {@link SignallerService#CANCEL_CONFIRM}）。 */
+    boolean live(Instant now) {
+      return now.isBefore(at.plus(SignallerService.CANCEL_CONFIRM));
+    }
+  }
+
   /** 值守：谁、在哪个控制台、从什么时候起，以及这一班的计数。 */
   static final class Duty {
     final UUID player;
@@ -330,6 +364,12 @@ final class SignalBox {
     int conflictsGood;
 
     int conflictsBad;
+
+    /** 取消的车次。 */
+    int tripsCancelled;
+
+    /** 令越站的次数。 */
+    int skipsOrdered;
 
     Duty(UUID player, String playerName, Instant start, ConsoleSpot console) {
       this.player = player;

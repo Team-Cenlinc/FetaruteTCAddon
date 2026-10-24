@@ -21,6 +21,10 @@ bossbar:
     AT_CAR_END_2: <gold>◆━━</gold> <yellow>{current_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>This car terminates here. Please alight</white> <gold>━━◆</gold>
     IN_TRIP_1: <{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <dark_gray>┃</dark_gray> <{signal_color_tag}>⬤</{signal_color_tag}> <white>{speed}</white> <dark_gray>┃</dark_gray> <gray>车厢 ⟨</gray><white>{player_carriage_no}</white><gray>/</gray><white>{player_carriage_total}</white><gray>⟩</gray>
     IN_TRIP_2: <{line_color_tag}>█</{line_color_tag}> <white>{line_lang2}</white> <dark_gray>┃</dark_gray> <{signal_color_tag}>⬤</{signal_color_tag}> <white>{speed}</white> <dark_gray>┃</dark_gray> <gray>Car. ⟨</gray><white>{player_carriage_no}</white><gray>/</gray><white>{player_carriage_total}</white><gray>⟩</gray>
+    IN_TRIP_3: <gold>⇥</gold> <yellow>{?skip_station}</yellow> <white>站不停车</white> <dark_gray>┃</dark_gray> <gray>前往该站的乘客请换乘后续列车</gray>
+    IN_TRIP_4: <gold>⇥</gold> <white>Not stopping at</white> <yellow>{?skip_station_lang2}</yellow> <dark_gray>┃</dark_gray> <gray>Please take a following service</gray>
+    SKIP_PASSING_1: <gold>◇━━</gold> <white>列车通过</white> <yellow>{skip_passing}</yellow> <dark_gray>┃</dark_gray> <white>本站不停车</white> <gold>━━◇</gold>
+    SKIP_PASSING_2: <gold>◇━━</gold> <white>Passing through</white> <yellow>{skip_passing_lang2}</yellow> <dark_gray>┃</dark_gray> <white>not stopping</white> <gold>━━◇</gold>
     ON_LAYOVER_1: <aqua>◈━━</aqua> <gray>等待新行程</gray> <aqua>━━◈</aqua>
     ON_LAYOVER_2: <aqua>◈━━</aqua> <gray>Preparing for new trip</gray> <aqua>━━◈</aqua>
     ON_LAYOVER_3: <aqua>◈━━</aqua> <white>本列车下一趟</white> <yellow>{?next_trip_departure}</yellow> <white>开往</white> <yellow>{?next_trip_destination}</yellow> <aqua>━━◈</aqua>
@@ -40,6 +44,8 @@ actionbar:
     AT_STATION_6: <gold>⇉</gold> <white>The train divides at</white> <yellow>{?car_terminates_lang2}</yellow> <dark_gray>┃</dark_gray> <white>This car terminates there</white>
     AT_STATION_7: <aqua>⇇</aqua> <white>本列车在</white> <yellow>{?join_station}</yellow> <white>联挂</white> <dark_gray>┃</dark_gray> <white>继续开往</white> <yellow>{dest_eop}</yellow>
     AT_STATION_8: <aqua>⇇</aqua> <white>The train joins another at</white> <yellow>{?join_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>then continues to</white> <yellow>{dest_eop_lang2}</yellow>
+    AT_STATION_9: <gold>⇥</gold> <white>本列车</white> <yellow>{?skip_station}</yellow> <white>站不停车</white> <dark_gray>┃</dark_gray> <gray>前往该站的乘客请在本站下车换乘后续列车</gray>
+    AT_STATION_10: <gold>⇥</gold> <white>This train will not stop at</white> <yellow>{?skip_station_lang2}</yellow> <dark_gray>┃</dark_gray> <gray>Change here for a following service</gray>
     AT_LAST_STATION_1: <gold>◆━━</gold> <yellow>终点站 {current_station} 到了</yellow> <gold>━━◆</gold> <gray>请全体乘客下车</gray>
     AT_LAST_STATION_2: <gold>◆━━</gold> <yellow>Final stop {current_station_lang2}</yellow> <gold>━━◆</gold>
     AT_JOIN_STATION_1: <aqua>◆━━</aqua> <yellow>{current_station} 到了</yellow> <aqua>━━◆</aqua> <white>本列车在本站联挂后开往</white> <yellow>{dest_eop}</yellow>
@@ -73,6 +79,10 @@ actionbar:
     IN_TRIP_14: <gold>⇉</gold> <white>The train divides at</white> <yellow>{?car_terminates_lang2}</yellow> <dark_gray>┃</dark_gray> <white>This car terminates there</white>
     IN_TRIP_15: <aqua>⇇</aqua> <white>本列车在</white> <yellow>{?join_station}</yellow> <white>联挂</white> <dark_gray>┃</dark_gray> <white>继续开往</white> <yellow>{dest_eop}</yellow>
     IN_TRIP_16: <aqua>⇇</aqua> <white>The train joins another at</white> <yellow>{?join_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>then continues to</white> <yellow>{dest_eop_lang2}</yellow>
+    IN_TRIP_17: <gold>⇥</gold> <white>本列车</white> <yellow>{?skip_station}</yellow> <white>站不停车</white> <dark_gray>┃</dark_gray> <gray>前往该站的乘客请换乘后续列车</gray>
+    IN_TRIP_18: <gold>⇥</gold> <white>This train will not stop at</white> <yellow>{?skip_station_lang2}</yellow> <dark_gray>┃</dark_gray> <gray>Please take a following service</gray>
+    SKIP_PASSING_1: <gold>◇</gold> <white>列车通过</white> <yellow>{skip_passing}</yellow> <dark_gray>━</dark_gray> <gray>本站不停车，请勿下车</gray>
+    SKIP_PASSING_2: <gold>◇</gold> <white>Passing through</white> <yellow>{skip_passing_lang2}</yellow> <dark_gray>━</dark_gray> <gray>This train does not stop here</gray>
     ARRIVING_1: <green>▼</green> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <gray>下车请注意安全</gray>
     ARRIVING_2: <green>▼</green> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <gray>Mind the gap</gray>
     ARRIVING_3: <green>▼</green> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <white>可换乘</white> {?transfer_lines}

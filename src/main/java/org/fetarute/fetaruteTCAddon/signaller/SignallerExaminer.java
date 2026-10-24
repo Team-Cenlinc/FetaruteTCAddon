@@ -90,6 +90,12 @@ public interface SignallerExaminer {
     /** 模拟呼叫用的车不在了（收车、删车）：呼叫随之撤掉，要再来一次。 */
     DRILL_CANCELLED,
     /** 给一列车改停了股道。 */
-    PLATFORM_CHANGED
+    PLATFORM_CHANGED,
+    /** 取消了一列车的车次。 */
+    TRIP_CANCELLED,
+    /** 令一列车越过下一个停车站。 */
+    SKIP_ORDERED,
+    /** 撤销了越站令。 */
+    SKIP_REVOKED
   }
 }

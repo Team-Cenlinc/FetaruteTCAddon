@@ -34,6 +34,8 @@ import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
  * @param nextTripDestination 待命车接下来那一趟开往的车站（按表运行时表上已定）；不在待命、不按表或查不到时为空
  * @param nextTripDeparture 待命车接下来那一趟的计划发车时刻；不在待命、不按表或查不到时为空
  * @param joinStation 联挂站：交路是回程支线，运营终点是联挂站，挂上主干后接着开往 {@code destinations.eop()}（已是主干的终点）；不联挂时为空
+ * @param skipStation 前方信号员令越过的那一站；没有越站令时为空
+ * @param skipIndex 那一站的停靠序号；没有越站令时为空
  */
 public record TrainHudContext(
     String trainName,
@@ -61,7 +63,9 @@ public record TrainHudContext(
     OptionalInt nextStopIndex,
     StationDisplay joinStation,
     StationDisplay nextTripDestination,
-    Optional<Instant> nextTripDeparture) {
+    Optional<Instant> nextTripDeparture,
+    StationDisplay skipStation,
+    OptionalInt skipIndex) {
   public TrainHudContext {
     Objects.requireNonNull(trainName, "trainName");
     routeDefinition = routeDefinition == null ? Optional.empty() : routeDefinition;
@@ -84,6 +88,8 @@ public record TrainHudContext(
     nextTripDestination =
         nextTripDestination == null ? StationDisplay.empty() : nextTripDestination;
     nextTripDeparture = nextTripDeparture == null ? Optional.empty() : nextTripDeparture;
+    skipStation = skipStation == null ? StationDisplay.empty() : skipStation;
+    skipIndex = skipIndex == null ? OptionalInt.empty() : skipIndex;
   }
 
   /**

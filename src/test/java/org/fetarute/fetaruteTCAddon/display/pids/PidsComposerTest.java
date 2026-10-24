@@ -1062,6 +1062,52 @@ class PidsComposerTest {
     assertEquals(0, snapshotCalls, "不取到发快照");
   }
 
+  @Test
+  void theStationATrainWouldSkipIsNamedToo() {
+    PidsScreen screen =
+        registerPaged(PidsScreen.Mode.LIVE, "signalbox-3x5").withZone(Optional.of("north"), NOW);
+    registry.put(screen);
+    SignalboxState base = console(Optional.of("train-a"));
+    SignalboxState page =
+        new SignalboxState(
+            base.mode(),
+            base.signaller(),
+            base.selected(),
+            List.of(),
+            base.buttons(),
+            base.call(),
+            false,
+            base.notice(),
+            base.preview(),
+            base.pending(),
+            base.signals(),
+            base.platforms(),
+            base.delegated(),
+            Optional.of(new SignalboxState.TrainOps(false, Optional.of("HHU"), false)));
+    composer.setSignalboxConsole(
+        new SignalboxConsole() {
+          @Override
+          public Optional<SignalboxState> state(String operator, String zone) {
+            return Optional.of(page);
+          }
+
+          @Override
+          public void press(
+              Player player,
+              Location console,
+              String operator,
+              String zone,
+              ConsoleTarget target) {}
+        });
+
+    PidsComposer.SignalboxKey key =
+        assertInstanceOf(
+            PidsComposer.SignalboxKey.class,
+            composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key());
+
+    assertEquals("新笛矢 · 壑湖", key.view().destinations().get("HHU"));
+  }
+
   /** 控制台没绑控制区、信号员模块未接入或取数出错：只画站场图，列车表的位置写说明，不抛异常。 */
   @Test
   void signalboxScreensWithoutConsoleDataShowWhy() {

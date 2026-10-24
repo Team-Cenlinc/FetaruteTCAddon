@@ -7,8 +7,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerTrainDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
@@ -29,24 +31,41 @@ final class SignalboxActions {
   private final ZoneMap map;
   private final Instant now;
   private final SignalboxState shown;
+  private final boolean mayCancel;
 
   /**
    * @param shown 此刻控制台上的画面：按钮可用与否、选中的车、可改停的股道都以它为准
+   * @param mayCancel 点的人有没有取消车次的权限
    */
   SignalboxActions(
-      SignallerService service, SignalBox box, ZoneMap map, Instant now, SignalboxState shown) {
+      SignallerService service,
+      SignalBox box,
+      ZoneMap map,
+      Instant now,
+      SignalboxState shown,
+      boolean mayCancel) {
     this.service = service;
     this.box = box;
     this.map = map;
     this.now = now;
     this.shown = shown;
+    this.mayCancel = mayCancel;
   }
 
   void apply(ConsoleTarget target) {
+    boolean held =
+        box.lastClick != null && now.isBefore(box.lastClick.plus(SignallerService.HELD_REPEAT));
+    box.lastClick = now;
+    // 按住右键的连发：除了选车（重复选同一列车无妨），一律不算
+    if (held && !(target instanceof ConsoleTarget.Train)) {
+      return;
+    }
     switch (target) {
       case ConsoleTarget.Deselect ignored -> {
         if (box.replying) {
           box.replying = false;
+        } else if (box.trainOps) {
+          box.trainOps = false;
         } else {
           box.selected = null;
         }
@@ -55,22 +74,37 @@ final class SignalboxActions {
         String key = SignallerService.key(train.trainName());
         if (!key.isEmpty()) {
           box.replying = false;
+          // 列车操作只对着原来那辆车：改选后回到第一页，免得对着新选的车误按
+          if (!key.equals(box.selected)) {
+            box.trainOps = false;
+          }
           service.select(box, key);
           service.examine(box, SignallerExaminer.Event.SELECTED);
         }
       }
       case ConsoleTarget.Press press -> {
-        if (repeated(press.button())) {
-          return;
-        }
         if (shown.enabled(press.button())) {
           press(press.button());
         } else {
           refuse(press.button());
         }
       }
+      case ConsoleTarget.Act act -> {
+        // 只在正显示第二页的时候做：旧画面上的点击不能落到第一页的按钮所对的操作上
+        if (shown.trainOps().isEmpty() || !box.trainOps) {
+          return;
+        }
+        switch (act.action()) {
+          case BACK -> box.trainOps = false;
+          case CANCEL -> cancelTrip();
+          case SKIP -> skipStop();
+        }
+      }
       case ConsoleTarget.CallBadge ignored -> {
         box.replying = !box.calls.isEmpty();
+        if (box.replying) {
+          box.trainOps = false;
+        }
         // 回复时顺带选中呼叫的车：回复完要给它排进路时不用再选
         if (box.replying) {
           service.select(box, SignallerService.key(box.calls.peekFirst().trainName()));
@@ -96,19 +130,6 @@ final class SignalboxActions {
     }
   }
 
-  /** 切换类按钮紧接着上一次生效的重复按下（按住右键时客户端会连发）：不算，免得刚转自动又转回人工、刚设的自动通过又被撤掉。 */
-  private boolean repeated(SignalboxState.Button button) {
-    if (button != SignalboxState.Button.MODE && button != SignalboxState.Button.AUTO_PASS) {
-      return false;
-    }
-    Instant last = box.toggled.get(button);
-    if (last != null && now.isBefore(last.plus(SignallerService.TOGGLE_REPEAT))) {
-      return true;
-    }
-    box.toggled.put(button, now);
-    return false;
-  }
-
   /** 按了灰显的按钮：说明为什么按不了。 */
   private void refuse(SignalboxState.Button button) {
     if (button == SignalboxState.Button.MODE) {
@@ -131,10 +152,12 @@ final class SignalboxActions {
           case CANCEL_ROUTE -> permit == null
               ? SignalboxState.NoticeKind.NO_PERMIT
               : SignalboxState.NoticeKind.ROUTE_LOCKED;
-          case HOLD -> box.holds.containsKey(key)
-              ? SignalboxState.NoticeKind.ALREADY_HELD
-              : SignalboxState.NoticeKind.NOT_DWELLING;
-          case RELEASE -> SignalboxState.NoticeKind.NOT_HELD;
+          case HOLD -> box.cancelling.containsKey(key)
+              ? SignalboxState.NoticeKind.CANCEL_PENDING
+              : box.holds.containsKey(key)
+                  ? SignalboxState.NoticeKind.ALREADY_HELD
+                  : SignalboxState.NoticeKind.NOT_DWELLING;
+          case TRAIN_OPS -> SignalboxState.NoticeKind.NO_SELECTION;
           case AUTO_PASS -> !box.manual()
               ? SignalboxState.NoticeKind.AUTO_MODE
               : SignalboxState.NoticeKind.NO_ROUTE;
@@ -158,9 +181,15 @@ final class SignalboxActions {
     switch (button) {
       case SET_ROUTE -> setRoute(train.get(), key);
       case CANCEL_ROUTE -> cancelRoute(key);
-      case HOLD -> hold(train.get(), key);
-      case RELEASE -> release(key);
+      case HOLD -> {
+        if (box.holds.containsKey(key)) {
+          release(key);
+        } else {
+          hold(train.get(), key);
+        }
+      }
       case AUTO_PASS -> autoPass(train.get(), key);
+      case TRAIN_OPS -> box.trainOps = true;
       case MODE -> toggleMode();
     }
   }
@@ -410,6 +439,145 @@ final class SignalboxActions {
         box,
         fits ? SignalboxState.NoticeKind.REPLY_SENT : SignalboxState.NoticeKind.REPLY_WRONG,
         Optional.of(call.trainName()));
+  }
+
+  /** 取消车次：第一下只记下等着确认，同一个人对同一列车再按一下才取消。两下都按此刻的现场复核：联挂中的一体车、车上有人而车又不在站台上停着时，都不能取消。 */
+  private void cancelTrip() {
+    Optional<String> train = selectedName();
+    if (train.isEmpty() || box.duty == null) {
+      return;
+    }
+    String key = SignallerService.key(train.get());
+    if (box.cancelling.containsKey(key)) {
+      // 已确认、正在倒计时：再按不算第二次
+      service.notice(box, SignalboxState.NoticeKind.CANCEL_PENDING, train);
+      return;
+    }
+    SignallerTrainDesk desk = service.world().trains();
+    SignallerTrainDesk.Scene scene = desk.scene(train.get());
+    Optional<SignalboxState.NoticeKind> refusal =
+        !mayCancel
+            ? Optional.of(SignalboxState.NoticeKind.CANCEL_NO_PERMISSION)
+            : service.examining(box.duty.player)
+                ? Optional.of(SignalboxState.NoticeKind.CANCEL_IN_EXAM)
+                : !ours(train.get())
+                    ? Optional.of(SignalboxState.NoticeKind.CANCEL_OUT_OF_ZONE)
+                    : scene.coupled()
+                        ? Optional.of(SignalboxState.NoticeKind.CANCEL_COUPLED)
+                        : scene.playersAboard() && !scene.atPlatform()
+                            ? Optional.of(SignalboxState.NoticeKind.CANCEL_OCCUPIED)
+                            : Optional.empty();
+    if (refusal.isPresent()) {
+      box.cancelArm = null;
+      service.notice(box, refusal.get(), train);
+      return;
+    }
+    SignalBox.CancelArm arm = box.cancelArm;
+    boolean armed =
+        arm != null
+            && arm.player().equals(box.duty.player)
+            && arm.train().equals(key)
+            && arm.live(now);
+    if (!armed) {
+      box.cancelArm = new SignalBox.CancelArm(box.duty.player, key, now);
+      return;
+    }
+    if (now.isBefore(arm.at().plus(SignallerService.TOGGLE_REPEAT))) {
+      return;
+    }
+    box.cancelArm = null;
+    box.trainOps = false;
+    box.duty.tripsCancelled++;
+    service.examine(box, SignallerExaminer.Event.TRIP_CANCELLED);
+    service.notice(box, SignalboxState.NoticeKind.TRIP_CANCELLED, train);
+    service.logCancel(box, train.get());
+    if (!scene.playersAboard()) {
+      desk.cancel(train.get());
+      return;
+    }
+    // 车上有人：先扣住、插播停运，倒计时到了再删
+    box.holds.putIfAbsent(key, new SignalBox.Hold(train.get(), now));
+    box.cancelling.put(
+        key, new SignalBox.PendingCancel(train.get(), now.plus(SignallerService.CANCEL_COUNTDOWN)));
+    desk.announceCancel(train.get());
+  }
+
+  /** 越站：晚点够门槛、下一个停车站归本楼管时，令越过下一个停车站；已下令的再按撤销。 */
+  private void skipStop() {
+    Optional<String> train = selectedName();
+    if (train.isEmpty()) {
+      return;
+    }
+    SignallerTrainDesk desk = service.world().trains();
+    Optional<SignallerTrainDesk.Skip> skip = desk.skip(train.get());
+    if (skip.isPresent() && skip.get().ordered()) {
+      Optional<SignallerTrainDesk.SkipRefusal> refusal = desk.revokeSkip(train.get());
+      if (refusal.isPresent()) {
+        service.notice(box, skipNotice(refusal.get()), train);
+        return;
+      }
+      service.examine(box, SignallerExaminer.Event.SKIP_REVOKED);
+      service.notice(box, SignalboxState.NoticeKind.SKIP_REVOKED, train);
+      return;
+    }
+    if (box.duty != null && service.examOnly(box.duty.player)) {
+      service.notice(box, SignalboxState.NoticeKind.SKIP_IN_EXAM, train);
+      return;
+    }
+    if (desk.scene(train.get()).coupled()) {
+      service.notice(box, SignalboxState.NoticeKind.SKIP_COUPLED, train);
+      return;
+    }
+    OptionalLong delay = service.world().info(train.get()).delaySeconds();
+    if (delay.isEmpty() || delay.getAsLong() < service.settings().skipMinDelaySeconds()) {
+      service.notice(box, SignalboxState.NoticeKind.SKIP_NOT_LATE, train);
+      return;
+    }
+    if (skip.isEmpty()) {
+      service.notice(box, SignalboxState.NoticeKind.SKIP_NO_STOP, train);
+      return;
+    }
+    if (map == null || !map.inside(skip.get().station())) {
+      service.notice(box, SignalboxState.NoticeKind.SKIP_OUT_OF_ZONE, train);
+      return;
+    }
+    Optional<SignallerTrainDesk.SkipRefusal> refusal =
+        skip.get().refusal().or(() -> desk.orderSkip(train.get()));
+    if (refusal.isPresent()) {
+      service.notice(box, skipNotice(refusal.get()), train);
+      return;
+    }
+    if (box.duty != null) {
+      box.duty.skipsOrdered++;
+    }
+    SignalBox.Permit permit = box.permits.get(SignallerService.key(train.get()));
+    if (permit != null) {
+      permit.skipOrdered = true;
+    }
+    service.examine(box, SignallerExaminer.Event.SKIP_ORDERED);
+    service.notice(box, SignalboxState.NoticeKind.SKIP_ORDERED, train);
+  }
+
+  private static SignalboxState.NoticeKind skipNotice(SignallerTrainDesk.SkipRefusal refusal) {
+    return switch (refusal) {
+      case NO_STOP -> SignalboxState.NoticeKind.SKIP_NO_STOP;
+      case TERMINAL -> SignalboxState.NoticeKind.SKIP_TERMINAL;
+      case DIRECTIVE -> SignalboxState.NoticeKind.SKIP_DIRECTIVE;
+      case BRAKING -> SignalboxState.NoticeKind.SKIP_BRAKING;
+      case CALL_DESTINATION -> SignalboxState.NoticeKind.SKIP_CALL_DESTINATION;
+      case CREW_BOARDING -> SignalboxState.NoticeKind.SKIP_CREW_BOARDING;
+    };
+  }
+
+  /** 这列车归本楼处置：已在区里（运行、停站或被扣）；还在接近、在入口等着的车停在区外，多半在邻区的站台上，归那边管。 */
+  private boolean ours(String trainName) {
+    return shown.rows().stream()
+        .anyMatch(
+            row ->
+                row.trainName().equals(trainName)
+                    && (row.status() == SignalboxState.RowStatus.IN_ZONE
+                        || row.status() == SignalboxState.RowStatus.DWELLING
+                        || row.status() == SignalboxState.RowStatus.HELD));
   }
 
   private Optional<String> selectedName() {

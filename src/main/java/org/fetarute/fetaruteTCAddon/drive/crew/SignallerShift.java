@@ -72,6 +72,8 @@ public record SignallerShift(
    * @param lostTime 拿着许可驶入的车里，出区时晚点比进区时多出容差以上的车数（在区内丢了时间）
    * @param conflictsGood 交汇排序得当：从不同入口抢同一片道岔的两列车，两车在区内合计多出的晚点在容差以内
    * @param conflictsBad 交汇排序不当：两车合计多出的晚点超过上限
+   * @param tripsCancelled 取消的车次（只记次数，不计分）
+   * @param skipsOrdered 令越站的次数（只记次数，不计分）
    */
   public record Counts(
       int trainsHandled,
@@ -86,7 +88,9 @@ public record SignallerShift(
       int keptTime,
       int lostTime,
       int conflictsGood,
-      int conflictsBad) {
+      int conflictsBad,
+      int tripsCancelled,
+      int skipsOrdered) {
 
     public Counts {
       trainsHandled = Math.max(0, trainsHandled);
@@ -102,6 +106,8 @@ public record SignallerShift(
       lostTime = Math.max(0, lostTime);
       conflictsGood = Math.max(0, conflictsGood);
       conflictsBad = Math.max(0, conflictsBad);
+      tripsCancelled = Math.max(0, tripsCancelled);
+      skipsOrdered = Math.max(0, skipsOrdered);
     }
 
     /** 按名字设各项，没设的为 0。 */
@@ -125,6 +131,8 @@ public record SignallerShift(
     private int lostTime;
     private int conflictsGood;
     private int conflictsBad;
+    private int tripsCancelled;
+    private int skipsOrdered;
 
     private Builder() {}
 
@@ -193,6 +201,16 @@ public record SignallerShift(
       return this;
     }
 
+    public Builder tripsCancelled(int value) {
+      tripsCancelled = value;
+      return this;
+    }
+
+    public Builder skipsOrdered(int value) {
+      skipsOrdered = value;
+      return this;
+    }
+
     public Counts build() {
       return new Counts(
           trainsHandled,
@@ -207,7 +225,9 @@ public record SignallerShift(
           keptTime,
           lostTime,
           conflictsGood,
-          conflictsBad);
+          conflictsBad,
+          tripsCancelled,
+          skipsOrdered);
     }
   }
 
@@ -261,6 +281,14 @@ public record SignallerShift(
 
   public int conflictsBad() {
     return counts.conflictsBad();
+  }
+
+  public int tripsCancelled() {
+    return counts.tripsCancelled();
+  }
+
+  public int skipsOrdered() {
+    return counts.skipsOrdered();
   }
 
   /** 班次时长；时钟回拨时为 0。 */

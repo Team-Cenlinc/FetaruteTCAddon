@@ -225,6 +225,100 @@ class PidsSnapshotProviderTest {
     verify(timetables, times(3)).departuresAt(any(), any(), any(), any(), anyInt());
   }
 
+  /** 信号员令越过本站的车：站牌给的是通过行，快照按越站令标出它本应停车。 */
+  @Test
+  void aPassingRowTheSignallerOrderedIsMarkedSkipped() {
+    board(boardRow(EtaApi.BoardPhase.EN_ROUTE, T0.plusSeconds(120), Optional.of("t1"), true));
+    assertFalse(provider.snapshot(CCC).rows().get(0).skipped(), "没有越站令：交路里本就通过");
+
+    provider.setSkippedRows(
+        (train, routeId, stopSequence) ->
+            "t1".equals(train) && "SURN:L1:R1".equals(routeId) && stopSequence == 1);
+    provider.invalidateSnapshots();
+
+    PidsRow row = provider.snapshot(CCC).rows().get(0);
+    assertTrue(row.passing());
+    assertTrue(row.skipped());
+  }
+
+  /** 站台屏行上只有交路 ID，越站令按交路 UUID 记：先换成 UUID 再问；查不到交路时不算越站。 */
+  @Test
+  void skippedRowsLookUpTheRouteUuidByItsId() {
+    PidsSnapshotProvider.SkippedRows rows =
+        PidsSnapshotProvider.SkippedRows.byRouteUuid(
+            routeId -> "SURN:L1:R1".equals(routeId) ? Optional.of(ROUTE) : Optional.empty(),
+            (train, routeUuid, index) ->
+                "t1".equals(train) && ROUTE.equals(routeUuid) && index == 1);
+
+    assertTrue(rows.skipped("t1", "SURN:L1:R1", 1));
+    assertFalse(rows.skipped("t1", "SURN:L1:R1", 2));
+    assertFalse(rows.skipped("t1", "SURN:L1:R9", 1));
+  }
+
+  /** 信号员取消的晚点车：本站计划到达已过，取消行按取消时的晚点再多显示 5 分钟，候车的人才看得到。 */
+  @Test
+  void aTripTheSignallerCancelsLateStaysUntilWellAfterItWouldHaveArrived() {
+    UUID timetable = UUID.randomUUID();
+    // 本站计划到达 T0-60，取消时预计晚点 240 秒：显示到 T0-60+240+300 = T0+480
+    board();
+    departures(departure(timetable, true, "SURN:S:CCC:2", T0.minusSeconds(30)));
+    when(routes.getRoute(ROUTE)).thenReturn(Optional.of(routeChangingToL2AtCcc()));
+    assertTrue(provider.snapshot(CCC).rows().isEmpty(), "没有登记：计划到达已过就不列");
+
+    when(timetables.getAssignment("t1")).thenReturn(Optional.of(assignment(timetable, 240)));
+    provider.holdCancelled("t1");
+
+    assertEquals(
+        List.of(PidsRow.Status.CANCELLED),
+        provider.snapshot(CCC).rows().stream().map(PidsRow::status).toList());
+    now.set(T0.plusSeconds(479));
+    assertEquals(1, provider.snapshot(CCC).rows().size());
+    now.set(T0.plusSeconds(490));
+    assertTrue(provider.snapshot(CCC).rows().isEmpty());
+  }
+
+  /** 取数失败沿用旧行：顺延中的取消行按顺延后的时刻留，不按已过的计划到达丢掉。 */
+  @Test
+  void aHeldCancelledRowSurvivesAFailedRefresh() {
+    board();
+    UUID timetable = UUID.randomUUID();
+    departures(departure(timetable, true, "SURN:S:CCC:2", T0.minusSeconds(30)));
+    when(routes.getRoute(ROUTE)).thenReturn(Optional.of(routeChangingToL2AtCcc()));
+    when(timetables.getAssignment("t1")).thenReturn(Optional.of(assignment(timetable, 240)));
+    provider.holdCancelled("t1");
+    assertEquals(1, provider.snapshot(CCC).rows().size());
+
+    when(eta.getBoard(any(), any(), any(), any())).thenThrow(new IllegalStateException("boom"));
+    now.set(T0.plus(TTL));
+
+    assertEquals(
+        List.of(PidsRow.Status.CANCELLED),
+        provider.snapshot(CCC).rows().stream().map(PidsRow::status).toList());
+  }
+
+  /** 回查窗口按还在保留期的取消登记放宽；登记过了保留期就丢，窗口回到平时。 */
+  @Test
+  void theLookbackWidensOnlyWhileACancelIsHeld() {
+    board();
+    UUID timetable = UUID.randomUUID();
+    when(timetables.getAssignment("t1")).thenReturn(Optional.of(assignment(timetable, 240)));
+    provider.holdCancelled("t1");
+
+    provider.snapshot(CCC);
+    verify(timetables)
+        .departuresAt(isNull(), eq("CCC"), eq(T0.minusSeconds(240 + 300)), any(), anyInt());
+
+    now.set(T0.plus(PidsSnapshotProvider.CANCELLED_HOLD_RETAIN).plusSeconds(1));
+    provider.snapshot(CCC);
+    verify(timetables)
+        .departuresAt(
+            isNull(),
+            eq("CCC"),
+            eq(now.get().minus(PidsSnapshotProvider.PLANNED_LOOKBACK)),
+            any(),
+            anyInt());
+  }
+
   @Test
   void stationKeyIsNormalized() {
     assertEquals(CCC, new PidsStationKey(" surn ", "ccc"));
@@ -243,6 +337,11 @@ class PidsSnapshotProviderTest {
 
   private static EtaApi.BoardRow boardRow(
       EtaApi.BoardPhase phase, Instant at, Optional<String> trainName) {
+    return boardRow(phase, at, trainName, false);
+  }
+
+  private static EtaApi.BoardRow boardRow(
+      EtaApi.BoardPhase phase, Instant at, Optional<String> trainName, boolean passing) {
     return new EtaApi.BoardRow(
         "L1",
         "SURN:L1:R1",
@@ -258,7 +357,7 @@ class PidsSnapshotProviderTest {
         at.toEpochMilli(),
         phase,
         1,
-        false,
+        passing,
         false,
         false,
         trainName,
@@ -271,8 +370,13 @@ class PidsSnapshotProviderTest {
 
   private static TimetableApi.Departure departure(
       boolean cancelled, String nodeId, Instant plannedDeparture) {
+    return departure(UUID.randomUUID(), cancelled, nodeId, plannedDeparture);
+  }
+
+  private static TimetableApi.Departure departure(
+      UUID timetableId, boolean cancelled, String nodeId, Instant plannedDeparture) {
     return new TimetableApi.Departure(
-        UUID.randomUUID(),
+        timetableId,
         UUID.randomUUID(),
         ROUTE,
         "R1",
@@ -284,6 +388,28 @@ class PidsSnapshotProviderTest {
         false,
         LocalDate.of(2026, 9, 30),
         cancelled);
+  }
+
+  /** 列车 t1 跑的是 departure() 那一班（车次 1001），预计到下一站晚点若干秒。 */
+  private static TimetableApi.TrainAssignment assignment(UUID timetableId, long delaySeconds) {
+    return new TimetableApi.TrainAssignment(
+        "t1",
+        timetableId,
+        "1001",
+        ROUTE,
+        Optional.empty(),
+        LocalDate.of(2026, 9, 30),
+        T0.minusSeconds(1800),
+        0L,
+        Optional.of(0),
+        Optional.empty(),
+        Optional.empty(),
+        OptionalLong.of(delaySeconds - 30),
+        Optional.of(1),
+        Optional.empty(),
+        Optional.of("CCC"),
+        OptionalLong.of(delaySeconds),
+        Optional.empty());
   }
 
   /** AAA →（本站起换 L2）CCC → DDD 终到。 */

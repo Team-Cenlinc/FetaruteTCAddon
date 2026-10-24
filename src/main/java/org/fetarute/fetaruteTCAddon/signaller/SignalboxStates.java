@@ -16,8 +16,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerTrainDesk;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
@@ -107,7 +109,33 @@ final class SignalboxStates {
         pending,
         signals(),
         selected.map(row -> platforms(row.row().trainName())).orElse(List.of()),
-        service.delegatedFrom(box));
+        service.delegatedFrom(box),
+        staffed && box.trainOps && selected.isPresent()
+            ? Optional.of(trainOps(selected.get()))
+            : Optional.empty());
+  }
+
+  /** 已令越过的那一站的站码。 */
+  private Optional<String> skipping(String trainName) {
+    return service
+        .world()
+        .trains()
+        .skipping(trainName)
+        .flatMap(station -> RouteTerminals.stationCodeOf(station.value()));
+  }
+
+  /** 列车操作（第二页）：取消车次是否等着确认，下一个停车站与是否已令越过。 */
+  private SignalboxState.TrainOps trainOps(Row selected) {
+    boolean armed =
+        box.cancelArm != null
+            && box.cancelArm.train().equals(selected.key())
+            && box.cancelArm.live(now);
+    Optional<SignallerTrainDesk.Skip> skip =
+        service.world().trains().skip(selected.row().trainName());
+    return new SignalboxState.TrainOps(
+        armed,
+        skip.flatMap(s -> RouteTerminals.stationCodeOf(s.station().value())),
+        skip.map(SignallerTrainDesk.Skip::ordered).orElse(false));
   }
 
   /** 列车表一行，连同它的键与排序用的量。 */
@@ -176,7 +204,8 @@ final class SignalboxStates {
                   info.delaySeconds(),
                   status.progress(),
                   autoPass,
-                  permit != null && permit.source == SignalBox.Source.TIMEOUT),
+                  permit != null && permit.source == SignalBox.Source.TIMEOUT,
+                  skipping(name)),
               order(status.status()),
               status.since()));
     }
@@ -296,10 +325,12 @@ final class SignalboxStates {
     buttons.put(
         SignalboxState.Button.CANCEL_ROUTE,
         permit != null && permit.state == SignalBox.PermitState.PENDING);
+    // 扣车与放行同一个键：停站的车可扣，扣着的车再按放行；停运倒计时中的车不能放走
     buttons.put(
         SignalboxState.Button.HOLD,
-        status == SignalboxState.RowStatus.DWELLING && !box.holds.containsKey(key));
-    buttons.put(SignalboxState.Button.RELEASE, box.holds.containsKey(key));
+        !box.cancelling.containsKey(key)
+            && (status == SignalboxState.RowStatus.DWELLING || box.holds.containsKey(key)));
+    buttons.put(SignalboxState.Button.TRAIN_OPS, true);
     boolean routeKnown =
         (permit != null && permit.route.isPresent())
             || Optional.ofNullable(box.waiting.get(key)).flatMap(w -> w.route).isPresent()

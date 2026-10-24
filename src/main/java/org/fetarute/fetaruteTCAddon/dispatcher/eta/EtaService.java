@@ -194,6 +194,8 @@ public final class EtaService implements AutoCloseable {
   /** 运行时哪些下标已有实际节点；未接入时把实际节点与声明节点不同的下标视为已定站台。 */
   private volatile PlacedStops placedStops;
 
+  private volatile SkippedStops skippedStops;
+
   private volatile PlannedPlatforms plannedPlatforms;
 
   /** 还没派出的票预先指定的站台（叫车）；为 null 时没有。 */
@@ -400,6 +402,27 @@ public final class EtaService implements AutoCloseable {
     this.placedStops = placedStops;
   }
 
+  /**
+   * 接入信号员令越过的停车站：站牌上这趟车在那一站成为通过行。
+   *
+   * @param skippedStops 来源；传 null 表示断开
+   */
+  public void attachSkippedStops(SkippedStops skippedStops) {
+    this.skippedStops = skippedStops;
+  }
+
+  /** 信号员令越过的停车站（只在内存里，读可在任意线程）。 */
+  @FunctionalInterface
+  public interface SkippedStops {
+
+    /**
+     * @param trainName 列车名
+     * @param routeUuid 列车当前交路
+     * @param index 交路节点下标
+     */
+    boolean skipped(String trainName, UUID routeUuid, int index);
+  }
+
   /** 运行时某停靠下标是否已有实际节点（DYNAMIC 已选台，或到站时记下了实际股道）。 */
   @FunctionalInterface
   public interface PlacedStops {
@@ -568,6 +591,11 @@ public final class EtaService implements AutoCloseable {
       return;
     }
     trainCache.invalidateByPrefix(trainName + "|");
+  }
+
+  /** 丢弃各站牌的缓存，下一次查询现算：某列车的停站计划变了（信号员令越站或撤销），旧站牌会把它画错好几秒。 */
+  public void invalidateBoards() {
+    boards.clear();
   }
 
   /**
@@ -1076,7 +1104,8 @@ public final class EtaService implements AutoCloseable {
         spawnManager instanceof DutyContinuitySupport support ? support : null,
         layovers == null ? null : EtaSources.Layovers.of(layovers),
         throughRoutes,
-        divisionRemainders);
+        divisionRemainders,
+        skippedStops);
   }
 
   /** 未发车票据的车型：票上指定或编组方案预计的车型优先，否则按 CRET 车库推断（读牌子，只能在主线程）。 */

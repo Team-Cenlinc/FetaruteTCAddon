@@ -239,7 +239,7 @@ final class EtaCalculator {
       return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
     }
 
-    RouteStopPlan plan = stopPlan(trainName, route);
+    RouteStopPlan plan = stopPlan(trainName, snap.routeUuid(), route);
     Optional<TargetSelection> targetSelOpt =
         resolveTargetSelection(route, plan, snap.routeIndex(), target);
     if (targetSelOpt.isEmpty()) {
@@ -341,6 +341,21 @@ final class EtaCalculator {
     }
     return RouteStopPlan.of(
         route.waypoints(), effective, stops, placedDynamicStops(placed, trainName, route, stops));
+  }
+
+  /** 同 {@link #stopPlan(String, RouteDefinition)}，再把信号员令这趟车越过的停车点按不停车算：途中不累加它的停站，也不当下一个停车点。 */
+  private RouteStopPlan stopPlan(String trainName, UUID routeUuid, RouteDefinition route) {
+    RouteStopPlan plan = stopPlan(trainName, route);
+    if (trainName == null || routeUuid == null) {
+      return plan;
+    }
+    Set<Integer> skipped = new HashSet<>();
+    for (int i = 0; i < plan.size(); i++) {
+      if (plan.stopsAt(i) && sources.skippedStops().skipped(trainName, routeUuid, i)) {
+        skipped.add(i);
+      }
+    }
+    return plan.withSkipped(skipped);
   }
 
   /** 已定站台的 DYNAMIC 停靠下标；只问 DYNAMIC 停靠，其余下标的站台由交路声明。 */
@@ -727,7 +742,7 @@ final class EtaCalculator {
         continue;
       }
       RouteDefinition route = routeOpt.get();
-      RouteStopPlan plan = stopPlan(trainName, route);
+      RouteStopPlan plan = stopPlan(trainName, snap.routeUuid(), route);
       if (layoverMidRoute(trainName, snap, plan)) {
         // 交路中途就在待命（解编解下、照搬了主干进度的车）：按它的下一趟由待命那一段列出，不按照搬来的进度列成主干的车
         continue;
@@ -1344,7 +1359,7 @@ final class EtaCalculator {
     if (route.isEmpty()) {
       return Optional.empty();
     }
-    RouteStopPlan plan = stopPlan(trainName, route.get());
+    RouteStopPlan plan = stopPlan(trainName, snap.routeUuid(), route.get());
     int terminal = plan.size() - 1;
     if (terminal < 0) {
       return Optional.empty();
@@ -1611,7 +1626,10 @@ final class EtaCalculator {
         result.eta(),
         phase,
         index,
-        !stop.plan().stopsAt(index),
+        !stop.plan().stopsAt(index)
+            || trainName
+                .filter(name -> sources.skippedStops().skipped(name, stop.routeUuid(), index))
+                .isPresent(),
         ownEnd.equals(OptionalInt.of(index)),
         endOperation.destinationId().filter(RouteTerminals.OUT_OF_SERVICE_ID::equals).isPresent(),
         trainName,

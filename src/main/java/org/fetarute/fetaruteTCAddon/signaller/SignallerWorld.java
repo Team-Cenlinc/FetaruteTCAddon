@@ -10,6 +10,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerTrainDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 
@@ -47,6 +48,9 @@ interface SignallerWorld {
 
   /** 改停股道。 */
   SignallerPlatformDesk platforms();
+
+  /** 取消车次。 */
+  SignallerTrainDesk trains();
 
   /** 在线玩家此刻的位置与状态；不在线时为空。 */
   Optional<PlayerSpot> player(UUID player);

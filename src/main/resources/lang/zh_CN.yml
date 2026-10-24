@@ -23,6 +23,8 @@ display:
         scheduled: "预计 {minutes} 分"
         minutes: "{minutes} 分"
         unavailable: "-"
+        # 信号员令越过的站：后续站点列表里写在到站时间的位置
+        skipped: "不停车"
     bossbar:
       template: |-
         rotate_ticks: 60
@@ -87,6 +89,8 @@ display:
       next: "<green>下一站</green> <yellow>{station}</yellow> <gray>{eta}</gray>"
       stop: "<white>{station}</white> <gray>{eta}</gray>"
       terminal: "<gold>终点</gold> <white>{station}</white> <gray>{eta}</gray>"
+      # 信号员令越过的站：本趟不停车，{eta} 为“不停车”
+      skipped: "<dark_gray>{station}</dark_gray> <gold>{eta}</gold>"
       details:
         - "<gray>{?station_lang2}</gray>"
         - "<gray>换乘</gray> {?transfer_lines}"
@@ -1760,6 +1764,22 @@ signaller:
     caution-bar: "<aqua>信号楼：</aqua><white>请以注意速度运行</white>"
     ack: "<prefix> <aqua><zone></aqua> <white>信号楼：已收到</white>"
     ack-bar: "<aqua>信号楼：</aqua><white>已收到</white>"
+  # 信号楼取消车次：车上所有人收到的停运通知；<station> 为本站站名
+  cancel:
+    cabin:
+      title: "<red>本次列车停运</red>"
+      subtitle: "<white>请全体乘客在本站下车</white>"
+      chat: "<prefix> <gold>车内广播：</gold><white>因运行调整，本次列车在<station>站停运，请全体乘客下车，换乘后续列车。</white>"
+  # 信号楼令晚点列车越站：<station> 为不停车的车站，<train> 为车次
+  skip:
+    cabin:
+      ordered-chat: "<prefix> <gold>车内广播：</gold><white>因列车晚点，本次列车<station>站不停车。前往<station>站的乘客，请换乘后续列车。</white>"
+      ordered-subtitle: "<yellow><station>站不停车</yellow>"
+      restored-chat: "<prefix> <gold>车内广播：</gold><white>本次列车恢复停靠<station>站。</white>"
+      restored-subtitle: "<white>恢复停靠<station>站</white>"
+    driver:
+      ordered: "<aqua>信号楼：</aqua><white><station>站越站，不停车</white>"
+      restored: "<aqua>信号楼：</aqua><white>撤销越站，<station>站照常停车</white>"
 pids:
   # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
   board:
@@ -2033,6 +2053,8 @@ pids:
         held: "扣车 <seconds> 秒"
       # 由系统代排的车：<status> 为上面的状态
       auto-routed: "<status>（代排）"
+      # 已令越站的车：<status> 为原状态，<station> 为被越的站名
+      skipping: "<status> · 越站<station>"
       # 站场图上让给小区（嵌在本控制区里、有人值守）的那一片：<zone> 为小区名，<name> 为小区的信号员
       delegated: "<zone> · 车站控制（<name>）"
       on-time: "正点"
@@ -2047,6 +2069,8 @@ pids:
         hold-secondary: "Hold"
         release: "放行"
         release-secondary: "Release"
+        train-ops: "列车操作"
+        train-ops-secondary: "Train ops"
         auto-pass: "自动通过"
         auto-pass-secondary: "Auto pass"
         to-auto: "转为自动"
@@ -2065,12 +2089,43 @@ pids:
         caution-secondary: "Proceed at caution speed"
         ack: "已收到"
         ack-secondary: "Acknowledged"
+      # 列车操作（第二页）的三行
+      train-action:
+        skip: "越站"
+        skip-secondary: "Skip next stop"
+        cancel: "取消车次"
+        cancel-secondary: "Cancel trip"
+        cancel-armed: "确认取消 <train>"
+        cancel-armed-secondary: "Press again to confirm"
+        skip-revoke: "撤销越站"
+        skip-revoke-secondary: "Undo skip"
+        back: "返回"
+        back-secondary: "Back"
       # 标题栏右侧的临时提示（数秒后消失）；<train> 为涉及的车次，route-blocked-by 的为占用进路的车次
       notice:
         route-blocked: "进路被占用，许可排列中"
         route-blocked-by: "进路被 <train> 占用"
         route-locked: "进路已锁闭，不能取消"
         not-dwelling: "该列车未在站内停车，不能扣车"
+        cancel-occupied: "载客须停站后取消"
+        cancel-coupled: "联挂车须先拆开"
+        cancel-no-permission: "无取消车次权限"
+        cancel-in-exam: "考试中不能取消"
+        cancel-out-of-zone: "未进本区不能取消"
+        cancel-pending: "正在停运倒计时"
+        trip-cancelled: "已取消 <train>"
+        skip-not-late: "晚点不足越站门槛"
+        skip-coupled: "联挂车不能越站"
+        skip-no-stop: "前方无停车站"
+        skip-out-of-zone: "下一站不属本区"
+        skip-terminal: "终点站不能越"
+        skip-directive: "该站有作业不得越"
+        skip-braking: "已开始进站刹车"
+        skip-call-destination: "叫车目的站不能越"
+        skip-crew-boarding: "该站有乘务员换班"
+        skip-in-exam: "考试中不能越站"
+        skip-ordered: "已令 <train> 越站"
+        skip-revoked: "已撤销 <train> 越站"
         platform-unavailable: "该站已不能改停股道"
         platform-locked: "通往原股道的进路已锁闭，不能改停"
         auto-pass-on: "已设置自动通过"
@@ -2289,6 +2344,8 @@ pids:
     arriving-out-of-service: "<aqua>▶</aqua> <platform><white>回库列车即将进站，请勿上车</white>"
     passing: "<gold>⚠</gold> <platform><white>有列车通过，请在安全线以内候车</white>"
     cancelled: "<gray>[<station>]</gray> <platform><line> <white><time></white> <gray>开往</gray> <white><destination></white> <red>的班次已取消</red>"
+    # 信号员令晚点车越过本站：<time> 为预计通过时刻
+    skipped: "<gray>[<station>]</gray> <platform><line> <white><time></white> <gray>开往</gray> <white><destination></white> <gold>的列车因晚点本站不停车，请乘坐后续列车</gold>"
     delayed: "<gray>[<station>]</gray> <platform><line> <gray>开往</gray> <white><destination></white> <gold>的列车晚点约 <minutes> 分钟</gold>"
     platform-changed: "<gray>[<station>]</gray> <line> <gray>开往</gray> <white><destination></white> <gold>的列车改在 <white><new> 站台</white>停靠（原 <from> 站台）</gold>"
     overflow: "<gray>[<station>]</gray> <gray>另有 <count> 条站台通知，请留意站台屏。</gray>"
@@ -2490,6 +2547,7 @@ drive:
       train: "列车"
       signal: "信号"
       signaller: "信号员"
+      dispatch-order: "调度命令"
       next-station: "下一站"
       stop-mark: "停车点"
       stop: "停站"
@@ -2532,6 +2590,9 @@ drive:
       signaller:
         waiting: "<yellow>入口等候进路</yellow> <gray>按两下 Q 呼叫</gray>"
         waiting-guard: "<yellow>入口等候进路</yellow> <gray>/fta drive call 呼叫</gray>"
+      # 信号楼下的调度命令，显示到命令失效（越站：过了那一站或撤销）
+      dispatch-order:
+        skip: "<gold><station> 站越站</gold> <gray>不停车</gray>"
       station:
         none: "<gray>-</gray>"
       schedule:
@@ -2903,8 +2964,10 @@ drive:
         notice: "提示"
         drill: "演练"
         signaller: "信号员"
+        dispatch-order: "调度命令"
       value:
         train: "<white><train></white>"
+        dispatch-order-skip: "<gold><station> 站越站</gold> <gray>不停车，无作业</gray>"
         signaller-buzzer: "<yellow>入口等候进路</yellow> <gray>发车铃右键两下呼叫</gray>"
         signaller-command: "<yellow>入口等候进路</yellow> <gray>/fta guard call 呼叫</gray>"
         crew-driver: "<white>驾驶员 <driver></white>"
@@ -2963,6 +3026,7 @@ drive:
       death: "<prefix> <yellow>值乘已结束</yellow>"
       game-mode: "<prefix> <yellow>当前游戏模式不允许值乘，值乘已结束</yellow>"
       train-gone: "<prefix> <yellow>列车已不在，值乘已结束</yellow> <gray>完成 <stops> 站</gray>"
+      signaller-cancel: "<prefix> <yellow>信号楼已取消本车次，值乘已结束</yellow> <gray>完成 <stops> 站</gray>"
       timeouts: "<prefix> <red>连续多站超时，值乘已结束（未完成）</red> <gray>完成 <stops> 站，其中 <timeouts> 站超时</gray>"
       left-behind: "<prefix> <red>列车已开走，你未在车上（漏乘），值乘已结束（未完成）</red> <gray>完成 <stops> 站</gray>"
       disabled: "<prefix> <yellow>车掌功能已关闭，值乘已结束</yellow>"
@@ -3923,6 +3987,7 @@ drive:
     admin: "<prefix> <yellow>管理员已结束你的驾驶</yellow>"
     handback: "<prefix> <yellow>列车已交还自动运行，驾驶结束</yellow>"
     dispatch-abort: "<prefix> <red>调度系统已收回列车，驾驶结束</red>"
+    signaller-cancel: "<prefix> <yellow>信号楼已取消本车次 <white><train></white>，驾驶结束；本次任务记为中断，不扣分</yellow>"
     watchdog: "<prefix> <red>列车长时间未能正常运行，已交还自动运行</red>"
     task-complete: "<prefix> <green>已到达终点站，任务完成，列车交还自动运行</green>"
     service-end: "<prefix> <green>列车已到达收车地点，本次驾驶结束</green>"

@@ -48,6 +48,25 @@ class SignallerRecordCodecTest {
   }
 
   @Test
+  @DisplayName("明细记下取消车次与令越站的次数")
+  void detailCountsCancellationsAndSkips() {
+    SignallerShift shift =
+        new SignallerShift(
+            UUID.randomUUID(),
+            "Sig",
+            "SURC",
+            "ABC",
+            java.time.Instant.parse("2026-10-24T08:00:00Z"),
+            java.time.Instant.parse("2026-10-24T09:00:00Z"),
+            SignallerShift.Counts.builder().tripsCancelled(2).skipsOrdered(3).build(),
+            SignallerShift.EndReason.OFF_DUTY);
+    JsonObject root = JsonParser.parseString(SignallerRecordCodec.encode(shift)).getAsJsonObject();
+
+    assertEquals(2, root.get("tripsCancelled").getAsInt());
+    assertEquals(3, root.get("skipsOrdered").getAsInt());
+  }
+
+  @Test
   @DisplayName("明细带格式版本、角色与班次里的各项计数")
   void detailJson() {
     JsonObject root =

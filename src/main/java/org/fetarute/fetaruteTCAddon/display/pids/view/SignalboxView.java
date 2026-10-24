@@ -14,7 +14,7 @@ import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
  * @param yard 站场图屏的一帧（标题、时钟、站场图）
  * @param state 控制台数据；信号员模块未就绪或屏幕没绑控制区时为空
  * @param labels 控制台文案
- * @param destinations 列车表里出现的去向站码 → 站名（查不到的不在内，按站码显示）
+ * @param destinations 列车表里出现的去向站码、列车操作里要越的站码 → 站名（查不到的不在内，按站码显示）
  * @param placeholder 没有控制台数据时写在列车表位置的说明
  */
 public record SignalboxView(
@@ -54,6 +54,11 @@ public record SignalboxView(
    * @param toAuto 模式按钮在人工模式下：转为自动
    * @param toManual 模式按钮在自动模式下：转为人工
    * @param cancelAutoPass 自动通过按钮在选中车的进路已设自动通过时：取消自动通过
+   * @param release 选中的车被扣着时，扣车键写的“放行”
+   * @param trainActions 列车操作（第二页）的三行
+   * @param cancelArmed 按过一次“取消车次”、等着确认时那一行写的字；{@code <train>} 换成车次
+   * @param skipRevoke 已令越站时越站那一行写的字（后接站名）
+   * @param skipping 列车表里被令越站的车的状态写法，{@code <status>} 换成原状态、{@code <station>} 换成被越的站名
    * @param replies 四条固定回复
    * @param notices 临时提示；带列车的含 {@code <train>}，进路被占用另见 {@code routeBlockedBy}
    * @param routeBlockedBy 进路被某列车占用，含 {@code <train>}
@@ -79,6 +84,11 @@ public record SignalboxView(
       Names toAuto,
       Names toManual,
       Names cancelAutoPass,
+      Names release,
+      Map<SignalboxState.TrainAction, Names> trainActions,
+      Names cancelArmed,
+      Names skipRevoke,
+      String skipping,
       Map<SignalboxState.Reply, Names> replies,
       Map<SignalboxState.NoticeKind, String> notices,
       String routeBlockedBy,
@@ -89,6 +99,7 @@ public record SignalboxView(
       callReasons = Map.copyOf(callReasons);
       statuses = Map.copyOf(statuses);
       buttons = Map.copyOf(buttons);
+      trainActions = Map.copyOf(trainActions);
       replies = Map.copyOf(replies);
       notices = Map.copyOf(notices);
     }

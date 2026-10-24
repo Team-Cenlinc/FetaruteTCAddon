@@ -398,6 +398,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
     var group = info.getGroup();
     String trainName = safeTrainName(info);
+    if (orderedToSkip(properties, routeId, routeIndexOpt, definition.nodeId())) {
+      passSkippedStation(info, definition, group, trainName);
+      return;
+    }
     if (plugin
         .getCouplerService()
         .map(coupler -> coupler.coupling().approaching(trainName))
@@ -928,6 +932,60 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               }
             });
     return ticks + MARK_SETTLE_TICKS;
+  }
+
+  /** 信号员令这列车越过这一站（按调度逻辑名与交路进度认）。 */
+  /** 信号员令越过本站：牌子上的进度标签可能还停在上一个节点，按牌子的节点认出本站（见 {@code StopSkips#skippedAt}）。 */
+  private boolean orderedToSkip(
+      TrainProperties properties, UUID routeId, Optional<Integer> routeIndexOpt, NodeId node) {
+    if (plugin == null) {
+      return false;
+    }
+    OptionalInt tagIndex = routeIndexOpt.map(OptionalInt::of).orElse(OptionalInt.empty());
+    return plugin
+        .getRuntimeDispatchService()
+        .map(
+            dispatch ->
+                dispatch
+                    .stationStops()
+                    .stopSkips()
+                    .skippedAt(
+                        dispatch
+                            .resolveTrackedTrainName(properties)
+                            .orElse(properties.getTrainName()),
+                        routeId,
+                        tagIndex,
+                        node))
+        .orElse(false);
+  }
+
+  /** 信号员令越过的站：本站不停、不开门、不挂进站刹车；到站与发车照常记下（交路进度往前走，晚点照算），多模车涉及内燃的换模推迟到下一个停车点，下一拍调度按新进度重新控车。 */
+  private void passSkippedStation(
+      SignActionEvent info, SignNodeDefinition definition, MinecartGroup group, String trainName) {
+    plugin
+        .getRuntimeDispatchService()
+        .ifPresent(
+            dispatch -> {
+              Runnable arrival = () -> dispatch.handleStationArrival(group, definition);
+              plugin
+                  .getPowerModeSwitcher()
+                  .ifPresentOrElse(power -> power.passThrough(arrival), arrival);
+              dispatch.stationStops().handleDeparture(group, definition);
+            });
+    Bukkit.getScheduler()
+        .runTask(
+            plugin,
+            () ->
+                plugin
+                    .getRuntimeDispatchService()
+                    .ifPresent(dispatch -> dispatch.refreshSignal(group)));
+    debug(
+        "AutoStation 信号员越站: nodeId="
+            + definition.nodeId().value()
+            + ", train="
+            + trainName
+            + " @ "
+            + locationText(info));
   }
 
   /** 越站：驾驶员越过停车点太多，本站不停、不开门。到站与发车照常记下（交路进度往前走，晚点照算），这趟车的这一站在站台屏上显示为取消， 出站不扣车，下一拍调度按新进度重新控车。 */

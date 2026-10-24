@@ -23,6 +23,9 @@ import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
  */
 final class PidsSignalboxPainter {
 
+  /** 红底按钮上的字：深浅主题都用白色。 */
+  private static final int DANGER_TEXT = 0xFFFFFF;
+
   /** 深色主题的计划进路预显示（浅蓝）。 */
   static final int PREVIEW_DARK = 0x6699D8;
 
@@ -398,15 +401,8 @@ final class PidsSignalboxPainter {
                     box.x() + list.destinationX(),
                     top,
                     theme.text()));
-    // 状态（等许可、扣车带秒数；系统代排的另行标明）
-    String status =
-        labels
-            .statuses()
-            .getOrDefault(row.status(), row.status().name())
-            .replace("<seconds>", Long.toString(Math.max(0L, row.seconds())));
-    if (row.autoRouted()) {
-      status = labels.autoRouted().replace("<status>", status);
-    }
+    // 状态（等许可、扣车带秒数；系统代排的另行标明；已令越站的写出被越的站）
+    String status = PidsSignalboxPlan.statusText(plan.view(), row);
     p.text(
         p.ellipsize(status, size, list.delayX() - list.statusX() - 6),
         size,
@@ -485,7 +481,7 @@ final class PidsSignalboxPainter {
 
   // ─── 操作区 ───────────────────────────────────────────────────────────────
 
-  /** 按钮：面板色底加框，中英文上下叠放居中；不能按的灰显。回复呼叫时的四条回复加琥珀色框。 */
+  /** 按钮：面板色底加框，中英文上下叠放居中；不能按的灰显。回复呼叫时的四条回复加琥珀色框；等着确认的取消车次红底白字。 */
   void drawButtons(PidsLayout.SignalButtons widget) {
     if (plan.view().state().isEmpty()) {
       return;
@@ -494,6 +490,11 @@ final class PidsSignalboxPainter {
     boolean replying = plan.view().state().get().replying();
     for (PidsSignalboxPlan.ButtonSpot button : plan.buttons()) {
       PidsSignalboxPlan.Box box = button.box();
+      if (button.danger()) {
+        p.fill(box.x(), box.y(), box.width(), box.height(), theme.red());
+        label(button.label(), widget.label(), box, DANGER_TEXT, DANGER_TEXT);
+        continue;
+      }
       int frame =
           replying ? theme.amber() : button.enabled() ? theme.muted() : theme.inverseMuted();
       int primary = button.enabled() ? theme.text() : theme.outline();

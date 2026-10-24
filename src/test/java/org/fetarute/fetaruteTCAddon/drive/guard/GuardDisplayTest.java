@@ -226,4 +226,28 @@ class GuardDisplayTest {
     assertEquals("1", GuardDisplay.seconds(1L));
     assertEquals("—", GuardDisplay.seconds(-1L));
   }
+
+  /** 信号楼令越站：车掌那一站没有作业，侧边栏与驾驶员一样写调度命令。 */
+  @Test
+  void aSkipOrderIsShownAsADispatchOrder() {
+    GuardDisplay.Snapshot running =
+        new GuardDisplay.Snapshot(
+            "T-1",
+            Optional.empty(),
+            false,
+            Optional.empty(),
+            true,
+            0,
+            Optional.empty(),
+            Optional.of("东湾"),
+            Optional.of("中桥"));
+
+    DriveSidebarRows.Row order =
+        GuardDisplay.rows(running).stream()
+            .filter(row -> row.labelKey().equals("drive.guard.sidebar.label.dispatch-order"))
+            .findFirst()
+            .orElseThrow();
+    assertEquals("drive.guard.sidebar.value.dispatch-order-skip", order.valueKey());
+    assertEquals(Map.of("station", "中桥"), order.values());
+  }
 }

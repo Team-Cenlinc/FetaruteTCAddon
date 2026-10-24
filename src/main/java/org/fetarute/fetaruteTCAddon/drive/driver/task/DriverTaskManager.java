@@ -1034,6 +1034,50 @@ public final class DriverTaskManager {
     return info;
   }
 
+  /**
+   * 一个站台节点的落脚处（车停在那里、区块已加载时用）：车站设置了位置时取车站位置，与救援同一口径；否则取站台牌子所在轨道旁站得住的地方。
+   *
+   * @param node 站台节点（车实际停靠的股道）
+   * @return 都找不到时为空
+   */
+  public Optional<Location> platformLocation(
+      org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId node) {
+    if (node == null) {
+      return Optional.empty();
+    }
+    Optional<Location> station =
+        plugin
+            .getStationDirectory()
+            .flatMap(directory -> directory.snapshot().stationOfNode(node.value()))
+            .map(StationDirectory.StationEntry::station)
+            .flatMap(
+                entry ->
+                    entry
+                        .location()
+                        .flatMap(
+                            location ->
+                                entry
+                                    .world()
+                                    .map(Bukkit::getWorld)
+                                    .map(world -> toLocation(world, entry.world(), location))));
+    if (station.isPresent() && station.get().getWorld() != null) {
+      return station;
+    }
+    var registry = plugin.getSignNodeRegistry();
+    if (registry == null) {
+      return Optional.empty();
+    }
+    return registry
+        .findByNodeId(node, null)
+        .flatMap(
+            info -> {
+              World world = Bukkit.getWorld(info.worldId());
+              return world == null
+                  ? Optional.empty()
+                  : platformSpot(world, info.x(), info.y(), info.z());
+            });
+  }
+
   /** 站台牌子所在轨道旁的落脚处（区块须已加载）；朝向轨道。 */
   private static Optional<Location> platformSpot(World world, int x, int y, int z) {
     Vector base =

@@ -145,6 +145,30 @@ class DriveSidebarRowsTest {
         row(DriveSidebarRows.build(session, 0, true), "signaller").valueKey());
   }
 
+  /** 信号楼令越站：调度命令一行一直显示到过了那一站（越站令撤销或过站后显示层不再给站名）。 */
+  @Test
+  void aSkipOrderShowsAsADispatchOrderUntilTheStationIsPassed() {
+    DriveSession session = session(CabSystems.disabled());
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L);
+    session.attachDriverLink(link);
+    assertTrue(
+        DriveSidebarRows.build(session, 0, false).stream()
+            .noneMatch(row -> row.labelKey().equals("drive.sidebar.label.dispatch-order")));
+
+    link.setSkipOrder("中桥");
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0, false);
+
+    DriveSidebarRows.Row order = row(rows, "dispatch-order");
+    assertEquals("drive.sidebar.value.dispatch-order.skip", order.valueKey());
+    assertEquals(Map.of("station", "中桥"), order.values());
+    assertEquals(rows.indexOf(row(rows, "signal")) + 1, rows.indexOf(order), "紧跟信号一行");
+
+    link.setSkipOrder("");
+    assertTrue(
+        DriveSidebarRows.build(session, 0, false).stream()
+            .noneMatch(row -> row.labelKey().equals("drive.sidebar.label.dispatch-order")));
+  }
+
   @Test
   void waitingAtTheTerminalShowsStandbyAndTheNextTripInsteadOfTheFinishedTripSchedule() {
     DriveSession session = session(CabSystems.disabled());

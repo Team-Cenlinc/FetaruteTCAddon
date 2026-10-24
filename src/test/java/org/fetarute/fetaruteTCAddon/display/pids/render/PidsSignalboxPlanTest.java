@@ -125,6 +125,173 @@ class PidsSignalboxPlanTest {
   }
 
   @Test
+  void trainOperationsTurnTheButtonsIntoThreeFullWidthRows() {
+    SignalboxState state = SignalboxFixtures.state();
+    SignalboxState trainOps =
+        new SignalboxState(
+            state.mode(),
+            state.signaller(),
+            state.selected(),
+            state.rows(),
+            state.buttons(),
+            state.call(),
+            false,
+            state.notice(),
+            state.preview(),
+            state.pending(),
+            state.signals(),
+            state.platforms(),
+            state.delegated(),
+            Optional.of(new SignalboxState.TrainOps(false)));
+    SignalboxView view = view(trainOps);
+    PidsLayout.SignalButtons widget = layout.signalButtons().orElseThrow();
+    SignalboxState.TrainAction[] actions = SignalboxState.TrainAction.values();
+    for (int i = 0; i < actions.length; i++) {
+      int top = widget.y() + i * (widget.buttonHeight() + widget.gapY());
+      ConsoleTarget expected = new ConsoleTarget.Act(actions[i]);
+      assertEquals(expected, at(view, widget.x() + 1, top), actions[i] + " 左上角");
+      assertEquals(
+          expected,
+          at(view, widget.x() + widget.width() - 1, top + widget.buttonHeight() - 1),
+          actions[i] + " 右下角");
+    }
+  }
+
+  @Test
+  void anArmedCancellationNamesTheTrainAndIsMarkedDangerous() {
+    SignalboxState state = SignalboxFixtures.state();
+    SignalboxState armed =
+        new SignalboxState(
+            state.mode(),
+            state.signaller(),
+            state.selected(),
+            state.rows(),
+            state.buttons(),
+            state.call(),
+            false,
+            state.notice(),
+            state.preview(),
+            state.pending(),
+            state.signals(),
+            state.platforms(),
+            state.delegated(),
+            Optional.of(new SignalboxState.TrainOps(true)));
+    PidsSignalboxPlan.ButtonSpot cancel =
+        plan(armed).buttons().stream()
+            .filter(
+                spot ->
+                    spot.target().equals(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL)))
+            .findFirst()
+            .orElseThrow();
+
+    assertEquals("确认取消 1234", cancel.label().primary());
+    assertTrue(cancel.danger());
+  }
+
+  @Test
+  void theSkipRowNamesTheStationAndTurnsIntoRevokeOnceOrdered() {
+    assertEquals("越站 东湾", skipLabel(new SignalboxState.TrainOps(false, Optional.of("DEF"), false)));
+    assertEquals(
+        "撤销越站 东湾", skipLabel(new SignalboxState.TrainOps(false, Optional.of("DEF"), true)));
+    assertEquals("越站", skipLabel(new SignalboxState.TrainOps(false)));
+  }
+
+  private String skipLabel(SignalboxState.TrainOps ops) {
+    SignalboxState state = SignalboxFixtures.state();
+    SignalboxState page =
+        new SignalboxState(
+            state.mode(),
+            state.signaller(),
+            state.selected(),
+            state.rows(),
+            state.buttons(),
+            state.call(),
+            false,
+            state.notice(),
+            state.preview(),
+            state.pending(),
+            state.signals(),
+            state.platforms(),
+            state.delegated(),
+            Optional.of(ops));
+    return plan(page).buttons().stream()
+        .filter(
+            spot -> spot.target().equals(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP)))
+        .findFirst()
+        .orElseThrow()
+        .label()
+        .primary();
+  }
+
+  @Test
+  void aTrainOrderedToSkipSaysWhichStationInItsStatus() {
+    SignalboxState.TrainRow row =
+        new SignalboxState.TrainRow(
+            "t",
+            "1234",
+            Optional.empty(),
+            Optional.empty(),
+            SignalboxState.RowStatus.IN_ZONE,
+            0,
+            OptionalLong.empty(),
+            0.0,
+            false,
+            false,
+            Optional.of("DEF"));
+
+    assertEquals("区内运行 · 越站东湾", PidsSignalboxPlan.statusText(view(SignalboxFixtures.state()), row));
+  }
+
+  @Test
+  void theHoldKeySaysReleaseWhileTheSelectedTrainIsHeld() {
+    SignalboxState state = SignalboxFixtures.state();
+    assertEquals("扣车", holdLabel(state));
+
+    List<SignalboxState.TrainRow> rows =
+        state.rows().stream()
+            .map(
+                row ->
+                    row.trainName().equals(SignalboxFixtures.TRAIN_A)
+                        ? new SignalboxState.TrainRow(
+                            row.trainName(),
+                            row.label(),
+                            row.lineColor(),
+                            row.destination(),
+                            SignalboxState.RowStatus.HELD,
+                            35,
+                            row.delaySeconds(),
+                            row.autoProgress(),
+                            row.autoPass(),
+                            row.autoRouted())
+                        : row)
+            .toList();
+    SignalboxState held =
+        new SignalboxState(
+            state.mode(),
+            state.signaller(),
+            state.selected(),
+            rows,
+            state.buttons(),
+            state.call(),
+            state.replying(),
+            state.notice(),
+            state.preview(),
+            state.pending(),
+            state.signals(),
+            state.platforms());
+    assertEquals("放行", holdLabel(held));
+  }
+
+  private String holdLabel(SignalboxState state) {
+    return plan(state).buttons().stream()
+        .filter(spot -> spot.target().equals(new ConsoleTarget.Press(SignalboxState.Button.HOLD)))
+        .findFirst()
+        .orElseThrow()
+        .label()
+        .primary();
+  }
+
+  @Test
   void theCallBadgeStartsAReply() {
     PidsSignalboxPlan plan = plan(SignalboxFixtures.state());
     PidsSignalboxPlan.Box badge = plan.call().orElseThrow().box();

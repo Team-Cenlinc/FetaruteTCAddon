@@ -439,8 +439,13 @@ public final class PidsComposer {
     Map<String, String> destinations = new HashMap<>();
     state.ifPresent(
         found ->
-            found.rows().stream()
-                .flatMap(row -> row.destination().stream())
+            java.util.stream.Stream.concat(
+                    found.rows().stream()
+                        .flatMap(
+                            row ->
+                                java.util.stream.Stream.concat(
+                                    row.destination().stream(), row.skipping().stream())),
+                    found.trainOps().stream().flatMap(ops -> ops.skipStation().stream()))
                 .distinct()
                 .forEach(
                     code ->

@@ -74,7 +74,8 @@ record EtaSources(
     DutyContinuitySupport continuity,
     Layovers layovers,
     Function<UUID, Optional<EtaService.ThroughRoute>> throughRoutes,
-    EtaService.DivisionRemainders divisionRemainders) {
+    EtaService.DivisionRemainders divisionRemainders,
+    EtaService.SkippedStops skippedStops) {
 
   EtaSources {
     Objects.requireNonNull(routes, "routes");
@@ -87,6 +88,7 @@ record EtaSources(
     throughRoutes = throughRoutes == null ? routeId -> Optional.empty() : throughRoutes;
     divisionRemainders =
         divisionRemainders == null ? (train, route, index) -> false : divisionRemainders;
+    skippedStops = skippedStops == null ? (train, route, index) -> false : skippedStops;
   }
 
   /** 交路定义、停靠表与归属。 */

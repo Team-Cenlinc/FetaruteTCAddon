@@ -34,6 +34,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerTrainDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
@@ -71,6 +72,9 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
   /** 当信号员的权限节点。 */
   public static final String PERMISSION = "fetarute.signal.signaller";
 
+  /** 取消车次的权限（{@link #PERMISSION} 的子节点，默认随之授予）。 */
+  public static final String CANCEL_PERMISSION = "fetarute.signal.cancel";
+
   /** 被闸拦下后多久不再来问闸，就当它已经不在入口等了。要比内核重评一列停着的车的间隔长得多：在这之内重新来问，沿用原来的开始时刻，代排计时不清零。 */
   static final Duration WAITING_STALE = Duration.ofSeconds(60);
 
@@ -92,8 +96,20 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
   /** 等满代排时限、却好一阵没来问闸的车，巡检至多隔这么久唤醒一次。 */
   static final Duration WAKE_INTERVAL = Duration.ofSeconds(10);
 
-  /** 切换类按钮（人工与自动、自动通过）生效后这么久内的重复按下不算：按住右键时客户端每 4 tick 重发一次交互。 */
+  /** 按过一次“取消车次”后，至少隔这么久再按一下才算确认。 */
   static final Duration TOGGLE_REPEAT = Duration.ofMillis(500);
+
+  /**
+   * 紧跟上一次点击这么久内的点击算按住右键的连发，一律不算：客户端按住时每 4 tick（0.2 秒）重发一次交互，留出卡顿的余量。
+   * 连发不断时一直顺延，所以按住一个键只算一下；翻页后的连发落到新页同一位置的按钮上也不算。
+   */
+  static final Duration HELD_REPEAT = Duration.ofMillis(350);
+
+  /** 按过一次“取消车次”后，多久之内再按一下才算确认。 */
+  static final Duration CANCEL_CONFIRM = Duration.ofSeconds(5);
+
+  /** 车上有人时，插播停运后等多久再删车（给乘客自己下车的时间）。 */
+  static final Duration CANCEL_COUNTDOWN = Duration.ofSeconds(5);
 
   /** 选中的车跟这座楼没关系了（出了区、不在列车表里）这么久后清掉选择。 */
   static final Duration SELECTION_GRACE = Duration.ofSeconds(5);
@@ -163,6 +179,26 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
   /** 接上信号员考法的考官（操作许可证）；{@code null} 表示没有考官。 */
   public void setExaminer(SignallerExaminer next) {
     this.examiner = next == null ? SignallerExaminer.NONE : next;
+  }
+
+  /** 这名信号员正在考试或练习；问不出来时按“是”处理（宁可不让取消车次）。 */
+  boolean examining(UUID player) {
+    try {
+      return examiner.examining(player);
+    } catch (RuntimeException ex) {
+      debug.accept("SIGNALLER_EXAMINER_FAILED player=" + player + " error=" + ex);
+      return true;
+    }
+  }
+
+  /** 这名信号员正在考试（练习不算）；问不出来时按“是”处理。 */
+  boolean examOnly(UUID player) {
+    try {
+      return examiner.examining(player) && !examiner.practicing(player);
+    } catch (RuntimeException ex) {
+      debug.accept("SIGNALLER_EXAMINER_FAILED player=" + player + " error=" + ex);
+      return true;
+    }
   }
 
   /** 把值守中的一件事告诉考官；没人值守时不告诉。 */
@@ -354,6 +390,14 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
         box.holds.put(newKey, new SignalBox.Hold(display, hold.since()));
         moved = true;
       }
+      SignalBox.PendingCancel pending = box.cancelling.remove(oldKey);
+      if (pending != null) {
+        box.cancelling.put(newKey, new SignalBox.PendingCancel(display, pending.due()));
+        moved = true;
+      }
+      if (box.cancelArm != null && oldKey.equals(box.cancelArm.train())) {
+        box.cancelArm = new SignalBox.CancelArm(box.cancelArm.player(), newKey, box.cancelArm.at());
+      }
       if (box.platformChoices.remove(oldKey)) {
         box.platformChoices.add(newKey);
       }
@@ -391,6 +435,10 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       boolean changed = box.permits.remove(key) != null;
       changed |= box.waiting.remove(key) != null;
       changed |= box.holds.remove(key) != null;
+      changed |= box.cancelling.remove(key) != null;
+      if (box.cancelArm != null && key.equals(box.cancelArm.train())) {
+        box.cancelArm = null;
+      }
       box.platformChoices.remove(key);
       box.approaching.remove(key);
       box.pairs.removeIf(pair -> pair.first.equals(key) || pair.second.equals(key));
@@ -635,10 +683,14 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
                 .lostTime(duty.lostTime)
                 .conflictsGood(duty.conflictsGood)
                 .conflictsBad(duty.conflictsBad)
+                .tripsCancelled(duty.tripsCancelled)
+                .skipsOrdered(duty.skipsOrdered)
                 .build(),
             reason,
             examined,
             practiced);
+    // 已确认、还在倒计时的取消：下岗后扣车就没了，车会带着已被告知停运的乘客开走，所以就地办完
+    settleCancels(box, now, true);
     List<SignalBox.Call> unanswered = new ArrayList<>(box.calls);
     box.duty = null;
     ownershipChanged();
@@ -811,6 +863,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
         zoneRemoved(box.operator, box.zone);
         continue;
       }
+      settleCancels(box, now, false);
       if (box.duty != null && !checkDuty(box, settings, now)) {
         continue;
       }
@@ -836,6 +889,43 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
       }
     }
     publish();
+  }
+
+  /** 取消车次记一笔日志：哪座楼、谁、哪列车。 */
+  void logCancel(SignalBox box, String trainName) {
+    debug.accept(
+        "SIGNALLER_TRIP_CANCEL box="
+            + box.label()
+            + " player="
+            + (box.duty == null ? "-" : box.duty.playerName)
+            + " train="
+            + trainName);
+  }
+
+  /**
+   * 倒计时到了的取消：删车。车上还有人、车却已不在站台上（车被别处放走了）时作罢，不把人删在区间里。
+   *
+   * @param all 不等倒计时，全部当场办完（下岗时）
+   */
+  private void settleCancels(SignalBox box, Instant now, boolean all) {
+    for (Map.Entry<String, SignalBox.PendingCancel> entry :
+        List.copyOf(box.cancelling.entrySet())) {
+      SignalBox.PendingCancel pending = entry.getValue();
+      if (!all && now.isBefore(pending.due())) {
+        continue;
+      }
+      box.cancelling.remove(entry.getKey());
+      box.holds.remove(entry.getKey());
+      SignallerTrainDesk desk = world.trains();
+      SignallerTrainDesk.Scene scene = desk.scene(pending.trainName());
+      if (scene.playersAboard() && !scene.atPlatform()) {
+        notice(box, SignalboxState.NoticeKind.CANCEL_OCCUPIED, Optional.of(pending.trainName()));
+        debug.accept("SIGNALLER_CANCEL_CALLED_OFF train=" + pending.trainName());
+      } else {
+        desk.cancel(pending.trainName());
+      }
+      invalidate(box);
+    }
   }
 
   /** 有车开始接近（还没进区）时响一声、动作栏写出车次；一列车接近一次只提示一次。只在人工模式下提示，上岗时已在接近的车不提示。 */
@@ -1014,7 +1104,11 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
         permit.entryStamp.isPresent()
             && info.delayStamp().isPresent()
             && !permit.entryStamp.equals(info.delayStamp());
-    if (duty == null || permit.entryDelay.isEmpty() || exit.isEmpty() || !fresh) {
+    if (duty == null
+        || permit.entryDelay.isEmpty()
+        || exit.isEmpty()
+        || !fresh
+        || permit.skipOrdered) {
       box.pairs.removeIf(pair -> pair.first.equals(key) || pair.second.equals(key));
       return;
     }
@@ -1677,17 +1771,36 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
         player.getUniqueId(),
         player.getName(),
         player.hasPermission(PERMISSION),
+        player.hasPermission(CANCEL_PERMISSION),
         spot,
         operator,
         zone,
         target);
   }
 
-  /** 控制台点击（不依赖 Bukkit 对象，测试直接调）。 */
+  /** 控制台点击；能当信号员就能取消车次。 */
   void press(
       UUID player,
       String playerName,
       boolean permitted,
+      SignalBox.ConsoleSpot console,
+      String operator,
+      String zone,
+      ConsoleTarget target) {
+    press(player, playerName, permitted, permitted, console, operator, zone, target);
+  }
+
+  /**
+   * 控制台点击（不依赖 Bukkit 对象，测试直接调）。
+   *
+   * @param permitted 是否有 {@link #PERMISSION}
+   * @param mayCancel 是否有 {@link #CANCEL_PERMISSION}
+   */
+  void press(
+      UUID player,
+      String playerName,
+      boolean permitted,
+      boolean mayCancel,
       SignalBox.ConsoleSpot console,
       String operator,
       String zone,
@@ -1711,7 +1824,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
     ZoneMap map = owned(box);
     Instant now = clock.get();
     SignalboxState shown = new SignalboxStates(this, box, map, now).build();
-    new SignalboxActions(this, box, map, now, shown).apply(target);
+    new SignalboxActions(this, box, map, now, shown, mayCancel).apply(target);
     invalidate(box);
     publish();
   }

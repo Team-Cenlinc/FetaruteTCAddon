@@ -169,7 +169,7 @@ public final class SignalboxFixtures {
             SignalboxState.Button.SET_ROUTE, true,
             SignalboxState.Button.CANCEL_ROUTE, false,
             SignalboxState.Button.HOLD, true,
-            SignalboxState.Button.RELEASE, false,
+            SignalboxState.Button.TRAIN_OPS, true,
             SignalboxState.Button.AUTO_PASS, true,
             SignalboxState.Button.MODE, true),
         Optional.of(

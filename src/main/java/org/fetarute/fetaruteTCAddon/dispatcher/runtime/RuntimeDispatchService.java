@@ -1670,6 +1670,19 @@ public final class RuntimeDispatchService {
             this.dynamicAllocator,
             effectiveNodeOverrides,
             this.signallerGates::wake));
+    // 信号员越站：刹车锁定读控车诊断与图上路程（同一张图里两点都在才算得出）。
+    this.stationStopCoordinator.attachStopSkips(
+        new StopSkips(
+            this.progressRegistry,
+            routeDefinitions,
+            new SkipBraking(
+                SkipBraking.motions(this::getDiagnostics),
+                routeDefinitions::findById,
+                SkipBraking.distances(railGraphService, this::resolveShortestDistance),
+                SkipBraking.movingTrains()),
+            null,
+            StopReversal.of(
+                railGraphService, routeDefinitions, this::resolveEffectiveWaypointsForEvent)));
     this.dynamicDestinationResolver =
         new DynamicDestinationResolver(dynamicAllocator, railGraphService, this.debugLogger);
     this.shortestPathDistanceCache =
@@ -9239,6 +9252,7 @@ public final class RuntimeDispatchService {
     liveRailFootprintDiagnosticStates.remove(key);
     signallerGates.forget(trainName);
     stationStopCoordinator.signallerPlatforms().discard(trainName);
+    stationStopCoordinator.stopSkips().forget(trainName);
   }
 
   /**
@@ -10412,7 +10426,7 @@ public final class RuntimeDispatchService {
    * <p>{@code FTA_HAS_PASSENGERS} 保留为外部系统可写的保护标记；运行时同时遍历 TrainCarts member 的 Bukkit passenger
    * 树，覆盖普通矿车乘坐与附件座椅形成的嵌套实体。读取实体树失败时返回 {@code true}，让 destructive cleanup 保守地把该列车视为有人。
    */
-  static boolean hasPlayerPassengers(TrainProperties properties) {
+  public static boolean hasPlayerPassengers(TrainProperties properties) {
     if (properties == null) {
       return true;
     }
@@ -15415,6 +15429,15 @@ public final class RuntimeDispatchService {
     boolean stopAtNextWaypoint = false;
     if (nextNode.isPresent()) {
       nextRouteStop = routeDefinitions.findStop(route.id(), currentIndex + 1);
+      // 信号员令越过的站当通过：不停车，出站道岔也不按停车点放宽
+      Optional<UUID> nextRouteUuid = routeDefinitions.findUuid(route.id());
+      if (nextRouteStop.isPresent()
+          && nextRouteUuid.isPresent()
+          && stationStopCoordinator
+              .stopSkips()
+              .skipped(trainName, nextRouteUuid.get(), currentIndex + 1)) {
+        nextRouteStop = Optional.empty();
+      }
       if (nextRouteStop.isPresent()) {
         stopAtNextWaypoint = shouldStopAtWaypoint(nextNode.get(), nextRouteStop.get());
       }
@@ -15486,7 +15509,8 @@ public final class RuntimeDispatchService {
             headProgressBlocks,
             edgeSpeedResolver,
             speedCurve,
-            train);
+            train,
+            trainName);
     OptionalLong distanceOpt = OptionalLong.empty();
     OptionalLong constraintDistanceOpt = OptionalLong.empty();
     OptionalLong blockerDistanceOpt = OptionalLong.empty();
@@ -16858,8 +16882,9 @@ public final class RuntimeDispatchService {
     }
     // 新任务开始前清理旧的“有效节点覆盖”，避免跨线路遗留导致寻路/占用异常。
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
-    // 信号员给上一趟选的股道同样不带进新任务：同一交路再跑一趟时停站下标会撞上。
+    // 信号员给上一趟选的股道与越站令同样不带进新任务：同一交路再跑一趟时停站下标会撞上。
     stationStopCoordinator.signallerPlatforms().discard(trainName);
+    stationStopCoordinator.stopSkips().forget(trainName);
     dynamicCapacityWaits.remove(trainName);
     blockerSnapshots.remove(normalizeTrainKey(trainName));
     // 车体指纹与采样时刻同样按车名键：不随任务重置清掉，就会随 layover 改名无界增长，
@@ -21858,6 +21883,7 @@ public final class RuntimeDispatchService {
     }
     // 信号员的许可、等待与改停股道同样按名记：随车迁到新名，迁完唤醒新名重评估（拆分出的新车不经这里，没有许可）。
     stationStopCoordinator.signallerPlatforms().renamed(previousKey, currentKey);
+    stationStopCoordinator.stopSkips().rename(previousKey, currentKey);
     signallerGates.renamed(previousKey, currentKey);
   }
 
@@ -28372,6 +28398,7 @@ public final class RuntimeDispatchService {
    * @param edgeSpeeds 边有效限速
    * @param curve 加减速曲线；为 {@code null} 时（关闭速度曲线）天花板只取逐点限速，不提前制动
    * @param train 列车：车站停车点在站牌之后多远由它量（见 {@link StationStopCoordinator#stationTailBlocks}）
+   * @param trainName 列车名：信号员令越过的站不当停车点
    */
   private ApproachControl resolveApproachControl(
       RailGraph graph,
@@ -28382,7 +28409,8 @@ public final class RuntimeDispatchService {
       long headProgressBlocks,
       SignalLookahead.EdgeSpeedResolver edgeSpeeds,
       SpeedCurve curve,
-      RuntimeTrainHandle train) {
+      RuntimeTrainHandle train,
+      String trainName) {
     if (graph == null
         || route == null
         || effectiveNodes == null
@@ -28393,7 +28421,7 @@ public final class RuntimeDispatchService {
       return ApproachControl.none();
     }
     Optional<IndexedRouteStop> stopOpt =
-        findNextStoppingRouteStop(route, effectiveNodes, currentIndex);
+        findNextStoppingRouteStop(route, effectiveNodes, currentIndex, trainName);
     if (stopOpt.isEmpty()) {
       return ApproachControl.none();
     }
@@ -28509,17 +28537,24 @@ public final class RuntimeDispatchService {
         "station".equals(target.kind()) && curve != null);
   }
 
+  /** 往后第一个停车的停靠点；信号员令越过的那一站当通过。 */
   private Optional<IndexedRouteStop> findNextStoppingRouteStop(
-      RouteDefinition route, List<NodeId> effectiveNodes, int currentIndex) {
+      RouteDefinition route, List<NodeId> effectiveNodes, int currentIndex, String trainName) {
     if (route == null
         || effectiveNodes == null
         || currentIndex < 0
         || currentIndex >= effectiveNodes.size() - 1) {
       return Optional.empty();
     }
+    Optional<UUID> routeUuid = routeDefinitions.findUuid(route.id());
     for (int i = currentIndex + 1; i < effectiveNodes.size(); i++) {
       Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), i);
       if (stopOpt.isEmpty() || stopOpt.get().passType() == RouteStopPassType.PASS) {
+        continue;
+      }
+      if (routeUuid.isPresent()
+          && trainName != null
+          && stationStopCoordinator.stopSkips().skipped(trainName, routeUuid.get(), i)) {
         continue;
       }
       return Optional.of(new IndexedRouteStop(i, effectiveNodes.get(i), stopOpt.get()));

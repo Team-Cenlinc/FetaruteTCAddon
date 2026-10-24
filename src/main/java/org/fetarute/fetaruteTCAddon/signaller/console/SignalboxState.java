@@ -29,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
  * @param signals 控制区入口的信号
  * @param platforms 选中车在区内的 {@code DYNAMIC:} 停站可以改停的股道
  * @param delegated 让给小区（车站控制）的那几片
+ * @param trainOps 操作区此刻换成了选中车的列车操作（第二页）；在第一页时为空
  */
 public record SignalboxState(
     Mode mode,
@@ -43,7 +44,40 @@ public record SignalboxState(
     Set<EdgeId> pending,
     List<EntrySignal> signals,
     List<PlatformChoice> platforms,
-    List<Delegated> delegated) {
+    List<Delegated> delegated,
+    Optional<TrainOps> trainOps) {
+
+  /** 操作区在第一页。 */
+  public SignalboxState(
+      Mode mode,
+      Optional<String> signaller,
+      Optional<String> selected,
+      List<TrainRow> rows,
+      Map<Button, Boolean> buttons,
+      Optional<Call> call,
+      boolean replying,
+      Optional<Notice> notice,
+      Set<EdgeId> preview,
+      Set<EdgeId> pending,
+      List<EntrySignal> signals,
+      List<PlatformChoice> platforms,
+      List<Delegated> delegated) {
+    this(
+        mode,
+        signaller,
+        selected,
+        rows,
+        buttons,
+        call,
+        replying,
+        notice,
+        preview,
+        pending,
+        signals,
+        platforms,
+        delegated,
+        Optional.empty());
+  }
 
   /** 没有让出去的小区。 */
   public SignalboxState(
@@ -62,6 +96,24 @@ public record SignalboxState(
     this(
         mode, signaller, selected, rows, buttons, call, replying, notice, preview, pending, signals,
         platforms, List.of());
+  }
+
+  /**
+   * 列车操作（第二页）此刻的样子。
+   *
+   * @param cancelArmed 已按过一次“取消车次”、等着确认
+   * @param skipStation 下一个停车站的站码；没有时为空
+   * @param skipOrdered 已令越过这一站（越站键写“撤销越站”）
+   */
+  public record TrainOps(boolean cancelArmed, Optional<String> skipStation, boolean skipOrdered) {
+    public TrainOps {
+      skipStation = skipStation == null ? Optional.empty() : skipStation;
+    }
+
+    /** 没有可越的站。 */
+    public TrainOps(boolean cancelArmed) {
+      this(cancelArmed, Optional.empty(), false);
+    }
   }
 
   /**
@@ -92,6 +144,7 @@ public record SignalboxState(
     pending = pending == null ? Set.of() : Set.copyOf(pending);
     signals = signals == null ? List.of() : List.copyOf(signals);
     platforms = platforms == null ? List.of() : List.copyOf(platforms);
+    trainOps = trainOps == null ? Optional.empty() : trainOps;
   }
 
   /** 这个按钮此刻能不能按；没写的按不能按处理。 */
@@ -113,14 +166,24 @@ public record SignalboxState(
     SET_ROUTE,
     /** 取消选中车还没锁闭的进路。 */
     CANCEL_ROUTE,
-    /** 扣住选中的、正在停站的车。 */
+    /** 扣住选中的、正在停站的车；选中的车被扣着时放行。 */
     HOLD,
-    /** 放行扣着的车。 */
-    RELEASE,
+    /** 操作区换成选中车的列车操作（第二页）。 */
+    TRAIN_OPS,
     /** 选中车这条进路（同一入口、同一股道）以后的车都自动排列；再按取消。 */
     AUTO_PASS,
     /** 整个控制区在人工与自动之间切换。 */
     MODE
+  }
+
+  /** 列车操作（第二页）的各行。 */
+  public enum TrainAction {
+    /** 令选中车越过下一个停车站；已下令时撤销。 */
+    SKIP,
+    /** 取消选中车的车次（删车）。 */
+    CANCEL,
+    /** 回到第一页。 */
+    BACK
   }
 
   /** 回复驾驶员呼叫的四条固定回复。 */
@@ -166,6 +229,7 @@ public record SignalboxState(
    * @param autoProgress 等许可时离超时自动排列还有多远、扣车时离扣车上限还有多远：0 刚开始，1 马上到；其余为 0
    * @param autoPass 这列车要走的进路此刻设了自动通过（选中车的这一项决定自动通过按钮写“设置”还是“取消”）
    * @param autoRouted 这列车的许可是等候超时由系统代排的
+   * @param skipping 已令越过的那一站的站码；没有越站令时为空
    */
   public record TrainRow(
       String trainName,
@@ -177,7 +241,8 @@ public record SignalboxState(
       OptionalLong delaySeconds,
       double autoProgress,
       boolean autoPass,
-      boolean autoRouted) {
+      boolean autoRouted,
+      Optional<String> skipping) {
     public TrainRow {
       Objects.requireNonNull(trainName, "trainName");
       Objects.requireNonNull(label, "label");
@@ -185,6 +250,33 @@ public record SignalboxState(
       lineColor = lineColor == null ? Optional.empty() : lineColor;
       destination = destination == null ? Optional.empty() : destination;
       delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
+      skipping = skipping == null ? Optional.empty() : skipping;
+    }
+
+    /** 没有越站令。 */
+    public TrainRow(
+        String trainName,
+        String label,
+        Optional<Integer> lineColor,
+        Optional<String> destination,
+        RowStatus status,
+        long seconds,
+        OptionalLong delaySeconds,
+        double autoProgress,
+        boolean autoPass,
+        boolean autoRouted) {
+      this(
+          trainName,
+          label,
+          lineColor,
+          destination,
+          status,
+          seconds,
+          delaySeconds,
+          autoProgress,
+          autoPass,
+          autoRouted,
+          Optional.empty());
     }
   }
 
@@ -226,6 +318,44 @@ public record SignalboxState(
     ROUTE_LOCKED,
     /** 这列车不在站里停着，不能扣。 */
     NOT_DWELLING,
+    /** 车上有人、车又不在站台上停着，不能取消车次。 */
+    CANCEL_OCCUPIED,
+    /** 联挂中的一体车带着两条交路，不能取消车次（先拆开）。 */
+    CANCEL_COUPLED,
+    /** 没有取消车次的权限。 */
+    CANCEL_NO_PERMISSION,
+    /** 考试、练习中不能取消车次。 */
+    CANCEL_IN_EXAM,
+    /** 车还在接近，不归本楼处置，不能取消车次。 */
+    CANCEL_OUT_OF_ZONE,
+    /** 已确认取消、正在停运倒计时：不能放行，也不再算一次取消。 */
+    CANCEL_PENDING,
+    /** 已取消车次。 */
+    TRIP_CANCELLED,
+    /** 晚点不够门槛，不能越站。 */
+    SKIP_NOT_LATE,
+    /** 联挂中的一体车带着两条交路，不能越站。 */
+    SKIP_COUPLED,
+    /** 往后没有停车站（或车没接上调度），没有可越的站。 */
+    SKIP_NO_STOP,
+    /** 下一个停车站不归本楼管，不能越站。 */
+    SKIP_OUT_OF_ZONE,
+    /** 下一个停车站是终点，不能越。 */
+    SKIP_TERMINAL,
+    /** 下一个停车站有作业（换线、加挂、拆开、换模、折返等），不能越。 */
+    SKIP_DIRECTIVE,
+    /** 车已开始进站刹车，不能再越站或撤销。 */
+    SKIP_BRAKING,
+    /** 下一个停车站是叫车的目的站，不能越。 */
+    SKIP_CALL_DESTINATION,
+    /** 有乘务员在下一个停车站等着接班，不能越。 */
+    SKIP_CREW_BOARDING,
+    /** 考试中不能令越站（练习中可以）。 */
+    SKIP_IN_EXAM,
+    /** 已令越站。 */
+    SKIP_ORDERED,
+    /** 已撤销越站。 */
+    SKIP_REVOKED,
     /** 这一站已不能改停股道（停站已开始，或车已不在）。 */
     PLATFORM_UNAVAILABLE,
     /** 已锁闭通往原股道的进路，不能改停。 */

@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Locale;
@@ -78,6 +79,8 @@ public final class StationStopCoordinator {
 
   /** 信号员改停股道：计划站台的一个来源，仅次于联挂搭档。调度服务构造时接上；单独构造时没有可改的停站。 */
   private volatile SignallerPlatforms signallerPlatforms = SignallerPlatforms.detached();
+
+  private volatile StopSkips stopSkips = StopSkips.detached();
 
   private volatile Recovery recovery = Recovery.DISABLED;
 
@@ -250,6 +253,19 @@ public final class StationStopCoordinator {
    */
   public SignallerPlatforms signallerPlatforms() {
     return signallerPlatforms;
+  }
+
+  /** 接上信号员越站（调度服务构造时）。 */
+  void attachStopSkips(StopSkips next) {
+    this.stopSkips = next == null ? StopSkips.detached() : next;
+  }
+
+  /** 信号员令越过的停车站：各读点据此把那一站当通过。 */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP",
+      justification = "越站令是调度、站牌、HUD 与控制台共用的同一份运行时状态；下令与读取必须落在同一实例上，不能复制。")
+  public StopSkips stopSkips() {
+    return stopSkips;
   }
 
   /** 注册发车计划源；{@code null} 会立刻停止一切计划扣留，不需要等任何超时。 */

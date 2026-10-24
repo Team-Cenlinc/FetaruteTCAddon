@@ -67,6 +67,39 @@ class PidsSignalboxPainterTest {
   }
 
   @Test
+  void anArmedCancellationIsPaintedOnRed() {
+    SignalboxState state = SignalboxFixtures.state();
+    SignalboxState armed =
+        new SignalboxState(
+            state.mode(),
+            state.signaller(),
+            state.selected(),
+            state.rows(),
+            state.buttons(),
+            state.call(),
+            false,
+            state.notice(),
+            state.preview(),
+            state.pending(),
+            state.signals(),
+            state.platforms(),
+            state.delegated(),
+            Optional.of(new SignalboxState.TrainOps(true)));
+    SignalboxView view = view(armed);
+    BufferedImage image = renderer.renderSignalbox(layout, view);
+    PidsSignalboxPlan.Box box =
+        PidsSignalboxPlan.of(layout, view, new PidsTextMeasure(fonts, layout.boldFrom()))
+            .buttons()
+            .stream()
+            .filter(PidsSignalboxPlan.ButtonSpot::danger)
+            .findFirst()
+            .orElseThrow()
+            .box();
+
+    assertEquals(PidsTheme.DARK.red(), rgb(image, box.x() + 2, box.y() + 2));
+  }
+
+  @Test
   void signalsShowTheirAspectsAndTheSelectionIsFramed() {
     SignalboxView view = view(SignalboxFixtures.state());
     BufferedImage image = renderer.renderSignalbox(layout, view);
@@ -275,6 +308,24 @@ class PidsSignalboxPainterTest {
     }
     out.add(with(base, false, Optional.empty(), rows));
     out.add(with(base, false, Optional.empty(), List.of()));
+    for (boolean armed : new boolean[] {false, true}) {
+      out.add(
+          new SignalboxState(
+              base.mode(),
+              base.signaller(),
+              base.selected(),
+              base.rows(),
+              base.buttons(),
+              base.call(),
+              false,
+              base.notice(),
+              base.preview(),
+              base.pending(),
+              base.signals(),
+              base.platforms(),
+              base.delegated(),
+              Optional.of(new SignalboxState.TrainOps(armed))));
+    }
     out.add(
         new SignalboxState(
             SignalboxState.Mode.AUTO,

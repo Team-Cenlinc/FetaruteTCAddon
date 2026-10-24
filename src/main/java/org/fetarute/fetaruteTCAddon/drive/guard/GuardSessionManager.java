@@ -187,6 +187,11 @@ public final class GuardSessionManager {
     /** 列车按交路进度的下一个停靠站（与乘客 HUD 同一口径）；展示层未启用或查不到时为空。 */
     Optional<String> nextStationOf(MinecartGroup group);
 
+    /** 信号楼令这列车越过的站（与乘客 HUD 同一口径）；没有越站令、展示层未启用或查不到时为空。 */
+    default Optional<String> skipOrderOf(MinecartGroup group) {
+      return Optional.empty();
+    }
+
     /** 担当这一班的列车与它最近停过的停靠序号；还没对上列车时为空。 */
     Optional<TripTrain> trainForTrip(TaskKey key);
 
@@ -577,6 +582,21 @@ public final class GuardSessionManager {
 
   /** 结束值乘：车掌开着的门随之关上，车门交还驾驶员或站台。 */
   public void stop(UUID playerId, GuardSession.EndReason reason) {
+    stop(
+        playerId,
+        reason,
+        reason.name(),
+        "drive.guard.end." + reason.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'));
+  }
+
+  /**
+   * 结束值乘，任务记录的原因与告诉车掌的话另给（例如信号楼取消车次）。
+   *
+   * @param taskReason 任务记录里写的原因
+   * @param endMessageKey 告诉车掌的语言键（占位符 {@code <stops>}、{@code <timeouts>}）
+   */
+  public void stop(
+      UUID playerId, GuardSession.EndReason reason, String taskReason, String endMessageKey) {
     GuardSession session = sessions.remove(playerId);
     if (session == null) {
       return;
@@ -615,7 +635,7 @@ public final class GuardSessionManager {
         dutyTask == null
             ? GuardTrip.stateFor(reason)
             : GuardTrip.taskStateFor(reason, dutyTask.handoverStopSequence(), dutyTask.source()),
-        reason.name());
+        taskReason);
     if (player != null) {
       reach.update(player, false);
       sidebar.hide(player);
@@ -625,8 +645,7 @@ public final class GuardSessionManager {
       player.updateInventory();
       player.sendMessage(
           locale.component(
-              "drive.guard.end."
-                  + reason.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
+              endMessageKey,
               Map.of(
                   "stops",
                   String.valueOf(session.link().completedStops()),
@@ -2820,7 +2839,8 @@ public final class GuardSessionManager {
         seated,
         session.link().timeoutStops(),
         cabChange,
-        stop.isEmpty() ? drivers.nextStationOf(group) : Optional.empty());
+        stop.isEmpty() ? drivers.nextStationOf(group) : Optional.empty(),
+        drivers.skipOrderOf(group));
   }
 
   private void refreshHotbar(Player player, GuardSession session, boolean force) {

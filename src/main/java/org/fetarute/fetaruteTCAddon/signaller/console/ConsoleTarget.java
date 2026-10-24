@@ -40,6 +40,17 @@ public sealed interface ConsoleTarget {
     }
   }
 
+  /**
+   * 列车操作（第二页）的一行。
+   *
+   * @param action 操作
+   */
+  record Act(SignalboxState.TrainAction action) implements ConsoleTarget {
+    public Act {
+      Objects.requireNonNull(action, "action");
+    }
+  }
+
   /** 标题栏的呼叫牌：开始回复呼叫（操作区换成固定回复）。 */
   record CallBadge() implements ConsoleTarget {}
 
@@ -65,6 +76,6 @@ public sealed interface ConsoleTarget {
     }
   }
 
-  /** 点在空白处，或左键：取消选择（回复呼叫时退回按钮）。 */
+  /** 点在空白处，或左键：取消选择（回复呼叫或列车操作时先退回按钮）。 */
   record Deselect() implements ConsoleTarget {}
 }

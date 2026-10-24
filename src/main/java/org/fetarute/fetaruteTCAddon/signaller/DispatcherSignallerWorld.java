@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerTrainDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
@@ -34,6 +35,7 @@ final class DispatcherSignallerWorld implements SignallerWorld {
   private final FetaruteTCAddon plugin;
   private final BiFunction<String, String, Optional<Integer>> lineColors;
   private final Supplier<SignallerPlatformDesk> platforms;
+  private final SignallerTrainDesk trains;
 
   /**
    * @param plugin 插件主类
@@ -47,6 +49,7 @@ final class DispatcherSignallerWorld implements SignallerWorld {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.lineColors = Objects.requireNonNull(lineColors, "lineColors");
     this.platforms = Objects.requireNonNull(platforms, "platforms");
+    this.trains = new PluginTrainDesk(plugin, plugin::debug);
   }
 
   @Override
@@ -171,6 +174,11 @@ final class DispatcherSignallerWorld implements SignallerWorld {
   public SignallerPlatformDesk platforms() {
     SignallerPlatformDesk desk = platforms.get();
     return desk == null ? SignallerPlatformDesk.NONE : desk;
+  }
+
+  @Override
+  public SignallerTrainDesk trains() {
+    return trains;
   }
 
   @Override

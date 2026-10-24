@@ -296,6 +296,7 @@ public final class TripDialogService implements Listener {
       case TRANSFER -> Material.POWERED_RAIL;
       case TERMINAL -> Material.RED_BANNER;
       case STOP -> Material.RAIL;
+      case SKIPPED -> Material.BARRIER;
     };
   }
 

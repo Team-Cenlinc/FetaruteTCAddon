@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.signaller;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
@@ -21,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerTrainDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
@@ -387,8 +389,675 @@ class SignallerServiceTest {
     press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
     assertEquals(Optional.of(now.plus(Duration.ofSeconds(150))), service.holdTarget("T1"));
 
-    press(new ConsoleTarget.Press(SignalboxState.Button.RELEASE));
+    now = now.plusSeconds(1);
+    press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
     assertTrue(service.holdTarget("T1").isEmpty());
+  }
+
+  @Test
+  void trainOperationsOpenASecondPageThatBackCloses() {
+    goOnDuty();
+    world.claims.add(claim("T1", OccupancyResource.forNode(YardFixtures.P1)));
+    world.progress.put("T1", progress("T1", YardFixtures.P1));
+    tick++;
+    press(new ConsoleTarget.Train("T1"));
+
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    assertTrue(state().trainOps().isPresent());
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.BACK));
+    assertFalse(state().trainOps().isPresent());
+  }
+
+  @Test
+  void choosingAnotherTrainLeavesTheTrainOperations() {
+    goOnDuty();
+    world.claims.add(claim("T1", OccupancyResource.forNode(YardFixtures.P1)));
+    world.progress.put("T1", progress("T1", YardFixtures.P1));
+    service.admit("T2", entering(), now);
+    tick++;
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Train("T2"));
+
+    assertEquals(Optional.of("T2"), state().selected());
+    assertFalse(state().trainOps().isPresent());
+  }
+
+  @Test
+  void aClickOnEmptySpaceLeavesTheTrainOperationsButKeepsTheSelection() {
+    goOnDuty();
+    world.claims.add(claim("T1", OccupancyResource.forNode(YardFixtures.P1)));
+    world.progress.put("T1", progress("T1", YardFixtures.P1));
+    tick++;
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Deselect());
+
+    assertFalse(state().trainOps().isPresent());
+    assertEquals(Optional.of("T1"), state().selected());
+  }
+
+  @Test
+  void theCallBadgeTakesOverFromTheTrainOperations() {
+    goOnDuty();
+    world.claims.add(claim("T1", OccupancyResource.forNode(YardFixtures.P1)));
+    world.progress.put("T1", progress("T1", YardFixtures.P1));
+    tick++;
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    service.call(DRIVER, CallerRole.DRIVER, "T1", CallReason.DOORS);
+
+    press(new ConsoleTarget.CallBadge());
+
+    assertTrue(state().replying());
+    assertFalse(state().trainOps().isPresent());
+  }
+
+  @Test
+  void theFirstCancelPressOnlyArmsTheCancellation() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertTrue(state().trainOps().orElseThrow().cancelArmed());
+    assertTrue(world.trains.cancelled.isEmpty());
+  }
+
+  @Test
+  void aSecondCancelPressConfirmsAndCancelsAnEmptyTrain() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(List.of("T1"), world.trains.cancelled);
+  }
+
+  @Test
+  void aRepeatedCancelPressFromAHeldButtonDoesNotConfirm() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    // 按住右键时客户端每 0.2 秒连发一次：按多久都只算第一下，不会自己确认
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    for (int i = 0; i < 6; i++) {
+      now = now.plusMillis(200);
+      pressNow(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    }
+
+    assertTrue(world.trains.cancelled.isEmpty());
+    assertTrue(state().trainOps().orElseThrow().cancelArmed());
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    assertEquals(List.of("T1"), world.trains.cancelled, "松开再按一下才确认");
+  }
+
+  /** 按住“列车操作”翻到第二页后，连发落到同一位置的“取消车次”上：不算。 */
+  @Test
+  void aHeldPressCarriedOverToTheSecondPageDoesNothing() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    for (int i = 0; i < 6; i++) {
+      now = now.plusMillis(200);
+      pressNow(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    }
+
+    assertFalse(state().trainOps().orElseThrow().cancelArmed());
+    assertTrue(world.trains.cancelled.isEmpty());
+  }
+
+  /** 第二页没在显示时，旧画面上的点击不做第二页的操作。 */
+  @Test
+  void trainActionsNeedTheSecondPageShown() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertTrue(state().trainOps().isEmpty());
+    assertNull(service.boxFor("SURC", "ABC").orElseThrow().cancelArm);
+  }
+
+  @Test
+  void anArmedCancellationLapsesAfterFiveSeconds() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    now = now.plusSeconds(6);
+    assertFalse(state().trainOps().orElseThrow().cancelArmed());
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertTrue(world.trains.cancelled.isEmpty());
+    assertTrue(state().trainOps().orElseThrow().cancelArmed());
+  }
+
+  @Test
+  void withPlayersAboardTheTrainIsHeldAnnouncedAndCancelledFiveSecondsLater() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(true, true, false));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(List.of("T1"), world.trains.announced);
+    assertTrue(world.trains.cancelled.isEmpty());
+    assertTrue(service.holdTarget("T1").isPresent());
+
+    now = now.plusSeconds(5);
+    tick++;
+    service.tick();
+    assertEquals(List.of("T1"), world.trains.cancelled);
+  }
+
+  /** 已确认取消、车上有人：一列车走到确认那一步。 */
+  private void confirmCancelWithPlayersAboard(String train) {
+    goOnDuty();
+    dwellAtPlatform(train);
+    world.trains.scenes.put(train, new SignallerTrainDesk.Scene(true, true, false));
+    press(new ConsoleTarget.Train(train));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+  }
+
+  /** 停运倒计时中：扣车键放不走车，再按取消不算第二次；确认后回到第一页并提示已取消。 */
+  @Test
+  void duringTheCountdownTheTrainCannotBeReleasedOrCancelledTwice() {
+    confirmCancelWithPlayersAboard("T1");
+    assertEquals(Optional.of(SignalboxState.NoticeKind.TRIP_CANCELLED), noticeKind());
+    assertTrue(state().trainOps().isEmpty(), "确认后回到第一页");
+
+    press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
+    assertTrue(service.holdTarget("T1").isPresent());
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_PENDING), noticeKind());
+
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_PENDING), noticeKind());
+    assertEquals(List.of("T1"), world.trains.announced, "停运只播一次");
+  }
+
+  /** 倒计时中车被改名：倒计时随车走，到点照样删。 */
+  @Test
+  void theCountdownFollowsARename() {
+    confirmCancelWithPlayersAboard("T1");
+
+    service.renamed("T1", "T9");
+    world.trains.scenes.put("T9", new SignallerTrainDesk.Scene(true, true, false));
+    now = now.plusSeconds(5);
+    tick++;
+    service.tick();
+
+    assertEquals(List.of("T9"), world.trains.cancelled);
+    assertTrue(service.holdTarget("T9").isEmpty());
+  }
+
+  /** 倒计时中下岗：扣车随下岗解除，已告知停运的车不能带着乘客开走，当场办完。 */
+  @Test
+  void goingOffDuringTheCountdownCarriesTheCancelOut() {
+    confirmCancelWithPlayersAboard("T1");
+
+    service.endDuty(PLAYER, SignallerShift.EndReason.OFF_DUTY);
+
+    assertEquals(List.of("T1"), world.trains.cancelled);
+  }
+
+  @Test
+  void aTrainWithPlayersAboardOutsideAPlatformCannotBeCancelled() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(true, false, false));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_OCCUPIED), noticeKind());
+    assertFalse(state().trainOps().orElseThrow().cancelArmed());
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    assertTrue(world.trains.announced.isEmpty());
+    assertTrue(world.trains.cancelled.isEmpty());
+  }
+
+  @Test
+  void theConfirmingPressChecksAgainThatAnOccupiedTrainIsStillAtThePlatform() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(true, true, false));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(true, false, false));
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_OCCUPIED), noticeKind());
+    assertTrue(world.trains.announced.isEmpty());
+    assertTrue(world.trains.cancelled.isEmpty());
+  }
+
+  /** 往后没有停车站（或没接上调度）：说清楚是没有可越的站，不说成终点或不归本区。 */
+  @Test
+  void withNoStopAheadTheNoticeSaysSo() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 260L);
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.SKIP_NO_STOP), noticeKind());
+    assertTrue(world.trains.ordered.isEmpty());
+  }
+
+  /** 联挂中的一体车带着两条交路：不能越站。 */
+  @Test
+  void aCoupledTrainCannotSkip() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 260L);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.empty()));
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(false, true, true));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.SKIP_COUPLED), noticeKind());
+    assertTrue(world.trains.ordered.isEmpty());
+  }
+
+  @Test
+  void aCoupledTrainCannotBeCancelled() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(false, true, true));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_COUPLED), noticeKind());
+    assertTrue(world.trains.cancelled.isEmpty());
+  }
+
+  @Test
+  void cancellingNeedsItsOwnPermission() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    pressWithoutCancelPermission(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    now = now.plusSeconds(2);
+    pressWithoutCancelPermission(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_NO_PERMISSION), noticeKind());
+    assertTrue(world.trains.cancelled.isEmpty());
+  }
+
+  @Test
+  void noTripIsCancelledDuringAnExam() {
+    service.setExaminer(
+        new SignallerExaminer() {
+          @Override
+          public boolean examining(UUID player) {
+            return true;
+          }
+
+          @Override
+          public void onDutyStarted(
+              UUID player, String zoneName, boolean manual, boolean stations) {}
+
+          @Override
+          public void onEvent(UUID player, Event event) {}
+
+          @Override
+          public void onDutyEnded(UUID player, SignallerShift.EndReason reason) {}
+        });
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_IN_EXAM), noticeKind());
+    assertTrue(world.trains.cancelled.isEmpty());
+  }
+
+  /** 在入口等许可的车还停在区外（多半是邻区的站台上）：不归本楼取消。 */
+  @Test
+  void aTrainWaitingAtTheEntryIsNotYetOursToCancel() {
+    goOnDuty();
+    service.admit("T1", entering(), now);
+    press(new ConsoleTarget.Train("T1"));
+    assertEquals(SignalboxState.RowStatus.WAITING, state().rows().get(0).status());
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_OUT_OF_ZONE), noticeKind());
+    assertFalse(state().trainOps().orElseThrow().cancelArmed());
+  }
+
+  @Test
+  void anApproachingTrainIsNotYetOursToCancel() {
+    goOnDuty();
+    tick++;
+    press(new ConsoleTarget.Train("T1"));
+    assertEquals(SignalboxState.RowStatus.APPROACHING, state().rows().get(0).status());
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.CANCEL_OUT_OF_ZONE), noticeKind());
+    assertTrue(world.trains.cancelled.isEmpty());
+  }
+
+  @Test
+  void aCancelledTripIsCountedInTheShiftAndToldToTheExaminer() {
+    List<String> heard = new ArrayList<>();
+    service.setExaminer(recording(heard));
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertTrue(heard.contains("TRIP_CANCELLED"));
+    assertTrue(service.endDuty(PLAYER, SignallerShift.EndReason.OFF_DUTY));
+    assertEquals(1, shifts.get(0).tripsCancelled());
+  }
+
+  @Test
+  void aCountdownIsCalledOffWhenTheOccupiedTrainHasLeftThePlatform() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(true, true, false));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(true, false, false));
+    now = now.plusSeconds(5);
+    tick++;
+    service.tick();
+
+    assertTrue(world.trains.cancelled.isEmpty());
+    assertTrue(service.holdTarget("T1").isEmpty());
+  }
+
+  @Test
+  void aTrainNotLateEnoughIsNotSkipped() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 80L);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.SKIP_NOT_LATE), noticeKind());
+    assertTrue(world.trains.ordered.isEmpty());
+  }
+
+  @Test
+  void aLateTrainIsOrderedToSkipTheNextStopInTheZone() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 260L);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+
+    assertEquals(List.of("T1"), world.trains.ordered);
+  }
+
+  @Test
+  void theNextStopMustBeInThisZoneToBeSkipped() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 260L);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(NodeId.of("SURC:S:XYZ:1"), false, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.SKIP_OUT_OF_ZONE), noticeKind());
+    assertTrue(world.trains.ordered.isEmpty());
+  }
+
+  @Test
+  void pressingSkipAgainRevokesTheOrder() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 260L);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, true, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+
+    assertEquals(List.of("T1"), world.trains.revoked);
+    assertTrue(world.trains.ordered.isEmpty());
+    assertEquals(Optional.of(SignalboxState.NoticeKind.SKIP_REVOKED), noticeKind());
+
+    world.trains.revokeRefusal = Optional.of(SignallerTrainDesk.SkipRefusal.BRAKING);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+    assertEquals(Optional.of(SignalboxState.NoticeKind.SKIP_BRAKING), noticeKind());
+  }
+
+  @Test
+  void aStopThatMustNotBeSkippedSaysWhy() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 260L);
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    Map<SignallerTrainDesk.SkipRefusal, SignalboxState.NoticeKind> expected =
+        Map.of(
+            SignallerTrainDesk.SkipRefusal.NO_STOP, SignalboxState.NoticeKind.SKIP_NO_STOP,
+            SignallerTrainDesk.SkipRefusal.TERMINAL, SignalboxState.NoticeKind.SKIP_TERMINAL,
+            SignallerTrainDesk.SkipRefusal.DIRECTIVE, SignalboxState.NoticeKind.SKIP_DIRECTIVE,
+            SignallerTrainDesk.SkipRefusal.BRAKING, SignalboxState.NoticeKind.SKIP_BRAKING,
+            SignallerTrainDesk.SkipRefusal.CALL_DESTINATION,
+                SignalboxState.NoticeKind.SKIP_CALL_DESTINATION,
+            SignallerTrainDesk.SkipRefusal.CREW_BOARDING,
+                SignalboxState.NoticeKind.SKIP_CREW_BOARDING);
+    assertEquals(SignallerTrainDesk.SkipRefusal.values().length, expected.size());
+
+    for (Map.Entry<SignallerTrainDesk.SkipRefusal, SignalboxState.NoticeKind> entry :
+        expected.entrySet()) {
+      world.trains.skips.put(
+          "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.of(entry.getKey())));
+      press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+      assertEquals(Optional.of(entry.getValue()), noticeKind(), entry.getKey().name());
+    }
+    assertTrue(world.trains.ordered.isEmpty());
+  }
+
+  @Test
+  void anOrderedSkipIsAnnouncedCountedAndToldToTheExaminer() {
+    List<String> heard = new ArrayList<>();
+    service.setExaminer(recording(heard));
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 260L);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.SKIP_ORDERED), noticeKind());
+    assertTrue(heard.contains("SKIP_ORDERED"));
+    assertTrue(service.endDuty(PLAYER, SignallerShift.EndReason.OFF_DUTY));
+    assertEquals(1, shifts.get(0).skipsOrdered());
+  }
+
+  @Test
+  void skippingIsLeftOutOfExamsButAllowedInPractice() {
+    boolean[] practicing = {false};
+    service.setExaminer(
+        new SignallerExaminer() {
+          @Override
+          public boolean examining(UUID player) {
+            return true;
+          }
+
+          @Override
+          public boolean practicing(UUID player) {
+            return practicing[0];
+          }
+
+          @Override
+          public void onDutyStarted(
+              UUID player, String zoneName, boolean manual, boolean stations) {}
+
+          @Override
+          public void onEvent(UUID player, Event event) {}
+
+          @Override
+          public void onDutyEnded(UUID player, SignallerShift.EndReason reason) {}
+        });
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.delays.put("T1", 260L);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+    assertEquals(Optional.of(SignalboxState.NoticeKind.SKIP_IN_EXAM), noticeKind());
+    assertTrue(world.trains.ordered.isEmpty());
+
+    practicing[0] = true;
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+    assertEquals(List.of("T1"), world.trains.ordered);
+  }
+
+  @Test
+  void theTrainOperationsShowWhichStationWouldBeSkipped() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+
+    SignalboxState.TrainOps ops = state().trainOps().orElseThrow();
+    assertEquals(Optional.of("ABC"), ops.skipStation());
+    assertFalse(ops.skipOrdered());
+
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, true, Optional.empty()));
+    tick++;
+    assertTrue(state().trainOps().orElseThrow().skipOrdered());
+  }
+
+  @Test
+  void aTrainOrderedToSkipSaysSoInTheTrainList() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.empty()));
+    assertEquals(Optional.empty(), row("T1").skipping());
+
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, true, Optional.empty()));
+    tick++;
+
+    assertEquals(Optional.of("ABC"), row("T1").skipping());
+  }
+
+  private SignalboxState.TrainRow row(String train) {
+    return state().rows().stream()
+        .filter(row -> row.trainName().equals(train))
+        .findFirst()
+        .orElseThrow();
+  }
+
+  @Test
+  void theHoldKeyReleasesTheTrainItHolds() {
+    goOnDuty();
+    world.claims.add(claim("T1", OccupancyResource.forNode(YardFixtures.P1)));
+    world.progress.put("T1", progress("T1", YardFixtures.P1));
+    world.dwelling = true;
+    tick++;
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
+    assertTrue(service.holdTarget("T1").isPresent());
+    assertTrue(state().enabled(SignalboxState.Button.HOLD));
+
+    now = now.plusSeconds(1);
+    press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
+    assertTrue(service.holdTarget("T1").isEmpty());
+  }
+
+  @Test
+  void aRepeatedPressRightAfterHoldingKeepsTheTrainHeld() {
+    goOnDuty();
+    world.claims.add(claim("T1", OccupancyResource.forNode(YardFixtures.P1)));
+    world.progress.put("T1", progress("T1", YardFixtures.P1));
+    world.dwelling = true;
+    tick++;
+    press(new ConsoleTarget.Train("T1"));
+
+    // 按住右键时客户端会连发
+    press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
+    for (int i = 0; i < 6; i++) {
+      now = now.plusMillis(200);
+      pressNow(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
+    }
+
+    assertTrue(service.holdTarget("T1").isPresent(), "按住多久都不会把刚扣的车放走");
   }
 
   @Test
@@ -603,10 +1272,10 @@ class SignallerServiceTest {
 
     press(new ConsoleTarget.Press(SignalboxState.Button.MODE));
     // 按住右键时客户端连发：紧接着的重复按下不算，不会刚转自动又转回人工
-    press(new ConsoleTarget.Press(SignalboxState.Button.MODE));
+    now = now.plusMillis(200);
+    pressNow(new ConsoleTarget.Press(SignalboxState.Button.MODE));
     assertEquals(SignalboxState.Mode.AUTO, state().mode());
 
-    now = now.plusSeconds(1);
     press(new ConsoleTarget.Press(SignalboxState.Button.MODE));
     assertEquals(SignalboxState.Mode.MANUAL, state().mode());
   }
@@ -637,8 +1306,6 @@ class SignallerServiceTest {
     press(new ConsoleTarget.Train("T1"));
     press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
     assertEquals(Optional.of(SignalboxState.NoticeKind.NOT_DWELLING), noticeKind());
-    press(new ConsoleTarget.Press(SignalboxState.Button.RELEASE));
-    assertEquals(Optional.of(SignalboxState.NoticeKind.NOT_HELD), noticeKind());
     press(new ConsoleTarget.Press(SignalboxState.Button.CANCEL_ROUTE));
     assertEquals(Optional.of(SignalboxState.NoticeKind.NO_PERMIT), noticeKind());
 
@@ -957,6 +1624,7 @@ class SignallerServiceTest {
     SignalBox box = service.boxFor("SURC", "DEF").orElseThrow();
     world.dwelling = true;
     service.press(PLAYER, "Sig", true, CONSOLE, "SURC", "DEF", new ConsoleTarget.Train("T5"));
+    now = now.plusSeconds(1);
     service.press(
         PLAYER,
         "Sig",
@@ -965,6 +1633,7 @@ class SignallerServiceTest {
         "SURC",
         "DEF",
         new ConsoleTarget.Press(SignalboxState.Button.SET_ROUTE));
+    now = now.plusSeconds(1);
     service.press(
         PLAYER,
         "Sig",
@@ -977,6 +1646,7 @@ class SignallerServiceTest {
 
     world.dwelling = false;
     tick++;
+    now = now.plusSeconds(1);
     service.press(
         PLAYER,
         "Sig",
@@ -985,6 +1655,7 @@ class SignallerServiceTest {
         "SURC",
         "DEF",
         new ConsoleTarget.Press(SignalboxState.Button.SET_ROUTE));
+    now = now.plusSeconds(1);
     service.press(
         PLAYER,
         "Sig",
@@ -1163,7 +1834,7 @@ class SignallerServiceTest {
     press(new ConsoleTarget.Train("T1"));
     press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
     now = now.plusSeconds(100);
-    press(new ConsoleTarget.Press(SignalboxState.Button.RELEASE));
+    press(new ConsoleTarget.Press(SignalboxState.Button.HOLD));
     world.delays.put("T1", 110L);
     world.stamps.put("T1", "t1#3");
     world.claims.clear();
@@ -1234,6 +1905,57 @@ class SignallerServiceTest {
     assertEquals(1, shift.lostTime(), "T2 多出 200 秒");
     assertEquals(0, shift.conflictsGood());
     assertEquals(1, shift.conflictsBad(), "两车合计多出 210 秒");
+  }
+
+  @Test
+  void aTrainOrderedToSkipIsLeftOutOfPunctualityAndJunctionScores() {
+    goOnDuty();
+    world.progress.put(
+        "T2",
+        new RouteProgressRegistry.RouteProgressEntry(
+            "T2",
+            ROUTE_WEST,
+            RouteId.of("SURC:L1:R2"),
+            0,
+            Optional.of(YardFixtures.P1),
+            Optional.of(YardFixtures.IB),
+            SignalAspect.PROCEED,
+            Instant.EPOCH));
+    world.delays.put("T1", 0L);
+    world.delays.put("T2", 0L);
+    world.stamps.put("T1", "t1#1");
+    world.stamps.put("T2", "t2#1");
+    service.admit("T1", entering(), now);
+    service.admit("T2", enteringFromEast(), now);
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.SET_ROUTE));
+    press(new ConsoleTarget.Train("T2"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.SET_ROUTE));
+    enterZone("T1", "T2");
+
+    // 区内令 T1 越站
+    world.delays.put("T1", 260L);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, false, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+    assertEquals(List.of("T1"), world.trains.ordered);
+
+    world.delays.put("T1", 10L);
+    world.delays.put("T2", 200L);
+    world.stamps.put("T1", "t1#3");
+    world.stamps.put("T2", "t2#3");
+    world.claims.clear();
+    tick++;
+    service.tick();
+    service.endDuty(PLAYER, SignallerShift.EndReason.OFF_DUTY);
+
+    SignallerShift shift = shifts.get(0);
+    assertEquals(0, shift.keptTime(), "越过站的车省下的时间不算正点放行");
+    assertEquals(1, shift.lostTime(), "T2 照算");
+    assertEquals(0, shift.conflictsGood());
+    assertEquals(0, shift.conflictsBad(), "有越站车的交汇不评");
   }
 
   /** 从 IB 进站到 1 道的申请。 */
@@ -1353,8 +2075,16 @@ class SignallerServiceTest {
     assertEquals(SignallerService.DutyStart.STARTED, service.startDuty(player, "Sig", true));
   }
 
+  /** 列车停在 1 道站台上。 */
+  private void dwellAtPlatform(String train) {
+    world.claims.add(claim(train, OccupancyResource.forNode(YardFixtures.P1)));
+    world.progress.put(train, progress(train, YardFixtures.P1));
+    world.dwelling = true;
+    tick++;
+  }
+
   private void goOnDuty() {
-    press(new ConsoleTarget.Train("T1"));
+    pressNow(new ConsoleTarget.Train("T1"));
     assertEquals(SignallerService.DutyStart.STARTED, service.startDuty(PLAYER, "Sig", true));
   }
 
@@ -1370,8 +2100,20 @@ class SignallerServiceTest {
     service.tick();
   }
 
+  /** 点一下：与上一下隔开一秒（紧跟上一下的点击算按住右键的连发）。 */
   private void press(ConsoleTarget target) {
+    now = now.plusSeconds(1);
+    pressNow(target);
+  }
+
+  /** 此刻就点，不往前拨时钟：测按住右键的连发。 */
+  private void pressNow(ConsoleTarget target) {
     service.press(PLAYER, "Sig", true, CONSOLE, "SURC", "ABC", target);
+  }
+
+  private void pressWithoutCancelPermission(ConsoleTarget target) {
+    now = now.plusSeconds(1);
+    service.press(PLAYER, "Sig", true, false, CONSOLE, "SURC", "ABC", target);
   }
 
   /** 从 IA 进站到 1 道的申请。 */
@@ -1445,6 +2187,7 @@ class SignallerServiceTest {
   private static final class FakeWorld implements SignallerWorld {
     RailGraph graph = YardFixtures.graph();
     final Map<String, Zone> zones = new HashMap<>();
+    final FakeTrainDesk trains = new FakeTrainDesk();
     final List<OccupancyClaim> claims = new ArrayList<>();
     final Map<String, RouteProgressRegistry.RouteProgressEntry> progress = new HashMap<>();
     final List<String> reevaluated = new ArrayList<>();
@@ -1525,6 +2268,11 @@ class SignallerServiceTest {
     }
 
     @Override
+    public SignallerTrainDesk trains() {
+      return trains;
+    }
+
+    @Override
     public SignallerPlatformDesk platforms() {
       return desk;
     }
@@ -1538,6 +2286,55 @@ class SignallerServiceTest {
         return Optional.of(new PlayerSpot("Grd", YardFixtures.WORLD, 520, 64, 0, true));
       }
       return PLAYER.equals(player) || SECOND.equals(player) ? Optional.of(spot) : Optional.empty();
+    }
+  }
+
+  /** 记下信号员对列车做了什么。 */
+  private static final class FakeTrainDesk implements SignallerTrainDesk {
+    final List<String> cancelled = new ArrayList<>();
+    final List<String> announced = new ArrayList<>();
+    final List<String> ordered = new ArrayList<>();
+    final List<String> revoked = new ArrayList<>();
+
+    /** 各列车的下一个停车站；没写的车没有。 */
+    final Map<String, Skip> skips = new HashMap<>();
+
+    @Override
+    public Optional<Skip> skip(String trainName) {
+      return Optional.ofNullable(skips.get(trainName));
+    }
+
+    @Override
+    public Optional<SkipRefusal> orderSkip(String trainName) {
+      ordered.add(trainName);
+      return Optional.empty();
+    }
+
+    /** 撤销时回的原因；空为撤了。 */
+    Optional<SkipRefusal> revokeRefusal = Optional.empty();
+
+    @Override
+    public Optional<SkipRefusal> revokeSkip(String trainName) {
+      revoked.add(trainName);
+      return revokeRefusal;
+    }
+
+    /** 各列车的现场；没写的车：车上没有玩家、停在站台、不是联挂车。 */
+    final Map<String, Scene> scenes = new HashMap<>();
+
+    @Override
+    public Scene scene(String trainName) {
+      return scenes.getOrDefault(trainName, new Scene(false, true, false));
+    }
+
+    @Override
+    public void announceCancel(String trainName) {
+      announced.add(trainName);
+    }
+
+    @Override
+    public void cancel(String trainName) {
+      cancelled.add(trainName);
     }
   }
 }

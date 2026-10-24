@@ -27,7 +27,7 @@ import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 
 /**
  * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压（机车含制动管，电制动出力时标“再生”）、警惕装置、
- * 当前故障与门旁路；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻、下一通过站与实时评分，折返换端时加换端一行。
+ * 当前故障与门旁路；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻、下一通过站与实时评分，折返换端时加换端一行，信号楼下了越站令时加调度命令一行。
  *
  * <p>车站一行平时显示下一站，进站时换成离停车点的距离，停妥后显示停站阶段。计分板不会被别的插件的动作栏消息顶掉，所以车站信息以这里为准，动作栏只提示要动手的操作。
  *
@@ -82,6 +82,14 @@ public final class DriveSidebarRows {
           session.isAto()
               ? new Row("drive.sidebar.label.signal", "drive.sidebar.value.signal.ato", Map.of())
               : signalRow(link));
+      link.skipOrder()
+          .ifPresent(
+              station ->
+                  rows.add(
+                      new Row(
+                          "drive.sidebar.label.dispatch-order",
+                          "drive.sidebar.value.dispatch-order.skip",
+                          Map.of("station", station))));
       if (signallerWaiting) {
         rows.add(
             new Row(

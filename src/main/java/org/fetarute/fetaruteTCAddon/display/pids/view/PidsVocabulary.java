@@ -552,6 +552,11 @@ public final class PidsVocabulary {
         buttons.put(button, names("signalbox.button." + keyOf(button)));
       }
     }
+    Map<SignalboxState.TrainAction, Names> trainActions =
+        new EnumMap<>(SignalboxState.TrainAction.class);
+    for (SignalboxState.TrainAction action : SignalboxState.TrainAction.values()) {
+      trainActions.put(action, names("signalbox.train-action." + keyOf(action)));
+    }
     Map<SignalboxState.Reply, Names> replies = new EnumMap<>(SignalboxState.Reply.class);
     for (SignalboxState.Reply reply : SignalboxState.Reply.values()) {
       replies.put(reply, names("signalbox.reply." + keyOf(reply)));
@@ -588,6 +593,11 @@ public final class PidsVocabulary {
         names("signalbox.button.to-auto"),
         names("signalbox.button.to-manual"),
         names("signalbox.button.cancel-auto-pass"),
+        names("signalbox.button.release"),
+        trainActions,
+        names("signalbox.train-action.cancel-armed"),
+        names("signalbox.train-action.skip-revoke"),
+        primary("signalbox.skipping"),
         replies,
         notices,
         primary("signalbox.notice.route-blocked-by"),

@@ -18,6 +18,7 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param noticeSeconds 控制台临时提示显示多少秒
  * @param approachLockSeconds 接近锁闭：车已在接近或停在入口时取消它的进路，这个入口要过多少秒才能再排进路；0 为不锁，限 0–{@value
  *     #MAX_APPROACH_LOCK_SECONDS} 秒
+ * @param skipMinDelaySeconds 晚点至少多少秒才能令越站；限 0–{@value #MAX_SKIP_MIN_DELAY_SECONDS} 秒
  */
 public record SignallerConfig(
     boolean enabled,
@@ -27,7 +28,36 @@ public record SignallerConfig(
     int maxHoldSeconds,
     int callTimeoutSeconds,
     int noticeSeconds,
-    int approachLockSeconds) {
+    int approachLockSeconds,
+    int skipMinDelaySeconds) {
+
+  /** 越站晚点门槛的默认值（秒）。 */
+  public static final int DEFAULT_SKIP_MIN_DELAY_SECONDS = 180;
+
+  /** 越站晚点门槛的上限（秒）：与时刻表的晚点上限相同。 */
+  public static final int MAX_SKIP_MIN_DELAY_SECONDS = 900;
+
+  /** 越站门槛取默认值。 */
+  public SignallerConfig(
+      boolean enabled,
+      int autoRouteSeconds,
+      int consoleRangeBlocks,
+      int graceSeconds,
+      int maxHoldSeconds,
+      int callTimeoutSeconds,
+      int noticeSeconds,
+      int approachLockSeconds) {
+    this(
+        enabled,
+        autoRouteSeconds,
+        consoleRangeBlocks,
+        graceSeconds,
+        maxHoldSeconds,
+        callTimeoutSeconds,
+        noticeSeconds,
+        approachLockSeconds,
+        DEFAULT_SKIP_MIN_DELAY_SECONDS);
+  }
 
   /** 扣车上限的上限：与按表扣车的上限相同（发车锁从到站起最长 180 秒，留出到站后的停站时间）。 */
   public static final int HOLD_CEILING_SECONDS = 150;
@@ -50,6 +80,7 @@ public record SignallerConfig(
     callTimeoutSeconds = Math.max(1, callTimeoutSeconds);
     noticeSeconds = Math.max(1, noticeSeconds);
     approachLockSeconds = Math.max(0, Math.min(MAX_APPROACH_LOCK_SECONDS, approachLockSeconds));
+    skipMinDelaySeconds = Math.max(0, Math.min(MAX_SKIP_MIN_DELAY_SECONDS, skipMinDelaySeconds));
   }
 
   public static SignallerConfig defaults() {
@@ -89,6 +120,7 @@ public record SignallerConfig(
         maxHold,
         section.getInt("call-timeout-seconds", defaults.callTimeoutSeconds()),
         section.getInt("notice-seconds", defaults.noticeSeconds()),
-        section.getInt("approach-lock-seconds", defaults.approachLockSeconds()));
+        section.getInt("approach-lock-seconds", defaults.approachLockSeconds()),
+        section.getInt("skip-min-delay-seconds", defaults.skipMinDelaySeconds()));
   }
 }

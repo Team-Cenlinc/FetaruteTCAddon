@@ -43,7 +43,9 @@ public record TripSheet(
     /** 有换乘的停靠站。 */
     TRANSFER,
     /** 终点站。 */
-    TERMINAL
+    TERMINAL,
+    /** 信号员令越过、这一趟不停的站。 */
+    SKIPPED
   }
 
   /**
@@ -67,6 +69,7 @@ public record TripSheet(
    * @param next 下一站标题行
    * @param stop 普通站标题行
    * @param terminal 终点站标题行
+   * @param skipped 被越过的站的标题行
    * @param details 每站的说明行
    */
   public record Texts(
@@ -75,6 +78,7 @@ public record TripSheet(
       String next,
       String stop,
       String terminal,
+      String skipped,
       List<String> details) {
     public Texts {
       details = List.copyOf(details);
@@ -93,6 +97,7 @@ public record TripSheet(
           text.apply("display.trip.row.next"),
           text.apply("display.trip.row.stop"),
           text.apply("display.trip.row.terminal"),
+          text.apply("display.trip.row.skipped"),
           // 分行、联挂的说明另起一个键：已部署的语言文件只补缺的键，接在原有说明之后才读得到
           java.util.stream.Stream.concat(
                   lines.apply("display.trip.row.details").stream(),
@@ -126,6 +131,7 @@ public record TripSheet(
       BiFunction<UpcomingStop, Integer, Map<String, String>> rowPlaceholders) {
     List<Row> rows = new ArrayList<>();
     Optional<RouteLineChanges.LineRef> previousLine = currentLine;
+    boolean nextListed = false;
     for (int i = 0; i < stops.size() && rows.size() < limit; i++) {
       UpcomingStop stop = stops.get(i);
       Map<String, String> values = new HashMap<>(rowPlaceholders.apply(stop, i + 1));
@@ -136,7 +142,8 @@ public record TripSheet(
       if (stop.line().isPresent()) {
         previousLine = stop.line();
       }
-      Kind kind = kind(i, stop);
+      Kind kind = kind(nextListed, stop);
+      nextListed |= kind != Kind.SKIPPED;
       if (transfersOnly && kind == Kind.STOP && !lineChange) {
         continue;
       }
@@ -150,11 +157,15 @@ public record TripSheet(
         transfersOnly);
   }
 
-  private static Kind kind(int index, UpcomingStop stop) {
+  /** 下一站是第一个真停的站：被越过的站排在它前面也不算。 */
+  private static Kind kind(boolean nextListed, UpcomingStop stop) {
+    if (stop.skipped()) {
+      return Kind.SKIPPED;
+    }
     if (stop.terminal()) {
       return Kind.TERMINAL;
     }
-    if (index == 0) {
+    if (!nextListed) {
       return Kind.NEXT;
     }
     return stop.transfers().isEmpty() ? Kind.STOP : Kind.TRANSFER;
@@ -165,6 +176,7 @@ public record TripSheet(
         switch (kind) {
           case NEXT -> texts.next();
           case TERMINAL -> texts.terminal();
+          case SKIPPED -> texts.skipped();
           case STOP, TRANSFER -> texts.stop();
         };
     StringBuilder out = new StringBuilder(HudText.apply(headline, values));

@@ -9,6 +9,7 @@ display:
         scheduled: "Due in {minutes} min"
         minutes: "{minutes} min"
         unavailable: "-"
+        skipped: "Not stopping"
 
 enum:
   line-service-type:
@@ -313,6 +314,7 @@ drive:
       train: "Train"
       signal: "Signal"
       signaller: "Signaller"
+      dispatch-order: "Order"
       next-station: "Next"
       stop-mark: "Stop mark"
       stop: "Stop"
@@ -355,6 +357,8 @@ drive:
       signaller:
         waiting: "<yellow>Held at the zone entry</yellow> <gray>Q twice to call</gray>"
         waiting-guard: "<yellow>Held at the zone entry</yellow> <gray>/fta drive call to call</gray>"
+      dispatch-order:
+        skip: "<gold>Skip <station></gold> <gray>do not stop</gray>"
       station:
         none: "<gray>-</gray>"
       schedule:
@@ -726,8 +730,10 @@ drive:
         notice: "Notice"
         drill: "Drill"
         signaller: "Signaller"
+        dispatch-order: "Order"
       value:
         train: "<white><train></white>"
+        dispatch-order-skip: "<gold>Skip <station></gold> <gray>no stop, no duties</gray>"
         signaller-buzzer: "<yellow>Held at the zone entry</yellow> <gray>buzzer twice to call</gray>"
         signaller-command: "<yellow>Held at the zone entry</yellow> <gray>/fta guard call to call</gray>"
         crew-driver: "<white>Driver <driver></white>"
@@ -786,6 +792,7 @@ drive:
       death: "<prefix> <yellow>Duty ended</yellow>"
       game-mode: "<prefix> <yellow>Your game mode does not allow guard duty; duty ended</yellow>"
       train-gone: "<prefix> <yellow>The train is gone; duty ended</yellow> <gray><stops> stops worked</gray>"
+      signaller-cancel: "<prefix> <yellow>The signal box cancelled this trip; duty ended</yellow> <gray><stops> stops worked</gray>"
       timeouts: "<prefix> <red>Too many stops in a row timed out; duty ended (incomplete)</red> <gray><stops> stops worked, <timeouts> with timeouts</gray>"
       left-behind: "<prefix> <red>The train left without you (left behind); duty ended (incomplete)</red> <gray><stops> stops worked</gray>"
       disabled: "<prefix> <yellow>Guard duty has been disabled; duty ended</yellow>"
@@ -1746,6 +1753,7 @@ drive:
     admin: "<prefix> <yellow>An administrator ended your driving</yellow>"
     handback: "<prefix> <yellow>The train was handed back to automatic operation</yellow>"
     dispatch-abort: "<prefix> <red>The dispatcher took the train back; driving has ended</red>"
+    signaller-cancel: "<prefix> <yellow>The signal box cancelled trip <white><train></white>; driving has ended (task interrupted, no penalty)</yellow>"
     watchdog: "<prefix> <red>The train made no progress for too long and was handed back to automatic operation</red>"
     task-complete: "<prefix> <green>Arrived at the terminus: task complete, the train is back under automatic operation</green>"
     service-end: "<prefix> <green>The train has reached the end of its run; driving has ended</green>"
@@ -1982,6 +1990,20 @@ signaller:
     caution-bar: "<aqua>Signal box:</aqua> <white>proceed at caution</white>"
     ack: "<prefix> <aqua><zone></aqua> <white>signal box: received</white>"
     ack-bar: "<aqua>Signal box:</aqua> <white>received</white>"
+  cancel:
+    cabin:
+      title: "<red>This train is terminating here</red>"
+      subtitle: "<white>All passengers please leave the train</white>"
+      chat: "<prefix> <gold>Announcement:</gold> <white>Due to a service change this train terminates at <station>. All passengers please leave the train and take a following service.</white>"
+  skip:
+    cabin:
+      ordered-chat: "<prefix> <gold>Announcement:</gold> <white>Due to a delay this train will not stop at <station>. Passengers for <station> please take a following service.</white>"
+      ordered-subtitle: "<yellow>Not stopping at <station></yellow>"
+      restored-chat: "<prefix> <gold>Announcement:</gold> <white>This train will now stop at <station> as normal.</white>"
+      restored-subtitle: "<white>Stopping at <station> again</white>"
+    driver:
+      ordered: "<aqua>Signal box:</aqua> <white>skip <station>, do not stop</white>"
+      restored: "<aqua>Signal box:</aqua> <white>skip revoked, stop at <station></white>"
 sign:
   # AutoStation sign line 4 is blank or unrecognised: the doors will not open at this stop
   autostation-door-missing: "<prefix> <yellow>Line 4 has no valid door direction; trains stopping here will not open their doors.</yellow>\n<gray>Write the world direction of the doors (N/E/S/W/NE/NW/SE/SW) or BOTH; write NONE if this platform has no doors to open.</gray>"
@@ -2084,6 +2106,7 @@ pids:
         held: "Held <seconds> s"
       # Auto-routed trains: <status> is the status above
       auto-routed: "<status> (auto)"
+      skipping: "<status> · skip <station>"
       # Area handed to a staffed nested zone; <zone> is its name, <name> its signaller
       delegated: "<zone> · station control (<name>)"
       on-time: "On time"
@@ -2098,6 +2121,8 @@ pids:
         hold-secondary: ""
         release: "Release"
         release-secondary: ""
+        train-ops: "Train ops"
+        train-ops-secondary: ""
         auto-pass: "Auto pass"
         auto-pass-secondary: ""
         to-auto: "Switch to auto"
@@ -2116,12 +2141,42 @@ pids:
         caution-secondary: ""
         ack: "Acknowledged"
         ack-secondary: ""
+      train-action:
+        skip: "Skip next stop"
+        skip-secondary: ""
+        cancel: "Cancel trip"
+        cancel-secondary: ""
+        cancel-armed: "Confirm cancel <train>"
+        cancel-armed-secondary: "Press again"
+        skip-revoke: "Undo skip"
+        skip-revoke-secondary: ""
+        back: "Back"
+        back-secondary: ""
       # Transient notices on the right of the header; <train> in route-blocked-by is the blocking train
       notice:
         route-blocked: "Route occupied, permission pending"
         route-blocked-by: "Route occupied by <train>"
         route-locked: "Route locked, cannot cancel"
         not-dwelling: "Train is not dwelling, cannot hold"
+        cancel-occupied: "People aboard: stop at a platform first"
+        cancel-coupled: "Coupled: divide first"
+        cancel-no-permission: "No permission to cancel"
+        cancel-in-exam: "Not during an exam"
+        cancel-out-of-zone: "Not in this zone yet"
+        cancel-pending: "Cancelling, counting down"
+        trip-cancelled: "<train> cancelled"
+        skip-not-late: "Not late enough to skip"
+        skip-coupled: "Coupled: cannot skip"
+        skip-no-stop: "No stop ahead"
+        skip-out-of-zone: "Next stop is not ours"
+        skip-terminal: "Cannot skip the terminus"
+        skip-directive: "Stop has work to do"
+        skip-braking: "Already braking for it"
+        skip-call-destination: "Called train's destination"
+        skip-crew-boarding: "Crew change at that stop"
+        skip-in-exam: "Not during an exam"
+        skip-ordered: "<train> told to skip"
+        skip-revoked: "<train> skip revoked"
         platform-unavailable: "The platform can no longer be changed"
         platform-locked: "Route to the original platform is locked"
         auto-pass-on: "Auto pass set"

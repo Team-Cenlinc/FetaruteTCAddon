@@ -203,6 +203,29 @@ public final class PidsService {
             clock,
             logger::debug,
             platformChanges);
+    if (plugin instanceof org.fetarute.fetaruteTCAddon.FetaruteTCAddon addon) {
+      // 调度服务与交路缓存可能晚于站台屏就绪，每次现取
+      this.snapshots.setSkippedRows(
+          PidsSnapshotProvider.SkippedRows.byRouteUuid(
+              routeId ->
+                  addon
+                      .getRouteDefinitionCache()
+                      .flatMap(
+                          routes ->
+                              routes.findUuid(
+                                  org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId.of(
+                                      routeId))),
+              (train, uuid, stopSequence) ->
+                  addon
+                      .getRuntimeDispatchService()
+                      .map(
+                          dispatch ->
+                              dispatch
+                                  .stationStops()
+                                  .stopSkips()
+                                  .skipped(train, uuid, stopSequence))
+                      .orElse(false)));
+    }
     this.lineStatuses =
         new PidsLineStatusProvider(api.trains(), api.timetables(), directory, logger::debug);
     this.composer =
@@ -330,6 +353,12 @@ public final class PidsService {
   public void continueFrom(PidsService previous) {
     announcer.continueFrom(previous.announcer);
     platformChanges.absorb(previous.platformChanges);
+    snapshots.continueFrom(previous.snapshots);
+  }
+
+  /** 信号员要取消这列车：删车之前调用，它的取消行按当前晚点顺延显示，见 {@link PidsSnapshotProvider#holdCancelled}。 */
+  public void holdCancelled(String trainName) {
+    snapshots.holdCancelled(trainName);
   }
 
   /** 作废取消行缓存：车次取消、重新绑定或越站之后调用，站台屏、站台广播与线路运行状况屏下一次取数即可看到。 */

@@ -217,6 +217,9 @@ public final class ActionBarTrainHudManager implements Listener {
             placeholders,
             template.defines(HudState.CAR_ENDS_ARRIVING),
             template.defines(HudState.AT_CAR_END));
+    state =
+        HudStateTracker.applySkipPassing(
+            state, placeholders, template.defines(HudState.SKIP_PASSING));
     String templateLine =
         template.resolveLine(state, HudLanguageRotation.nowTicks(), placeholders).orElse("");
     send(player, HudText.apply(templateLine, placeholders), nowMillis);

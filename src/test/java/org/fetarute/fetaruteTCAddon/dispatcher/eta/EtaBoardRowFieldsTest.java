@@ -77,6 +77,86 @@ class EtaBoardRowFieldsTest {
   }
 
   @Test
+  void aStopTheSignallerOrderedSkippedIsListedAsPassing() {
+    assertFalse(onlyRow(Fixture.running(RouteStopPassType.STOP).service, "BBB").passing());
+
+    Fixture fixture = Fixture.running(RouteStopPassType.STOP);
+    fixture.service.attachSkippedStops(
+        (train, routeUuid, index) -> TRAIN.equals(train) && index == 1);
+
+    assertTrue(onlyRow(fixture.service, "BBB").passing());
+  }
+
+  /** 车正压在被越的站上：站牌不出“在站”行，到后面那一站的预计不算这一站的停站。 */
+  @Test
+  void aTrainPassingTheSkippedStationIsNotListedAsAtTheStation() {
+    Fixture stopping = Fixture.atBbb();
+    assertTrue(
+        stopping.service.getBoard("SURN", "BBB", null, Duration.ofMinutes(10)).rows().stream()
+            .anyMatch(row -> row.phase() == BoardPhase.AT_STATION),
+        "照常停站时是在站行");
+    Fixture fixture = Fixture.atBbb();
+    fixture.service.attachSkippedStops(
+        (train, routeUuid, index) -> TRAIN.equals(train) && index == 1);
+
+    assertTrue(
+        fixture.service.getBoard("SURN", "BBB", null, Duration.ofMinutes(10)).rows().stream()
+            .noneMatch(row -> row.phase() == BoardPhase.AT_STATION));
+    assertEquals(0, fixture.service.getForTrain(TRAIN, new EtaTarget.StopIndex(2)).dwellSec());
+  }
+
+  /** “下一站”的预计（HUD 全局的 eta 用它）跳过被越的站，落到后面那一站。 */
+  @Test
+  void theNextStopEtaSkipsTheSkippedStop() {
+    Fixture stopping = Fixture.running(RouteStopPassType.STOP);
+    EtaResult toBbb = stopping.service.getForTrain(TRAIN, EtaTarget.nextStop());
+    Fixture fixture = Fixture.running(RouteStopPassType.STOP);
+    fixture.service.attachSkippedStops(
+        (train, routeUuid, index) -> TRAIN.equals(train) && index == 1);
+
+    EtaResult next = fixture.service.getForTrain(TRAIN, EtaTarget.nextStop());
+    EtaResult toCcc = fixture.service.getForTrain(TRAIN, new EtaTarget.StopIndex(2));
+
+    assertEquals(toCcc.travelSec(), next.travelSec());
+    assertTrue(next.travelSec() > toBbb.travelSec(), "比照常停时的下一站（BBB）远");
+  }
+
+  /** 后台算站牌用取数那一刻冻结的越站令：取数之后越站令变了（过站被清掉、撤销），这一份站牌仍与冻结的进度一致。 */
+  @Test
+  void theBackgroundBoardUsesTheSkipOrderFrozenWithTheProgress() {
+    Fixture fixture = Fixture.running(RouteStopPassType.STOP);
+    java.util.concurrent.atomic.AtomicBoolean ordered =
+        new java.util.concurrent.atomic.AtomicBoolean(true);
+    fixture.service.attachSkippedStops(
+        (train, routeUuid, index) -> ordered.get() && TRAIN.equals(train) && index == 1);
+    EtaBoardInput input = fixture.service.captureBoardInput(Instant.now(), Duration.ofMinutes(10));
+
+    ordered.set(false);
+    List<BoardResult.BoardRow> rows =
+        fixture.service.computeBoard(input, "SURN:BBB", null, Duration.ofMinutes(10)).rows();
+
+    assertEquals(1, rows.size());
+    assertTrue(rows.get(0).passing());
+  }
+
+  /** 越过的站不再停：到它后面那一站的预计不再算它的停站时间。 */
+  @Test
+  void theEtaBeyondASkippedStopLeavesOutItsDwell() {
+    EtaResult stopping =
+        Fixture.running(RouteStopPassType.STOP)
+            .service
+            .getForTrain(TRAIN, new EtaTarget.StopIndex(2));
+    Fixture fixture = Fixture.running(RouteStopPassType.STOP);
+    fixture.service.attachSkippedStops(
+        (train, routeUuid, index) -> TRAIN.equals(train) && index == 1);
+
+    EtaResult skipping = fixture.service.getForTrain(TRAIN, new EtaTarget.StopIndex(2));
+
+    assertTrue(stopping.dwellSec() > 0, "照常停 BBB 时途中有停站");
+    assertEquals(0, skipping.dwellSec());
+  }
+
+  @Test
   void withoutTimetableThereIsNoDelay() {
     assertTrue(onlyRow(Fixture.running().service, "CCC").delaySeconds().isEmpty());
   }
@@ -177,10 +257,15 @@ class EtaBoardRowFieldsTest {
     private final EtaService service;
 
     private Fixture() {
+      this(RouteStopPassType.PASS);
+    }
+
+    /** BBB 停不停由 {@code atBbb} 定。 */
+    private Fixture(RouteStopPassType atBbb) {
       List<RouteStop> stops =
           List.of(
               stop(0, AAA, RouteStopPassType.STOP),
-              stop(1, BBB, RouteStopPassType.PASS),
+              stop(1, BBB, atBbb),
               stop(2, CCC, RouteStopPassType.TERMINATE));
       RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
       when(routes.findById(routeUuid)).thenReturn(Optional.of(route));
@@ -197,7 +282,44 @@ class EtaBoardRowFieldsTest {
 
     /** 列车停在 AAA（下标 0）。 */
     static Fixture running() {
-      Fixture fixture = new Fixture();
+      return running(RouteStopPassType.PASS);
+    }
+
+    /** 列车压上 BBB（下标 1）：站内记录也记了到站（AutoStation 压牌越站时照记到发）。 */
+    static Fixture atBbb() {
+      Fixture fixture = new Fixture(RouteStopPassType.STOP);
+      fixture.snapshots.update(
+          TRAIN,
+          new TrainRuntimeSnapshot(
+              1L,
+              Instant.now(),
+              fixture.worldId,
+              fixture.routeUuid,
+              fixture.route.id(),
+              1,
+              Optional.of(BBB),
+              Optional.of(BBB),
+              Optional.empty(),
+              Optional.of(SignalAspect.PROCEED),
+              Optional.empty()));
+      org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker presence =
+          new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker();
+      presence.onStationArrival(
+          new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent(
+              TRAIN,
+              Optional.of(fixture.routeUuid),
+              fixture.route.id().value(),
+              1,
+              3,
+              BBB.value(),
+              Instant.now()));
+      fixture.service.attachStationPresence(() -> Optional.of(presence));
+      return fixture;
+    }
+
+    /** 列车停在 AAA（下标 0），BBB 停不停由 {@code atBbb} 定。 */
+    static Fixture running(RouteStopPassType atBbb) {
+      Fixture fixture = new Fixture(atBbb);
       fixture.snapshots.update(
           TRAIN,
           new TrainRuntimeSnapshot(

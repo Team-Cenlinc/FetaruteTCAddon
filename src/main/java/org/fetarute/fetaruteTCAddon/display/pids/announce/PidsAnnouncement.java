@@ -55,6 +55,8 @@ public record PidsAnnouncement(
     PASSING(Channel.ACTION_BAR),
     /** 班次取消。 */
     CANCELLED(Channel.CHAT),
+    /** 信号员令列车越过本站：本应停车，现在通过。 */
+    SKIPPED(Channel.CHAT),
     /** 严重晚点。 */
     DELAYED(Channel.CHAT),
     /** 站台变更：已定的站台改了，或没能停到计划站台。 */
@@ -78,6 +80,7 @@ public record PidsAnnouncement(
    *   <li>进站 / 通过：运行中的列车处于进站状态，或预计在 {@code arriving-lead-seconds} 内到达。回库车与本站终到车也播报进站（文案提醒勿上车）。
    *       站台待定时不播：动态站台在进站前（通常是站咽喉）选台，选好后带站台号播一次，不先播一条没有站台的再补一条。
    *   <li>取消：取消行（快照里有查询窗口内、计划到达还没到的取消班次）。
+   *   <li>越站：信号员令运行中的列车越过本站，行还在屏上就播，不等进站；与取消共用开关。
    *   <li>严重晚点：运行中的列车到达本站的晚点达到 {@link Lateness#SEVERELY_LATE_SECONDS}；通过车与回库车不播。
    *   <li>站台变更：这辆车在本站的站台改了（{@link PidsPlatformChanges}），且快照里已是新站台；通过车不播。
    * </ul>
@@ -121,6 +124,10 @@ public record PidsAnnouncement(
         continue;
       }
       String id = train.get() + "|" + row.routeId() + "|" + row.stopSequence();
+      if (row.skipped() && settings.triggers().cancelled()) {
+        active.add(
+            new PidsAnnouncement(Kind.SKIPPED, key(Kind.SKIPPED, station, id), station, row));
+      }
       boolean approaching =
           row.status() == PidsRow.Status.ARRIVING
               || (row.status() == PidsRow.Status.EN_ROUTE && !row.expectedAt().isAfter(lead));

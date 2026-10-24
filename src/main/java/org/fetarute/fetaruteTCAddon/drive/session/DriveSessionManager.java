@@ -701,6 +701,56 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return active.containsKey(playerId);
   }
 
+  /**
+   * 这列车在这一站有没有乘务员上下车：等着接这一班的驾驶员、车掌，或值乘到这一站交班的人。信号员越站不能越过这些站。
+   *
+   * @param trainName 列车名
+   * @param operatorCode 车站所属运营商
+   * @param stationCode 站码
+   */
+  public boolean crewChangesAt(String trainName, String operatorCode, String stationCode) {
+    List<org.fetarute.fetaruteTCAddon.drive.crew.CrewChanges.Duty> duties = new ArrayList<>();
+    for (DriverTask task : tasks.activeTasks()) {
+      duties.add(
+          task.state() == DriverTask.State.CLAIMED
+              ? org.fetarute.fetaruteTCAddon.drive.crew.CrewChanges.Duty.waiting(
+                  task.key(), task.operatorCode(), task.stationCode())
+              : org.fetarute.fetaruteTCAddon.drive.crew.CrewChanges.Duty.onBoard(
+                  task.trainName(), task.operatorCode(), task.handoverStationCode()));
+    }
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew != null) {
+      for (org.fetarute.fetaruteTCAddon.drive.guard.GuardTask task : crew.tasks().all()) {
+        if (task.state().finished()) {
+          continue;
+        }
+        duties.add(
+            task.state() == org.fetarute.fetaruteTCAddon.drive.guard.GuardTask.State.CLAIMED
+                ? org.fetarute.fetaruteTCAddon.drive.crew.CrewChanges.Duty.waiting(
+                    task.key(), task.operatorCode(), task.stationCode())
+                : org.fetarute.fetaruteTCAddon.drive.crew.CrewChanges.Duty.onBoard(
+                    task.trainName(), task.operatorCode(), task.handoverStationCode()));
+      }
+    }
+    if (duties.isEmpty()) {
+      return false;
+    }
+    Optional<TaskKey> trip =
+        DriverTaskManager.timetables()
+            .flatMap(api -> api.getAssignment(trainName))
+            .map(
+                assignment ->
+                    new TaskKey(
+                        assignment.timetableId(), assignment.tripCode(), assignment.serviceDate()));
+    return org.fetarute.fetaruteTCAddon.drive.crew.CrewChanges.at(
+        duties, trip, trainName, operatorCode, stationCode);
+  }
+
+  /** TC 动作队列里的这一项是不是人工驾驶的驾驶动作：会话期间一直挂着，不代表车要动。 */
+  public static boolean isDriveAction(com.bergerkiller.bukkit.tc.actions.Action action) {
+    return action instanceof ManualDriveAction;
+  }
+
   /** 玩家领了驾驶或车掌任务、还没开始：坐在车上等接班时，接班提示（坐第几节驾驶室）发在动作栏，乘客的动作栏要让位，不然提示被盖掉。 */
   public boolean awaitingCrewDuty(UUID playerId) {
     if (tasks
@@ -941,6 +991,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             .getDisplayService()
             .flatMap(display -> display.hudContext(group))
             .map(TrainHudContext::nextStation)
+            .filter(station -> !station.isEmpty())
+            .map(TrainHudContext.StationDisplay::label)
+            .filter(label -> !label.isBlank());
+      }
+
+      @Override
+      public Optional<String> skipOrderOf(MinecartGroup group) {
+        return plugin
+            .getDisplayService()
+            .flatMap(display -> display.hudContext(group))
+            .map(TrainHudContext::skipStation)
             .filter(station -> !station.isEmpty())
             .map(TrainHudContext.StationDisplay::label)
             .filter(label -> !label.isBlank());
@@ -4895,6 +4956,42 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   public record RescueResult(boolean found, int moved, boolean relocated, boolean destroyed) {}
 
+  /**
+   * 列车被取消（例如信号楼取消车次）：结束车上的驾驶，驾驶任务记为中断、原因写 {@code taskReason}，告诉驾驶员 {@code noticeKey}；
+   * 不另发“调度系统已收回列车”。之后删车时车上已没有驾驶员，不会再走交还。
+   *
+   * @param trainName 列车名
+   * @param taskReason 任务记录里写的原因
+   * @param noticeKey 告诉驾驶员的语言键
+   * @param values 语言键的占位符
+   * @return 结束了几个驾驶
+   */
+  public int endForCancel(
+      String trainName, String taskReason, String noticeKey, Map<String, String> values) {
+    if (trainName == null || trainName.isBlank()) {
+      return 0;
+    }
+    int ended = 0;
+    for (DriveSession session : new ArrayList<>(active.values())) {
+      DriverLink link = session.driverLink();
+      boolean onThisTrain =
+          session.trainName().equalsIgnoreCase(trainName)
+              || (link != null && link.currentTrainName().equalsIgnoreCase(trainName));
+      if (!onThisTrain) {
+        continue;
+      }
+      tasks.onSessionEnded(session.playerId(), DriverTask.State.INTERRUPTED, taskReason);
+      Player player = Bukkit.getPlayer(session.playerId());
+      if (player != null) {
+        player.sendMessage(plugin.getLocaleManager().component(noticeKey, values));
+      }
+      traceSession(session, "列车被取消，结束驾驶");
+      endNow(session, DriveSession.EndReason.DISPATCH_ABORT);
+      ended++;
+    }
+    return ended;
+  }
+
   /** 管理员救援一列车：结束车上的驾驶（驾驶任务判未完成），让车上的玩家下车并送到最近停过的车站站台；{@code destroy} 时随后销毁列车， 交路换车机制会补车。 */
   public RescueResult rescueTrain(String trainName, boolean destroy) {
     Optional<MinecartGroup> groupOpt = SeatLocator.findGroup(trainName);
@@ -6849,6 +6946,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         context
             .map(TrainHudContext::nextStation)
             .filter(station -> !station.isEmpty())
+            .map(TrainHudContext.StationDisplay::label)
+            .orElse(""));
+    // 信号楼令越过的站：下一站已是它之后的停车站，调度命令一行写明越过哪一站
+    link.setSkipOrder(
+        context
+            .map(TrainHudContext::skipStation)
+            .filter(station -> station != null && !station.isEmpty())
             .map(TrainHudContext.StationDisplay::label)
             .orElse(""));
     Optional<TimetableService> timetables = plugin.getTimetableService();

@@ -91,6 +91,28 @@ public final class HudStateTracker {
   }
 
   /**
+   * 列车正接近信号员令越过的那一站（占位符 {@code skip_passing} 有值）：运行中的状态换成“通过本站、不停车”。模板没写这一状态时保持原状态。
+   *
+   * @param resolved 上一步的结果
+   * @param placeholders 这一帧的占位符
+   * @param defines 模板写了 {@link HudState#SKIP_PASSING}
+   * @return 实际使用的状态
+   */
+  public static HudState applySkipPassing(
+      HudState resolved, Map<String, String> placeholders, boolean defines) {
+    if (!defines || placeholders == null) {
+      return resolved;
+    }
+    String passing = placeholders.get("skip_passing");
+    if (passing == null || passing.isBlank() || HudText.MISSING.equals(passing)) {
+      return resolved;
+    }
+    return resolved == HudState.IN_TRIP || resolved == HudState.DEPARTING
+        ? HudState.SKIP_PASSING
+        : resolved;
+  }
+
+  /**
    * 回程支线的车到联挂站：挂上主干后接着走，终点站的“请全体乘客下车”换成联挂的说明。模板没写对应状态时保持原状态（旧模板里没有它们）。
    *
    * @param resolved 上一步的结果

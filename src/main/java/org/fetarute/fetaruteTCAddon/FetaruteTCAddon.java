@@ -1887,6 +1887,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
       etaService.attachPlacedStops(runtimeDispatchService::hasEffectiveNode);
       // 选台前站牌写计划站台（时刻表排定）或下一个停车站的暂定站台，与选台偏好同一份。
       etaService.attachPlannedPlatforms(runtimeDispatchService.stationStops()::displayPlatform);
+      // 信号员令越过的站：站牌上这趟车在那一站成为通过行。
+      etaService.attachSkippedStops(runtimeDispatchService.stationStops().stopSkips()::skipped);
+      // 叫来的车不越站：它要停的站就是叫车人等着的地方；乘务员上下车的站不越（叫车与驾驶服务晚于调度就绪，每次现取）
+      runtimeDispatchService
+          .stationStops()
+          .stopSkips()
+          .setGuard(
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopSkips.Guard.acrossNames(
+                  this::trainNames, this::refuseSkip));
       // 还没派出的叫车票：站牌排队行写叫车指定的站台（右键的那条）。
       etaService.attachTicketPlatforms(
           (ticket, index) ->
@@ -2256,6 +2265,52 @@ public final class FetaruteTCAddon extends JavaPlugin {
   /** 闲置回收（若未初始化则为空）。 */
   public Optional<ReclaimManager> getReclaimManager() {
     return Optional.ofNullable(reclaimManager);
+  }
+
+  /** 一列车的各个名字：传进来的名字、调度解析出的车名、TrainCarts 车名与调度逻辑名（叫车、乘务员任务各按自己的车名认车）。 */
+  private java.util.Set<String> trainNames(String train) {
+    java.util.Set<String> names = new java.util.LinkedHashSet<>();
+    names.add(train);
+    RuntimeDispatchService dispatch = runtimeDispatchService;
+    if (dispatch == null || train == null || train.isBlank()) {
+      return names;
+    }
+    RuntimeDispatchService.RuntimeTrainResolution resolution =
+        dispatch.resolveRuntimeTrainForHealth(
+            train, RuntimeDispatchService.RuntimeTrainResolvePurpose.GET_STATE);
+    if (!resolution.resolvedName().isBlank()) {
+      names.add(resolution.resolvedName());
+    }
+    com.bergerkiller.bukkit.tc.properties.TrainProperties properties = resolution.properties();
+    if (properties != null) {
+      names.add(properties.getTrainName());
+      dispatch.resolveTrackedTrainName(properties).ifPresent(names::add);
+    }
+    return names;
+  }
+
+  /** 信号员越站的拦截：叫来的车不越站，乘务员上下车的站不越。 */
+  private Optional<org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopSkips.Refusal> refuseSkip(
+      String train, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId station) {
+    if (getCallService().filter(calls -> calls.isCalledTrain(train)).isPresent()) {
+      return Optional.of(
+          org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopSkips.Refusal.CALL_DESTINATION);
+    }
+    DriveSessionManager drive = driveSessionManager;
+    boolean crew =
+        drive != null
+            && org.fetarute
+                .fetaruteTCAddon
+                .dispatcher
+                .route
+                .RouteTerminals
+                .stationIdentityOfNode(station.value())
+                .filter(ref -> drive.crewChangesAt(train, ref.operatorCode(), ref.stationCode()))
+                .isPresent();
+    return crew
+        ? Optional.of(
+            org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopSkips.Refusal.CREW_BOARDING)
+        : Optional.empty();
   }
 
   /** 叫车服务（若未初始化则为空）。 */

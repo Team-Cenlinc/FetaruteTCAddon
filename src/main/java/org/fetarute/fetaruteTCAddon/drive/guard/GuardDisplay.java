@@ -23,6 +23,7 @@ public final class GuardDisplay {
    * @param timeoutStops 有超时的停站数
    * @param cabChange 进行中的终点站换端；没有时为空
    * @param nextStation 两站之间时的下一站；停站中或查不到时为空
+   * @param skipOrder 信号楼令这趟车越过的站；没有越站令或已过站时为空
    */
   public record Snapshot(
       String train,
@@ -32,7 +33,8 @@ public final class GuardDisplay {
       boolean seated,
       int timeoutStops,
       Optional<CabChangeState> cabChange,
-      Optional<String> nextStation) {
+      Optional<String> nextStation,
+      Optional<String> skipOrder) {
 
     public Snapshot {
       Objects.requireNonNull(train, "train");
@@ -40,6 +42,29 @@ public final class GuardDisplay {
       stop = stop == null ? Optional.empty() : stop;
       cabChange = cabChange == null ? Optional.empty() : cabChange;
       nextStation = nextStation == null ? Optional.empty() : nextStation;
+      skipOrder = skipOrder == null ? Optional.empty() : skipOrder;
+    }
+
+    /** 没有调度命令。 */
+    public Snapshot(
+        String train,
+        Optional<String> driverName,
+        boolean ato,
+        Optional<StopState> stop,
+        boolean seated,
+        int timeoutStops,
+        Optional<CabChangeState> cabChange,
+        Optional<String> nextStation) {
+      this(
+          train,
+          driverName,
+          ato,
+          stop,
+          seated,
+          timeoutStops,
+          cabChange,
+          nextStation,
+          Optional.empty());
     }
   }
 
@@ -126,6 +151,12 @@ public final class GuardDisplay {
           .ifPresent(
               station -> rows.add(row("next-station", "next-station", Map.of("station", station))));
     }
+    // 信号楼令越过的站：那一站没有作业，显示到过站或撤销
+    snapshot
+        .skipOrder()
+        .ifPresent(
+            station ->
+                rows.add(row("dispatch-order", "dispatch-order-skip", Map.of("station", station))));
     snapshot
         .stop()
         .ifPresent(

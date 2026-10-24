@@ -157,6 +157,7 @@ final class EtaBoardInput {
     private final Map<String, Map<Integer, Instant>> arrivals = new HashMap<>();
     private final Map<String, RouteNodes> effective = new HashMap<>();
     private final Map<String, RouteIndices> placed = new HashMap<>();
+    private final Map<String, SkippedIndices> skipped = new HashMap<>();
     private final Map<String, RoutePlatforms> planned = new HashMap<>();
     private final Map<String, Presence> presence = new HashMap<>();
     private final Map<String, Presence> remainders = new HashMap<>();
@@ -295,6 +296,24 @@ final class EtaBoardInput {
           }
         }
         placed.put(trainName, new RouteIndices(route.id(), Set.copyOf(indices)));
+      }
+      // 信号员令越过的站：与进度同一刻冻结。越站令过站即清，后台算时现读会与冻结的进度对不上
+      Set<Integer> skippedHere = new HashSet<>();
+      for (int i = Math.max(0, index); i < routeStops.size(); i++) {
+        RouteStop stop = routeStops.get(i);
+        if (stop == null || !stop.stops()) {
+          continue;
+        }
+        try {
+          if (live.skippedStops().skipped(trainName, snap.routeUuid(), i)) {
+            skippedHere.add(i);
+          }
+        } catch (RuntimeException ex) {
+          log.accept("ETA_SKIPPED_STOP_READ_FAILED train=" + trainName + " error=" + ex);
+        }
+      }
+      if (!skippedHere.isEmpty()) {
+        skipped.put(trainName, new SkippedIndices(snap.routeUuid(), Set.copyOf(skippedHere)));
       }
       if (live.plannedPlatforms() != null) {
         Map<Integer, NodeId> nodes = new HashMap<>();
@@ -474,7 +493,8 @@ final class EtaBoardInput {
           live.continuity() == null ? null : data.continuity(),
           live.layovers() == null ? null : data.layovers(),
           data::through,
-          data::remainsAt);
+          data::remainsAt,
+          data::skipped);
     }
   }
 
@@ -491,6 +511,7 @@ final class EtaBoardInput {
     private final Map<String, Map<Integer, Instant>> arrivals;
     private final Map<String, RouteNodes> effective;
     private final Map<String, RouteIndices> placed;
+    private final Map<String, SkippedIndices> skipped;
     private final Map<String, RoutePlatforms> planned;
     private final Map<String, Presence> presence;
     private final Map<String, Presence> remainders;
@@ -519,6 +540,7 @@ final class EtaBoardInput {
       this.arrivals = Collections.unmodifiableMap(new HashMap<>(capture.arrivals));
       this.effective = Collections.unmodifiableMap(new HashMap<>(capture.effective));
       this.placed = Collections.unmodifiableMap(new HashMap<>(capture.placed));
+      this.skipped = Collections.unmodifiableMap(new HashMap<>(capture.skipped));
       this.planned = Collections.unmodifiableMap(new HashMap<>(capture.planned));
       this.presence = Collections.unmodifiableMap(new HashMap<>(capture.presence));
       this.remainders = Collections.unmodifiableMap(new HashMap<>(capture.remainders));
@@ -622,6 +644,13 @@ final class EtaBoardInput {
       return nodes != null && route != null && nodes.routeId().equals(route.id())
           ? nodes.nodes()
           : null;
+    }
+
+    boolean skipped(String trainName, UUID routeUuid, int index) {
+      SkippedIndices indices = trainName == null ? null : skipped.get(trainName);
+      return indices != null
+          && indices.routeUuid().equals(routeUuid)
+          && indices.indices().contains(index);
     }
 
     boolean placed(String trainName, RouteDefinition route, int index) {
@@ -785,6 +814,9 @@ final class EtaBoardInput {
 
   /** 列车在某交路上已定站台的 DYNAMIC 下标。 */
   private record RouteIndices(RouteId routeId, Set<Integer> indices) {}
+
+  /** 一列车在这条交路上令越过的停站下标。 */
+  private record SkippedIndices(UUID routeUuid, Set<Integer> indices) {}
 
   /** 列车在某交路上各 DYNAMIC 下标的计划或暂定站台。 */
   private record RoutePlatforms(RouteId routeId, Map<Integer, NodeId> nodes) {

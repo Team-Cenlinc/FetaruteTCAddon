@@ -137,8 +137,13 @@ final class PidsSignalboxPlan {
    * @param box 按钮（点击区）
    * @param label 按钮上的字
    * @param enabled 能不能按（不能按的灰显，点了照样回传，由信号员模块回提示）
+   * @param danger 按下去后果不可撤回、正等着确认（取消车次待确认）：红底白字
    */
-  record ButtonSpot(ConsoleTarget target, Box box, Names label, boolean enabled) {}
+  record ButtonSpot(ConsoleTarget target, Box box, Names label, boolean enabled, boolean danger) {
+    ButtonSpot(ConsoleTarget target, Box box, Names label, boolean enabled) {
+      this(target, box, label, enabled, false);
+    }
+  }
 
   private final SignalboxView view;
   private final Optional<PidsLayout.Yard> yard;
@@ -473,7 +478,10 @@ final class PidsSignalboxPlan {
     return out;
   }
 
-  /** 平时按 {@link SignalboxState.Button} 的先后排成 2 列 × 3 行；回复呼叫时换成 1 列 × 4 行的四条固定回复。 */
+  /**
+   * 平时按 {@link SignalboxState.Button} 的先后排成 2 列 × 3 行；回复呼叫时换成 1 列 × 4 行的四条固定回复；列车操作时换成 1 列 × 3
+   * 行、与平时按钮同高的三行。
+   */
   private static List<ButtonSpot> buttons(
       PidsLayout.SignalButtons widget, SignalboxView view, SignalboxState state) {
     SignalboxView.Labels labels = view.labels();
@@ -495,6 +503,39 @@ final class PidsSignalboxPlan {
       }
       return out;
     }
+    if (state.trainOps().isPresent()) {
+      SignalboxState.TrainAction[] actions = SignalboxState.TrainAction.values();
+      for (int i = 0; i < actions.length; i++) {
+        SignalboxState.TrainAction action = actions[i];
+        boolean armed =
+            action == SignalboxState.TrainAction.CANCEL && state.trainOps().get().cancelArmed();
+        Names label =
+            action == SignalboxState.TrainAction.SKIP
+                ? skipLabel(view, state.trainOps().get())
+                : armed
+                    ? new Names(
+                        labels
+                            .cancelArmed()
+                            .primary()
+                            .replace(
+                                "<train>",
+                                state.selected().map(t -> trainLabel(state, t)).orElse("")),
+                        labels.cancelArmed().secondary())
+                    : labels.trainActions().getOrDefault(action, new Names(action.name(), ""));
+        out.add(
+            new ButtonSpot(
+                new ConsoleTarget.Act(action),
+                new Box(
+                    widget.x(),
+                    widget.y() + i * (widget.buttonHeight() + widget.gapY()),
+                    widget.width(),
+                    widget.buttonHeight()),
+                label,
+                true,
+                armed));
+      }
+      return out;
+    }
     SignalboxState.Button[] buttons = SignalboxState.Button.values();
     for (int i = 0; i < buttons.length; i++) {
       SignalboxState.Button button = buttons[i];
@@ -505,7 +546,9 @@ final class PidsSignalboxPlan {
               ? (state.mode() == SignalboxState.Mode.MANUAL ? labels.toAuto() : labels.toManual())
               : button == SignalboxState.Button.AUTO_PASS && selectedAutoPass(state)
                   ? labels.cancelAutoPass()
-                  : labels.buttons().getOrDefault(button, new Names(button.name(), ""));
+                  : button == SignalboxState.Button.HOLD && selectedHeld(state)
+                      ? labels.release()
+                      : labels.buttons().getOrDefault(button, new Names(button.name(), ""));
       out.add(
           new ButtonSpot(
               new ConsoleTarget.Press(button),
@@ -518,6 +561,52 @@ final class PidsSignalboxPlan {
               state.enabled(button)));
     }
     return out;
+  }
+
+  /** 列车表的状态：等许可、扣车带秒数；系统代排的另行标明；已令越站的写出被越的站。 */
+  static String statusText(SignalboxView view, SignalboxState.TrainRow row) {
+    SignalboxView.Labels labels = view.labels();
+    String status =
+        labels
+            .statuses()
+            .getOrDefault(row.status(), row.status().name())
+            .replace("<seconds>", Long.toString(Math.max(0L, row.seconds())));
+    if (row.autoRouted()) {
+      status = labels.autoRouted().replace("<status>", status);
+    }
+    if (row.skipping().isPresent()) {
+      String code = row.skipping().get();
+      status =
+          labels
+              .skipping()
+              .replace("<status>", status)
+              .replace("<station>", view.destinations().getOrDefault(code, code));
+    }
+    return status;
+  }
+
+  /** 越站那一行：有下一个停车站时写站名，已令越过时写“撤销越站”。 */
+  private static Names skipLabel(SignalboxView view, SignalboxState.TrainOps ops) {
+    SignalboxView.Labels labels = view.labels();
+    Names base =
+        ops.skipOrdered()
+            ? labels.skipRevoke()
+            : labels
+                .trainActions()
+                .getOrDefault(SignalboxState.TrainAction.SKIP, new Names("SKIP", ""));
+    return ops.skipStation()
+        .map(code -> view.destinations().getOrDefault(code, code))
+        .map(name -> new Names(base.primary() + " " + name, base.secondary()))
+        .orElse(base);
+  }
+
+  /** 选中的车被扣着（扣车键这时写“放行”）。 */
+  private static boolean selectedHeld(SignalboxState state) {
+    return state.rows().stream()
+        .anyMatch(
+            row ->
+                isSelected(state, row.trainName())
+                    && row.status() == SignalboxState.RowStatus.HELD);
   }
 
   /** 选中的车要走的进路此刻设了自动通过（自动通过按钮这时写“取消自动通过”）。 */
