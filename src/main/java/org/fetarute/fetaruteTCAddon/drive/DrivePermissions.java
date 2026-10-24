@@ -17,7 +17,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
  */
 public final class DrivePermissions {
 
-  /** 手动驾驶的基本命令（开始、结束、状态、换向手柄）。 */
+  /** 手动驾驶的基本命令（开始、结束、状态、换向手柄、呼叫信号员）。 */
   public static final String BASE = "fetarute.drive";
 
   /** 驾驶非调度列车（自由驾驶）。 */
@@ -98,6 +98,7 @@ public final class DrivePermissions {
           new Subcommand("reverser", List.of(BASE)),
           new Subcommand("cab", List.of(BASE)),
           new Subcommand("split", List.of(BASE)),
+          new Subcommand("call", List.of(BASE)),
           new Subcommand("tutorial", List.of(TUTORIAL)),
           new Subcommand("tasks", List.of(DRIVER)),
           new Subcommand("task", List.of(DRIVER)),

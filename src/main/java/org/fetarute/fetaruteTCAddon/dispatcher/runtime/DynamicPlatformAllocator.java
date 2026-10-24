@@ -917,6 +917,53 @@ public final class DynamicPlatformAllocator {
     }
   }
 
+  /**
+   * 撤掉这辆车在某一站已缓存的选台（含预订）与这一站的暂定站台，下一次解析时按当前偏好重新选台。
+   *
+   * <p>只动本分配器的缓存，不碰占用与授权；运行时的有效节点覆盖由调用方一并撤掉，否则运行时仍读旧覆盖、不会重新选台。 调用方必须先确认车没有锁闭通往原股道的进路。
+   *
+   * @param trainName 列车名
+   * @param route 列车当前交路
+   * @param stopIndex 停站下标
+   * @return 确有缓存被撤掉时为 true
+   */
+  boolean revokeAllocation(String trainName, RouteDefinition route, int stopIndex) {
+    if (trainName == null
+        || trainName.isBlank()
+        || route == null
+        || stopIndex < 0
+        || stopIndex >= route.waypoints().size()) {
+      return false;
+    }
+    String trainKey = TrainNameNormalizer.normalizeKey(trainName);
+    tentatives.computeIfPresent(
+        trainKey, (key, held) -> held.matches(route.id(), stopIndex) ? null : held);
+    Map<String, CachedAllocation> held = allocations.get(trainKey);
+    if (held == null) {
+      return false;
+    }
+    boolean removed =
+        held.entrySet()
+            .removeIf(
+                entry ->
+                    entry.getValue() != null
+                        && route.id().equals(entry.getValue().routeId())
+                        && entry.getValue().stopIndex() == stopIndex);
+    if (held.isEmpty()) {
+      allocations.remove(trainKey, held);
+    }
+    if (removed) {
+      debugLogger.accept(
+          "DYNAMIC 撤销已选站台: train="
+              + trainName
+              + ", route="
+              + route.id().value()
+              + ", stopIndex="
+              + stopIndex);
+    }
+    return removed;
+  }
+
   /** 判断逻辑列车是否仍持有 DYNAMIC 站台预订。 */
   boolean hasAllocations(String trainName) {
     if (trainName == null || trainName.isBlank()) {

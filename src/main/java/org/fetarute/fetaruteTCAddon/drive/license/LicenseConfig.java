@@ -9,15 +9,16 @@ import java.util.Set;
 import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
 import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
+import org.fetarute.fetaruteTCAddon.signaller.SignallerService;
 
 /**
- * 驾驶证与考试（{@code drive.yml} 的 {@code license} 段）。
+ * 操作许可证与考试（{@code drive.yml} 的 {@code license} 段）。
  *
- * @param enabled 是否启用驾驶证：关闭时不能考试，已发的证也不再给权限
- * @param examWindowMinutes 报名后多久内要考完（教程考试；路考以任务本身为准）
- * @param retryCooldownMinutes 路考不及格后多久才能再考
+ * @param enabled 是否启用操作许可证：关闭时不能考试，已发的证也不再给权限
+ * @param examWindowMinutes 报名后多久内要考完（教程与信号员考试、信号员练习上岗前；路考与车掌考试以派出的任务为准）
+ * @param retryCooldownMinutes 考试不及格后多久才能再考
  * @param reissueCooldownMinutes 两次补发之间至少隔多久
- * @param classes 各级驾驶证，按声明顺序
+ * @param classes 各项资格，按声明顺序
  * @param training 路考练习与应急演练
  */
 public record LicenseConfig(
@@ -36,7 +37,7 @@ public record LicenseConfig(
     training = training == null ? TrainingConfig.defaults() : training;
   }
 
-  /** 默认两级准驾等级与一项附注：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考；车掌附注不要求驾驶证，在调度列车上值乘考。 */
+  /** 默认：驾驶两级（见习考新手教程，正式要先有见习、再路考），车掌与信号员各一项、不要求先有驾驶资格（车掌在调度列车上值乘考，信号员在控制台上值守考）。 */
   public static LicenseConfig defaults() {
     return new LicenseConfig(
         true,
@@ -46,7 +47,7 @@ public record LicenseConfig(
         List.of(
             new LicenseClass(
                 "learner",
-                "见习驾驶证",
+                "见习驾驶",
                 "驾驶非调度列车，使用新手教程与驾驶提示",
                 true,
                 List.of(),
@@ -60,7 +61,7 @@ public record LicenseConfig(
                 List.of(DrivePermissions.BASE)),
             new LicenseClass(
                 "driver",
-                "正式驾驶证",
+                "正式驾驶",
                 "领取驾驶任务、驾驶调度列车（人工与 ATO）、自选仿真等级、查看驾驶记录与排行",
                 true,
                 List.of("learner"),
@@ -85,19 +86,33 @@ public record LicenseConfig(
                 false,
                 false,
                 1,
-                List.of(DrivePermissions.GUARD))),
+                List.of(DrivePermissions.GUARD)),
+            new LicenseClass(
+                "signaller",
+                "信号员",
+                "在信号楼控制台上值守：排列进路、扣车、改停股道、回复驾驶员呼叫",
+                true,
+                List.of(),
+                LicenseClass.Exam.SIGNALLER,
+                5,
+                70,
+                false,
+                false,
+                false,
+                1,
+                List.of(SignallerService.PERMISSION))),
         TrainingConfig.defaults());
   }
 
-  /** 第几级：按配置里的先后数准驾等级，从 1 起；附注（车掌）不占级数，与没有这一级一样为 0。 */
+  /** 驾驶的第几级：按配置里的先后数驾驶的各级，从 1 起；车掌、信号员不占级数，与没有这一项一样为 0。 */
   public int levelOf(String id) {
     Optional<LicenseClass> found = find(id);
-    if (found.isEmpty() || found.get().endorsement()) {
+    if (found.isEmpty() || !found.get().graded()) {
       return 0;
     }
     int level = 0;
     for (LicenseClass license : classes) {
-      if (!license.endorsement()) {
+      if (license.graded()) {
         level++;
       }
       if (license == found.get()) {
@@ -140,7 +155,9 @@ public record LicenseConfig(
         LicenseClass.Exam exam = LicenseClass.Exam.parse(entry.getString("exam", "road-test"));
         if (exam == null) {
           sink.accept(
-              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial、road-test 或 guard，已跳过这一级");
+              "drive.yml 的 license.classes."
+                  + key
+                  + ".exam 只能是 tutorial、road-test、guard 或 signaller，已跳过这一项");
           continue;
         }
         classes.add(
@@ -151,7 +168,9 @@ public record LicenseConfig(
                 entry.getBoolean("enabled", true),
                 entry.getStringList("requires"),
                 exam,
-                entry.getInt("exam-stops", 3),
+                exam == LicenseClass.Exam.SIGNALLER
+                    ? entry.getInt("exam-trains", 5)
+                    : entry.getInt("exam-stops", 3),
                 entry.getInt("min-points", 70),
                 entry.getBoolean("allow-emergency", false),
                 entry.getBoolean("allow-overrun", false),

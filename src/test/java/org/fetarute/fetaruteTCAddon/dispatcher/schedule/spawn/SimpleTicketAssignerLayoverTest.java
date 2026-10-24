@@ -65,8 +65,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.SignallerGateCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -2300,6 +2302,43 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager, never()).complete(any());
   }
 
+  /** 信号员闸拦下出车：车还没实体化，用将要出车的车名问；被拦就本轮不出车，票不丢、不耗重试预算。放行后照常出车。 */
+  @Test
+  void signallerGateHoldsDepotSpawnBeforeTheTrainIsMaterialized() {
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    SignallerGateCoordinator gates = mock(SignallerGateCoordinator.class);
+    when(runtimeDispatchService.signallerGates()).thenReturn(gates);
+    AtomicBoolean block = new AtomicBoolean(true);
+    List<String> asked = new ArrayList<>();
+    when(gates.admit(anyString(), any(OccupancyRequest.class), any(Instant.class)))
+        .thenAnswer(
+            invocation -> {
+              asked.add(invocation.getArgument(0));
+              Instant now = invocation.getArgument(2);
+              return block.get()
+                  ? Optional.of(new SignallerGate.Hold("SURN:DEPOT", now))
+                  : Optional.empty();
+            });
+    SameTickFallbackFixture fixture = sameTickFallbackFixture(2, runtimeDispatchService);
+    SimpleTicketAssigner assigner = fixture.assigner();
+    Instant t0 = fixture.t0();
+
+    assigner.tick(fixture.provider(), t0);
+    assigner.tick(fixture.provider(), t0.plusSeconds(61));
+
+    verify(fixture.depotSpawner(), never()).spawn(any(), any(), any(), any());
+    verify(fixture.spawnManager(), never()).complete(any());
+    assertFalse(asked.isEmpty(), "出车前问了闸");
+    assertTrue(asked.stream().allMatch(name -> name != null && !name.isBlank()));
+
+    block.set(false);
+    SameTickFallbackFixture released = sameTickFallbackFixture(2, runtimeDispatchService);
+    released.assigner().tick(released.provider(), released.t0());
+    released.assigner().tick(released.provider(), released.t0().plusSeconds(61));
+    verify(released.depotSpawner(), times(2)).spawn(eq(released.provider()), any(), any(), any());
+  }
+
   @Test
   void tickBalancesSameTickFallbackSpawnsAcrossDynamicDepotTracks() {
     SameTickFallbackFixture fixture = sameTickFallbackFixture(2);
@@ -2360,6 +2399,12 @@ class SimpleTicketAssignerLayoverTest {
 
   /** 两张 RETURN 票、线路 depot 为 DYNAMIC 两股道，spawn 本身返回空；t0 进 pending，61 秒后到降级补发时刻。 */
   private static SameTickFallbackFixture sameTickFallbackFixture(int maxSpawnPerTick) {
+    return sameTickFallbackFixture(
+        maxSpawnPerTick, mockRuntimeDispatchServiceAllowingSmartAdmission());
+  }
+
+  private static SameTickFallbackFixture sameTickFallbackFixture(
+      int maxSpawnPerTick, RuntimeDispatchService runtimeDispatchService) {
     UUID lineId = UUID.randomUUID();
     UUID routeId = UUID.randomUUID();
     NodeId depotOne = NodeId.of("SURN:D:DEPOT:1");
@@ -2414,7 +2459,7 @@ class SimpleTicketAssignerLayoverTest {
                         RouteId.of("OP:L1:RET-1"),
                         List.of(depotOne, nodeA, nodeB),
                         Optional.empty()))),
-            mockRuntimeDispatchServiceAllowingSmartAdmission(),
+            runtimeDispatchService,
             mockConfigManager(1.0),
             registryWithDepots(worldId, depotOne, depotTwo),
             new LayoverRegistry(),

@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.storage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -124,6 +125,58 @@ class DriveTaskRecordRepositoryTest {
     assertEquals(
         new DriveTaskRecordRepository.PlayerTotals(1, 1, 80L, "B"), records.totalsByPlayer(erin));
     assertEquals(80L, records.leaderboard(null, 10).get(0).totalPoints());
+  }
+
+  /** 信号员班次的记录照样能按玩家列出，但与车掌一样不进驾驶排行与驾驶员的汇总（按方式排除，不靠终态）。 */
+  @Test
+  void signallerRecordsStayOutOfTheDriverTotals() {
+    UUID gail = UUID.randomUUID();
+    UUID hank = UUID.randomUUID();
+    records.save(record(gail, "gail", "COMPLETED", 60, "C", NOW));
+    records.save(record(gail, "gail", DriveTaskRecord.MODE_SIGNALLER, "COMPLETED", 100, "S", NOW));
+    records.save(record(gail, "gail", DriveTaskRecord.MODE_GUARD, "COMPLETED", 100, "S", NOW));
+    records.save(record(hank, "hank", DriveTaskRecord.MODE_SIGNALLER, "COMPLETED", 100, "S", NOW));
+    DriveTaskRecord shift =
+        new DriveTaskRecord(
+            UUID.randomUUID(),
+            null,
+            hank,
+            "hank",
+            new UUID(0L, 0L),
+            "",
+            LocalDate.of(2026, 10, 20),
+            "WSD",
+            "",
+            DriveTaskRecord.MODE_SIGNALLER,
+            "OFF_DUTY",
+            90,
+            "A",
+            NOW.minusSeconds(3600),
+            NOW,
+            "{\"formatVersion\":1,\"role\":\"signaller\"}");
+    records.save(shift);
+
+    assertEquals(3, records.listByPlayer(gail, 10).size());
+    assertEquals(
+        new DriveTaskRecordRepository.PlayerTotals(1, 1, 60L, "C"), records.totalsByPlayer(gail));
+    assertEquals(
+        new DriveTaskRecordRepository.PlayerTotals(0, 0, 0L, ""), records.totalsByPlayer(hank));
+    assertEquals(
+        List.of(gail),
+        records.leaderboard(null, 10).stream().map(DriveLeaderboardRow::playerId).toList());
+    assertEquals(
+        List.of(gail),
+        records.leaderboard(NOW.minus(1, ChronoUnit.DAYS), 10).stream()
+            .map(DriveLeaderboardRow::playerId)
+            .toList(),
+        "带统计期的排行参数位置照样对得上");
+    List<DriveTaskRecord> shifts =
+        records.listByPlayerAndMode(hank, DriveTaskRecord.MODE_SIGNALLER, 10);
+    assertEquals(2, shifts.size());
+    assertTrue(shifts.contains(shift), "哨兵字段原样读回");
+    assertEquals(
+        new DriveTaskRecordRepository.PlayerTotals(2, 1, 100L, "S"),
+        records.totalsByPlayerAndMode(hank, DriveTaskRecord.MODE_SIGNALLER));
   }
 
   /** 车掌的记录与汇总单独查：只算 GUARD，口径同驾驶员。 */

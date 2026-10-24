@@ -46,6 +46,7 @@ public final class SimpleRailGraph
   private final Map<NodeId, Set<RailEdge>> edgesFrom;
   private final Set<EdgeId> blockedEdges;
   private final RailInterlockingState interlockingState;
+  private volatile RailGraphComponentIndex componentIndex;
   private volatile RailGraphConflictIndex conflictIndex;
   private volatile SingleLineSectionIndex sectionIndex;
 
@@ -146,17 +147,7 @@ public final class SimpleRailGraph
     if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
       return Optional.empty();
     }
-    RailGraphConflictIndex index = conflictIndex;
-    if (index == null) {
-      synchronized (this) {
-        index = conflictIndex;
-        if (index == null) {
-          index = RailGraphConflictIndex.fromGraph(this);
-          conflictIndex = index;
-        }
-      }
-    }
-    return index.conflictKeyForEdge(edgeId);
+    return conflictIndex().conflictKeyForEdge(edgeId);
   }
 
   /**
@@ -169,17 +160,7 @@ public final class SimpleRailGraph
     if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
       return Optional.empty();
     }
-    RailGraphConflictIndex index = conflictIndex;
-    if (index == null) {
-      synchronized (this) {
-        index = conflictIndex;
-        if (index == null) {
-          index = RailGraphConflictIndex.fromGraph(this);
-          conflictIndex = index;
-        }
-      }
-    }
-    return index.corridorInfoForEdge(edgeId);
+    return conflictIndex().corridorInfoForEdge(edgeId);
   }
 
   /**
@@ -193,6 +174,68 @@ public final class SimpleRailGraph
     if (edgeId == null || edgeId.a() == null || edgeId.b() == null) {
       return Optional.empty();
     }
+    return sectionIndex().sectionInfoForEdge(edgeId);
+  }
+
+  /**
+   * 本快照的连通分量索引。
+   *
+   * <p>与冲突、单线 section 索引一样懒加载并缓存：冲突索引构建时复用它，快照激活时也直接取用，不再各建一份。
+   */
+  public RailGraphComponentIndex componentIndex() {
+    RailGraphComponentIndex index = componentIndex;
+    if (index == null) {
+      synchronized (this) {
+        index = componentIndex;
+        if (index == null) {
+          index = RailGraphComponentIndex.fromGraph(this);
+          componentIndex = index;
+        }
+      }
+    }
+    return index;
+  }
+
+  /**
+   * 预先建好连通分量、冲突走廊与单线 section 三份索引，免得第一次查询的调用方（多在主线程）付建索引的开销。
+   *
+   * <p>只读本快照的不可变节点与区间，不碰 Bukkit 或 TrainCarts，可在任意线程调用；与查询共用同一组懒加载字段，建好后查询直接命中，
+   * 已建好时立即返回。建索引出错时不抛出，字段保持未建，第一次查询时照旧懒加载。
+   *
+   * @return 三份索引是否都已建好
+   */
+  public boolean prewarmIndexes() {
+    try {
+      // 冲突索引要用连通分量，section 索引要查冲突 key：按依赖顺序建。
+      componentIndex();
+      conflictIndex();
+      sectionIndex();
+      return true;
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  /** 三份索引是否都已建好。只供测试核对预热与切换前准备的效果。 */
+  boolean indexesBuilt() {
+    return componentIndex != null && conflictIndex != null && sectionIndex != null;
+  }
+
+  private RailGraphConflictIndex conflictIndex() {
+    RailGraphConflictIndex index = conflictIndex;
+    if (index == null) {
+      synchronized (this) {
+        index = conflictIndex;
+        if (index == null) {
+          index = RailGraphConflictIndex.fromGraph(this, componentIndex());
+          conflictIndex = index;
+        }
+      }
+    }
+    return index;
+  }
+
+  private SingleLineSectionIndex sectionIndex() {
     SingleLineSectionIndex index = sectionIndex;
     if (index == null) {
       synchronized (this) {
@@ -203,7 +246,7 @@ public final class SimpleRailGraph
         }
       }
     }
-    return index.sectionInfoForEdge(edgeId);
+    return index;
   }
 
   /**

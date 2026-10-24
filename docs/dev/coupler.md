@@ -4,7 +4,7 @@
 
 ## 使用
 
-- 领取：`/fta coupler wrench`（`/fta coupler` 显示用法）。权限 `fetarute.coupler`，默认 OP，并入 `fetarute.admin`；不要求驾驶证。驾驶员、车掌值乘中的玩家不能用（驾驶侧拦下他们的交互）。
+- 领取：`/fta coupler wrench`（`/fta coupler` 显示用法）。权限 `fetarute.coupler`，默认 OP，并入 `fetarute.admin`；不要求操作许可证。驾驶员、车掌值乘中的玩家不能用（驾驶侧拦下他们的交互）。
 - 扳手是带 PDC 标记 `coupler_wrench` 的绊线钩（`WrenchItem`），材质包标记 `fetarute:coupler/wrench`（写在 `custom_model_data`，没装材质包时显示绊线钩，见 [resource-pack.md](resource-pack.md)）。拿着扳手右键车厢不会上车。
 - 右键车厢时取玩家视线与车厢轴线（车厢中心 ± 半车长，沿 `MinecartMember#getOrientationForward`）的最近点（`WrenchAim`）：离某一端不到 1.5 格（短车厢按半车长的 45% 收窄）算点中那一端，其余是中部。
 - 拿着扳手点到方块或空中时，扳手不会被放下去（绊线钩；生存模式下补发一次背包同步，手里的扳手不会显示成用掉了）。TrainCarts 自己的命中检测（`MinecartMemberStore#getFromHitTest`）点中了车厢时按点中那节车处理，这时方块不触发、另一只手的东西也不用。不按 Shift 时 TrainCarts 自己就把这种点击换成点车厢；按住 Shift 时它放过不管（`TCInteractionPacketListener`，好让玩家照常用方块），Shift+右键推车就落到了方块上、把扳手放了下去。没点中车厢时门、按钮这类方块照常能用。

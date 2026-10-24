@@ -35,6 +35,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Arrival;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Label;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.SignalboxView;
+import org.fetarute.fetaruteTCAddon.signaller.console.ConsoleTarget;
 
 /**
  * 把 {@link PidsView} 按 {@link PidsLayout} 画成一帧 RGB 图像。
@@ -1058,6 +1061,84 @@ public final class PidsRenderer {
         });
   }
 
+  /** 渲染站场图屏：站名、时钟、站场图与图例（{@link PidsYardPainter}；布局校验不许站场图屏带其他组件）。 */
+  public BufferedImage renderYard(PidsLayout layout, PidsYardView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    return paint(
+        layout.width(),
+        layout.height(),
+        view.theme(),
+        layout.boldFrom(),
+        p -> {
+          PidsYardPainter yard = new PidsYardPainter(p);
+          for (PidsLayout.Widget widget : layout.widgets()) {
+            if (widget instanceof PidsLayout.Clock clock) {
+              drawClock(p, clock, view.clock());
+            } else if (widget instanceof PidsLayout.StationTitle title) {
+              drawStationTitle(p, title, view.title());
+            } else if (widget instanceof PidsLayout.Yard diagram) {
+              yard.draw(diagram, view);
+            } else if (widget instanceof PidsLayout.YardLegend legend) {
+              yard.drawLegend(legend, view);
+            }
+          }
+        });
+  }
+
+  /**
+   * 渲染信号员控制台（{@code signalbox-*} 布局）：站场图屏的站名、时钟、站场图之外，标题栏另画模式牌、值守者、呼叫牌与临时提示，
+   * 站场图上叠画计划进路、排列中的进路、入口信号与可改停的股道，下面是列车表与操作按钮（{@link PidsSignalboxPainter}）。
+   *
+   * <p>没有控制台数据时只画站场图，列车表的位置写说明。
+   */
+  public BufferedImage renderSignalbox(PidsLayout layout, SignalboxView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    PidsSignalboxPlan plan =
+        PidsSignalboxPlan.of(layout, view, new PidsTextMeasure(fonts, layout.boldFrom()));
+    return paint(
+        layout.width(),
+        layout.height(),
+        view.yard().theme(),
+        layout.boldFrom(),
+        p -> {
+          PidsYardPainter yard = new PidsYardPainter(p);
+          PidsSignalboxPainter console = new PidsSignalboxPainter(p, plan);
+          for (PidsLayout.Widget widget : layout.widgets()) {
+            if (widget instanceof PidsLayout.Clock clock) {
+              drawClock(p, clock, view.yard().clock());
+            } else if (widget instanceof PidsLayout.StationTitle title) {
+              drawStationTitle(p, title, view.yard().title());
+            } else if (widget instanceof PidsLayout.Yard diagram) {
+              yard.draw(diagram, view.yard(), console.overlay(yard));
+            } else if (widget instanceof PidsLayout.YardLegend legend) {
+              yard.drawLegend(legend, view.yard());
+            } else if (widget instanceof PidsLayout.TrainList list) {
+              console.drawTrainList(list);
+            } else if (widget instanceof PidsLayout.SignalButtons buttons) {
+              console.drawButtons(buttons);
+            }
+          }
+          console.drawHeader();
+        });
+  }
+
+  /**
+   * 信号员控制台上 ({@code x}, {@code y}) 处右键点到的东西。与 {@link #renderSignalbox} 用同一份版面推出，不依赖画的过程。
+   *
+   * @param layout 布局
+   * @param view 屏幕上正显示的一帧
+   * @param x 整块屏幕的像素横坐标
+   * @param y 整块屏幕的像素纵坐标
+   */
+  public ConsoleTarget signalboxTarget(PidsLayout layout, SignalboxView view, int x, int y) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    return PidsSignalboxPlan.of(layout, view, new PidsTextMeasure(fonts, layout.boldFrom()))
+        .target(x, y);
+  }
+
   /** 停站屏的一页：按布局画站台号（不写“站台”二字）、时钟、色带，停站表组件交给 {@code body}。 */
   private BufferedImage renderStopListPage(
       PidsLayout layout,
@@ -1834,16 +1915,21 @@ public final class PidsRenderer {
   final class Painter {
     private final Graphics2D g;
     private final PidsTheme theme;
-    private final int boldFrom;
+    private final PidsTextMeasure measure;
 
     private Painter(Graphics2D g, PidsTheme theme, int boldFrom) {
       this.g = g;
       this.theme = theme;
-      this.boldFrom = boldFrom;
+      this.measure = new PidsTextMeasure(fonts, boldFrom);
     }
 
     PidsTheme theme() {
       return theme;
+    }
+
+    /** 量文字的尺子（与算点击区共用）。 */
+    PidsTextMeasure measure() {
+      return measure;
     }
 
     int color(Tone tone) {
@@ -1862,21 +1948,17 @@ public final class PidsRenderer {
 
     /** 主文字在这个字号是否仿粗体。 */
     boolean bold(int size) {
-      return boldFrom > 0 && size >= boldFrom;
-    }
-
-    private int extra(int size) {
-      return bold(size) ? 1 : 0;
+      return measure.bold(size);
     }
 
     /** 主文字宽度（含仿粗体多出的 1 像素）。 */
     int width(String text, int size) {
-      return text == null || text.isEmpty() ? 0 : fonts.width(font(text, size), text) + extra(size);
+      return measure.width(text, size);
     }
 
     /** 次要文字宽度。 */
     int regularWidth(String text, int size) {
-      return fonts.width(font(text, size), text);
+      return measure.regularWidth(text, size);
     }
 
     int baseline(String text, int size) {
@@ -1885,7 +1967,7 @@ public final class PidsRenderer {
 
     /** 主文字超宽时省略。 */
     String ellipsize(String text, int size, int maxWidth) {
-      return fonts.ellipsize(font(text, size), text, maxWidth - extra(size));
+      return measure.ellipsize(text, size, maxWidth);
     }
 
     /** 次要文字（英文）超宽时按词省略。 */
@@ -1905,6 +1987,38 @@ public final class PidsRenderer {
     void triangle(int[] xs, int[] ys, int rgb) {
       g.setColor(new Color(rgb));
       g.fillPolygon(xs, ys, 3);
+    }
+
+    /**
+     * 像素直线（Bresenham），每一步画一个 {@code thickness} 见方的方块；两端相同时画一个点。
+     *
+     * <p>不抗锯齿：地图只有调色板颜色，混色会变成杂色。
+     */
+    void line(int x0, int y0, int x1, int y1, int thickness, int rgb) {
+      g.setColor(new Color(rgb));
+      int half = (thickness - 1) / 2;
+      int dx = Math.abs(x1 - x0);
+      int dy = -Math.abs(y1 - y0);
+      int stepX = x0 < x1 ? 1 : -1;
+      int stepY = y0 < y1 ? 1 : -1;
+      int error = dx + dy;
+      int x = x0;
+      int y = y0;
+      while (true) {
+        g.fillRect(x - half, y - half, thickness, thickness);
+        if (x == x1 && y == y1) {
+          return;
+        }
+        int doubled = 2 * error;
+        if (doubled >= dy) {
+          error += dy;
+          x += stepX;
+        }
+        if (doubled <= dx) {
+          error += dx;
+          y += stepY;
+        }
+      }
     }
 
     void outline(int x, int y, int width, int height, int rgb) {

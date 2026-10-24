@@ -111,12 +111,12 @@ public final class GuardApiImpl implements GuardApi {
     return result(guards.get().assign(player, resolved.spec(), request.notifyPlayer()));
   }
 
-  /** 车掌任务的领取结果换成公开的写法。 */
+  /** 车掌任务的领取结果换成公开的写法。公开枚举没有“值守信号楼”一项：同是正在当班、须先下岗才能领，归入 {@code ON_DUTY}。 */
   static AssignResult result(GuardTasks.ClaimOutcome outcome) {
     return switch (outcome) {
       case CLAIMED -> AssignResult.ASSIGNED;
       case DISABLED -> AssignResult.DISABLED;
-      case ON_DUTY -> AssignResult.ON_DUTY;
+      case ON_DUTY, SIGNALLER_ON_DUTY -> AssignResult.ON_DUTY;
       case DRIVING -> AssignResult.DRIVING;
       case ALREADY_HAS_TASK -> AssignResult.ALREADY_HAS_TASK;
       case TAKEN -> AssignResult.TAKEN;

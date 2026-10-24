@@ -14,6 +14,7 @@ import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.api.ControlZoneDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsAccess;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsComposer;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsNearby;
@@ -50,8 +51,20 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  *
  * <p>屏幕参数可写完整 ID 或前缀（至少 4 位）。按屏幕绑定的车站判断权限（查看信息也一样，见 {@link PidsAccess}）：有管理权限的可管全部，
  * 公司里有管理类角色的成员只能管本公司车站的屏幕；改绑车站时新车站也须归其管理。
+ *
+ * <p>信号员控制台（布局 {@code signalbox-*}）不是站台屏：同一套命令以 {@link Scope#CONSOLE} 注册在 {@code /fta signal
+ * console} 下，只管控制台、只有控制台用得上的设置（运营商、控制区、布局、外观、模式）；{@code /fta pids} 不领控制台的安装纸、不管控制台，
+ * 两边都指明该用哪一组命令。控制台仍存在站台屏的表里、由站台屏的地图显示画出来。
  */
 public final class FtaPidsCommand {
+
+  /** 这一组命令管哪种屏幕。 */
+  public enum Scope {
+    /** {@code /fta pids}：站台屏，不含信号员控制台。 */
+    PIDS,
+    /** {@code /fta signal console}：信号员控制台。 */
+    CONSOLE
+  }
 
   /** 按运营商轮播：清空清单（回到只显示本运营商）。 */
   private static final String ROTATE_CLEAR = "clear";
@@ -60,9 +73,47 @@ public final class FtaPidsCommand {
   private static final int SUGGESTION_LIMIT = 20;
 
   private final FetaruteTCAddon plugin;
+  private final Scope scope;
 
   public FtaPidsCommand(FetaruteTCAddon plugin) {
+    this(plugin, Scope.PIDS);
+  }
+
+  public FtaPidsCommand(FetaruteTCAddon plugin, Scope scope) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
+    this.scope = Objects.requireNonNull(scope, "scope");
+  }
+
+  /** 这一组命令的前缀：{@code /fta pids} 或 {@code /fta signal console}。 */
+  private org.incendo.cloud.Command.Builder<CommandSender> root(
+      CommandManager<CommandSender> manager) {
+    org.incendo.cloud.Command.Builder<CommandSender> fta = manager.commandBuilder("fta");
+    return scope == Scope.CONSOLE ? fta.literal("signal").literal("console") : fta.literal("pids");
+  }
+
+  /** 菜单与列表里可点击的命令的前缀。 */
+  private String command() {
+    return scope == Scope.CONSOLE ? "/fta signal console" : "/fta pids";
+  }
+
+  /** 这块屏幕归不归这一组命令管。 */
+  private boolean mine(PidsService service, PidsScreen screen) {
+    return service.isSignalbox(screen) == (scope == Scope.CONSOLE);
+  }
+
+  /** 这种布局归不归这一组命令管。 */
+  private boolean mine(PidsLayout layout) {
+    return layout.signalbox() == (scope == Scope.CONSOLE);
+  }
+
+  /** 屏幕或布局归另一组命令管时的提示。 */
+  private void elsewhere(CommandSender sender) {
+    sender.sendMessage(
+        locale()
+            .component(
+                scope == Scope.CONSOLE
+                    ? "command.signal.console.not-console"
+                    : "command.pids.is-console"));
   }
 
   /** 注册 {@code /fta pids} 全部子命令。 */
@@ -70,27 +121,22 @@ public final class FtaPidsCommand {
     SuggestionProvider<CommandSender> screens = screenSuggestions();
     SuggestionProvider<CommandSender> layouts = layoutSuggestions();
 
+    manager.command(root(manager).handler(ctx -> help(ctx.sender())));
     manager.command(
-        manager.commandBuilder("fta").literal("pids").handler(ctx -> help(ctx.sender())));
-    manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
+        root(manager)
             .literal("give")
             .senderType(Player.class)
             .required("layout", StringParser.stringParser(), layouts)
             .handler(ctx -> give((Player) ctx.sender(), ctx.get("layout"))));
+    if (scope == Scope.PIDS) {
+      manager.command(
+          root(manager)
+              .literal("stick")
+              .senderType(Player.class)
+              .handler(ctx -> stick((Player) ctx.sender())));
+    }
     manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
-            .literal("stick")
-            .senderType(Player.class)
-            .handler(ctx -> stick((Player) ctx.sender())));
-    manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
+        root(manager)
             .literal("list")
             .permission(PidsAccess.MANAGE_PERMISSION)
             .optional(
@@ -99,9 +145,7 @@ public final class FtaPidsCommand {
                 CommandSuggestionProviders.placeholder("<page>"))
             .handler(ctx -> list(ctx.sender(), ctx.<Integer>optional("page").orElse(1))));
     manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
+        root(manager)
             .literal("info")
             .required("screen", StringParser.stringParser(), screens)
             .handler(
@@ -111,9 +155,7 @@ public final class FtaPidsCommand {
                         (service, screen) ->
                             new PidsStickMenu(locale()).info(ctx.sender(), service, screen))));
     manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
+        root(manager)
             .literal("menu")
             .required("screen", StringParser.stringParser(), screens)
             .handler(
@@ -122,31 +164,32 @@ public final class FtaPidsCommand {
                         ctx,
                         (service, screen) ->
                             new PidsStickMenu(locale()).open(ctx.sender(), service, screen))));
-    manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
-            .literal("set")
-            .required("screen", StringParser.stringParser(), screens)
-            .literal("station")
-            .required("operator", StringParser.stringParser(), stationOperatorSuggestions())
-            .required("station", StringParser.stringParser(), stationSuggestions())
-            .handler(this::setStation));
+    if (scope == Scope.PIDS) {
+      manager.command(
+          root(manager)
+              .literal("set")
+              .required("screen", StringParser.stringParser(), screens)
+              .literal("station")
+              .required("operator", StringParser.stringParser(), stationOperatorSuggestions())
+              .required("station", StringParser.stringParser(), stationSuggestions())
+              .handler(this::setStation));
+    }
     // 线路运行状况屏可以不绑车站、只绑运营商。
     manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
+        root(manager)
             .literal("set")
             .required("screen", StringParser.stringParser(), screens)
             .literal("operator")
             .required("operator", StringParser.stringParser(), operatorSuggestions())
             .handler(this::setOperator));
-    registerSet(manager, screens, "platform", platformSuggestions(), this::togglePlatform);
-    registerSet(manager, screens, "line", lineSuggestions(), this::toggleLine);
-    registerSet(manager, screens, "rotate", rotateSuggestions(), this::toggleRotate);
+    if (scope == Scope.PIDS) {
+      registerSet(manager, screens, "platform", platformSuggestions(), this::togglePlatform);
+      registerSet(manager, screens, "line", lineSuggestions(), this::toggleLine);
+      registerSet(manager, screens, "rotate", rotateSuggestions(), this::toggleRotate);
+      registerSet(manager, screens, "page", pageSuggestions(), this::togglePage);
+    }
     registerSet(manager, screens, "layout", screenLayoutSuggestions(), this::changeLayout);
-    registerSet(manager, screens, "page", pageSuggestions(), this::togglePage);
+    registerSet(manager, screens, "zone", zoneSuggestions(), this::changeZone);
     registerSet(
         manager,
         screens,
@@ -160,9 +203,7 @@ public final class FtaPidsCommand {
         SuggestionProvider.suggestingStrings("live", "test"),
         this::changeMode);
     manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
+        root(manager)
             .literal("remove")
             .required("screen", StringParser.stringParser(), screens)
             .handler(
@@ -170,11 +211,10 @@ public final class FtaPidsCommand {
                     withScreen(
                         ctx,
                         (service, screen) ->
-                            new PidsStickMenu(locale()).promptRemove(ctx.sender(), screen))));
+                            new PidsStickMenu(locale())
+                                .promptRemove(ctx.sender(), service, screen))));
     manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
+        root(manager)
             .literal("remove")
             .required("screen", StringParser.stringParser(), screens)
             .literal("confirm")
@@ -194,9 +234,7 @@ public final class FtaPidsCommand {
       SuggestionProvider<CommandSender> values,
       Edit edit) {
     manager.command(
-        manager
-            .commandBuilder("fta")
-            .literal("pids")
+        root(manager)
             .literal("set")
             .required("screen", StringParser.stringParser(), screens)
             .literal(field)
@@ -214,6 +252,12 @@ public final class FtaPidsCommand {
 
   private void help(CommandSender sender) {
     LocaleManager locale = locale();
+    if (scope == Scope.CONSOLE) {
+      for (String key : List.of("header", "give", "list", "info", "bind", "set")) {
+        sender.sendMessage(locale.component("command.signal.console.help." + key));
+      }
+      return;
+    }
     for (String key : List.of("header", "give", "stick", "list", "info", "bulletin")) {
       sender.sendMessage(locale.component("command.pids.help." + key));
     }
@@ -233,6 +277,10 @@ public final class FtaPidsCommand {
     if (layout.isEmpty()) {
       player.sendMessage(
           locale.component("command.pids.give.unknown-layout", Map.of("layout", layoutId)));
+      return;
+    }
+    if (!mine(layout.get())) {
+      elsewhere(player);
       return;
     }
     giveItem(player, service.get().items().installPaper(layout.get()));
@@ -265,16 +313,18 @@ public final class FtaPidsCommand {
     if (service.isEmpty()) {
       return;
     }
-    List<PidsScreen> screens = service.get().screens();
+    List<PidsScreen> screens =
+        service.get().screens().stream().filter(screen -> mine(service.get(), screen)).toList();
+    String keys = scope == Scope.CONSOLE ? "command.signal.console.list." : "command.pids.list.";
     if (screens.isEmpty()) {
-      sender.sendMessage(locale.component("command.pids.list.empty"));
+      sender.sendMessage(locale.component(keys + "empty"));
       return;
     }
     int pages = (screens.size() + PAGE_SIZE - 1) / PAGE_SIZE;
     int current = Math.min(page, pages);
     sender.sendMessage(
         locale.component(
-            "command.pids.list.header",
+            keys + "header",
             Map.of(
                 "count",
                 Integer.toString(screens.size()),
@@ -334,7 +384,7 @@ public final class FtaPidsCommand {
                       Integer.toString(screen.anchor().z())))
               .clickEvent(
                   net.kyori.adventure.text.event.ClickEvent.runCommand(
-                      "/fta pids info " + screen.id())));
+                      command() + " info " + screen.id())));
     }
   }
 
@@ -390,7 +440,7 @@ public final class FtaPidsCommand {
         (service, screen) -> {
           CommandSender sender = ctx.sender();
           String operator = ((String) ctx.get("operator")).trim().toUpperCase(Locale.ROOT);
-          if (!service.isLineStatus(screen)) {
+          if (!service.isLineStatus(screen) && !service.isYard(screen)) {
             sender.sendMessage(locale().component("command.pids.set.operator-line-status-only"));
             return;
           }
@@ -517,6 +567,11 @@ public final class FtaPidsCommand {
       CommandSender sender, PidsService service, PidsScreen screen, String value) {
     Optional<PidsLayout> layout =
         service.layouts().find(value).filter(found -> PidsScreenPages.fits(screen, found));
+    if (layout.isPresent() && !mine(layout.get())) {
+      // 站台屏与控制台不互换：只能拆了用对应的安装纸重装
+      sender.sendMessage(locale().component("command.pids.set.cross-kind-layout"));
+      return Optional.empty();
+    }
     if (layout.isEmpty()) {
       sender.sendMessage(
           locale()
@@ -560,6 +615,34 @@ public final class FtaPidsCommand {
     return Optional.of(screen.withLayouts(edit.layoutIds(), service.now()));
   }
 
+  /** 站场图屏绑控制区（屏幕所属运营商名下）；{@code none} 解绑，只画绑定的车站。 */
+  private Optional<PidsScreen> changeZone(
+      CommandSender sender, PidsService service, PidsScreen screen, String value) {
+    if (!service.isYard(screen)) {
+      sender.sendMessage(locale().component("command.pids.set.zone-yard-only"));
+      return Optional.empty();
+    }
+    String code = value.trim();
+    if (PidsScreen.NONE.equalsIgnoreCase(code)) {
+      return Optional.of(screen.withZone(Optional.empty(), service.now()));
+    }
+    Optional<String> operator = screen.operatorCode();
+    if (operator.isEmpty()) {
+      sender.sendMessage(locale().component("command.pids.set.zone-need-operator"));
+      return Optional.empty();
+    }
+    Optional<ControlZoneDirectory.Zone> zone = service.findZone(operator.get(), code);
+    if (zone.isEmpty()) {
+      sender.sendMessage(
+          locale()
+              .component(
+                  "command.pids.set.unknown-zone",
+                  Map.of("operator", operator.get(), "zone", code)));
+      return Optional.empty();
+    }
+    return Optional.of(screen.withZone(Optional.of(zone.get().code()), service.now()));
+  }
+
   private Optional<PidsScreen> changeAppearance(
       CommandSender sender, PidsService service, PidsScreen screen, String value) {
     return parseEnum(sender, PidsScreen.Appearance.class, value)
@@ -579,14 +662,22 @@ public final class FtaPidsCommand {
           locale().component("command.pids.set.invalid-value", Map.of("value", value)));
       return Optional.empty();
     }
-    // 线路运行状况屏绑车站或运营商都行，其余屏要绑车站。
+    // 线路运行状况屏绑车站或运营商都行，站场图屏绑车站或控制区都行，其余屏要绑车站。
     boolean lineStatus = service.isLineStatus(screen);
-    if (mode == PidsScreen.Mode.LIVE
-        && (lineStatus ? screen.operatorCode().isEmpty() : screen.station().isEmpty())) {
+    boolean yard = service.isYard(screen);
+    boolean unbound =
+        lineStatus
+            ? screen.operatorCode().isEmpty()
+            : screen.station().isEmpty() && (!yard || screen.zone().isEmpty());
+    if (mode == PidsScreen.Mode.LIVE && unbound) {
       sender.sendMessage(
           locale()
               .component(
-                  lineStatus ? "command.pids.set.need-binding" : "command.pids.set.need-station"));
+                  lineStatus
+                      ? "command.pids.set.need-binding"
+                      : yard
+                          ? "command.pids.set.need-yard-binding"
+                          : "command.pids.set.need-station"));
       return Optional.empty();
     }
     if (mode == PidsScreen.Mode.LIVE
@@ -654,6 +745,10 @@ public final class FtaPidsCommand {
       sender.sendMessage(locale().component("pids.menu.no-permission"));
       return;
     }
+    if (!mine(service.get(), screen)) {
+      elsewhere(sender);
+      return;
+    }
     action.accept(service.get(), screen);
   }
 
@@ -701,12 +796,13 @@ public final class FtaPidsCommand {
               .flatMap(
                   service -> {
                     if (admin) {
-                      return service.screens().stream();
+                      return service.screens().stream().filter(screen -> mine(service, screen));
                     }
                     // 公司成员只补全本公司（车站或运营商所属）的屏幕；都没绑的只有管理员能管
                     Set<String> manageable =
                         Set.copyOf(service.manageableOperatorsForSuggestions(ctx.sender()));
                     return service.screens().stream()
+                        .filter(screen -> mine(service, screen))
                         .filter(
                             screen ->
                                 screen.operatorCode().filter(manageable::contains).isPresent());
@@ -729,6 +825,7 @@ public final class FtaPidsCommand {
           }
           plugin.getPidsService().stream()
               .flatMap(service -> service.layouts().all().stream())
+              .filter(this::mine)
               .map(PidsLayout::id)
               .filter(id -> id.startsWith(prefix))
               .limit(SUGGESTION_LIMIT)
@@ -749,6 +846,7 @@ public final class FtaPidsCommand {
           Optional<ScreenRef> ref = screenOf(ctx);
           plugin.getPidsService().stream()
               .flatMap(service -> service.layouts().all().stream())
+              .filter(this::mine)
               .filter(
                   layout ->
                       ref.map(found -> PidsScreenPages.fits(found.screen(), layout)).orElse(true))
@@ -863,6 +961,21 @@ public final class FtaPidsCommand {
                                   suggestions.addAll(
                                       pair.service()
                                           .platformsOf(pair.screen().worldId(), station))));
+          return suggestions;
+        });
+  }
+
+  /** 控制区补全：屏幕所属运营商名下的控制区，外加 {@code none}。 */
+  private SuggestionProvider<CommandSender> zoneSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          List<String> suggestions = new ArrayList<>(List.of("<zone>", PidsScreen.NONE));
+          screenOf(ctx)
+              .ifPresent(
+                  pair ->
+                      pair.service().zoneChoices(pair.screen()).stream()
+                          .map(ControlZoneDirectory.Zone::code)
+                          .forEach(suggestions::add));
           return suggestions;
         });
   }

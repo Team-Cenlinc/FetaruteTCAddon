@@ -7,11 +7,14 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
@@ -24,6 +27,7 @@ import java.util.stream.Collectors;
 import org.bukkit.Server;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitScheduler;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
@@ -35,8 +39,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSuppor
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.ConnectedRailNodeDiscoverySession;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.NodeToNodeEdgeExplorer;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildCompletion;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildContinuation;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildOutcome;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildResult;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildTask;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
@@ -473,6 +482,518 @@ final class FtaGraphCommandApplyBuildSuccessTest {
   }
 
   /** 捕获交给调度器的任务，由测试决定何时执行（后台线程与回主线程的任务都按提交顺序跑）。 */
+  @Test
+  void buildFinishedMergesOffMainThreadAndSwitchesOnlyOnTheMainThreadStep() throws Exception {
+    Harness harness = harness();
+    RailGraphBuildTask task = harness.registerJob();
+
+    harness.finish(harness.updateAddingX(Optional.empty()));
+
+    assertSame(harness.base(), harness.current(), "交出去之后还没切换");
+    assertSame(task, harness.jobs().get(harness.worldId()), "后台合并期间仍占着本世界的建图任务");
+    assertEquals(1, harness.asyncTasks().size());
+    harness.asyncTasks().get(0).run();
+    assertSame(harness.base(), harness.current(), "后台算完也不切换，等主线程核验");
+    assertEquals(1, harness.mainTasks().size());
+
+    harness.mainTasks().get(0).run();
+
+    RailGraph merged = harness.current();
+    assertTrue(merged.findNode(NodeId.of("B")).isPresent(), "与旧图合并");
+    assertTrue(merged.findNode(NodeId.of("X")).isPresent());
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  @Test
+  void buildFinishedRemergesInTheBackgroundWhenTheGraphChangedMeanwhile() throws Exception {
+    Harness harness = harness();
+    harness.registerJob();
+
+    harness.finish(harness.updateAddingX(Optional.empty()));
+    harness.asyncTasks().get(0).run();
+    RailGraph replaced = harness.lineWithC();
+    harness.service().putSnapshot(harness.world(), replaced, Instant.now());
+    harness.mainTasks().get(0).run();
+
+    assertSame(replaced, harness.current(), "旧图上算的结果不拿来切换");
+    assertEquals(2, harness.asyncTasks().size(), "按当前图再交一次后台");
+    harness.asyncTasks().get(1).run();
+    harness.mainTasks().get(1).run();
+
+    RailGraph merged = harness.current();
+    assertTrue(merged.findNode(NodeId.of("C")).isPresent(), "按期间换上的图重新合并");
+    assertTrue(merged.findNode(NodeId.of("X")).isPresent());
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  @Test
+  void buildFinishedDoesNotSwitchWhenCancelledMeanwhile() throws Exception {
+    Harness harness = harness();
+    harness.registerJob();
+
+    harness.finish(harness.updateAddingX(Optional.empty()));
+    harness.asyncTasks().get(0).run();
+    harness.jobs().remove(harness.worldId());
+    RailGraphBuildTask next = mock(RailGraphBuildTask.class);
+    harness.jobs().put(harness.worldId(), next);
+    harness.mainTasks().get(0).run();
+
+    assertSame(harness.base(), harness.current());
+    assertSame(next, harness.jobs().get(harness.worldId()), "不能顺手把取消后新开的任务移出");
+  }
+
+  @Test
+  void buildFinishedSwitchesSynchronouslyWhenTheBackgroundIsUnavailable() throws Exception {
+    Harness harness = harness();
+    harness.rejectAsyncCall(1);
+    harness.registerJob();
+
+    harness.finish(harness.updateAddingX(Optional.empty()));
+
+    assertTrue(harness.current().findNode(NodeId.of("X")).isPresent());
+    assertTrue(harness.current().findNode(NodeId.of("B")).isPresent());
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  @Test
+  void backgroundErrorStillReleasesTheJobAndReportsTheFailure() throws Exception {
+    Harness harness = harness();
+    harness.registerJob();
+
+    harness.finish(harness.updateThatOverflows(Optional.empty()));
+    harness.asyncTasks().get(0).run();
+    assertTrue(harness.jobs().containsKey(harness.worldId()), "回到主线程之前仍占着");
+    harness.mainTasks().get(0).run();
+
+    assertSame(harness.base(), harness.current());
+    assertFalse(harness.jobs().containsKey(harness.worldId()), "栈溢出这类 Error 也解锁");
+    verify(harness.locale()).component(eq("command.graph.build.failed"), anyMap());
+  }
+
+  @Test
+  void cancelledBuildIgnoresALaterBackgroundFailure() throws Exception {
+    Harness harness = harness();
+    harness.registerJob();
+    ConnectedRailNodeDiscoverySession previous = mock(ConnectedRailNodeDiscoverySession.class);
+    harness.continuations().put(harness.cacheKey(), continuation(previous));
+    ConnectedRailNodeDiscoverySession paused = mock(ConnectedRailNodeDiscoverySession.class);
+
+    harness.finish(harness.updateThatOverflows(Optional.of(continuation(paused))));
+    harness.asyncTasks().get(0).run();
+    harness.jobs().remove(harness.worldId());
+    harness.mainTasks().get(0).run();
+
+    verify(harness.locale(), never()).component(eq("command.graph.build.failed"), anyMap());
+    verify(paused).releaseChunkTickets();
+    verify(previous, never()).releaseChunkTickets();
+    assertSame(previous, harness.continuations().get(harness.cacheKey()).discoverySession());
+  }
+
+  @Test
+  void failureAfterTheSwitchKeepsTheContinuation() throws Exception {
+    Harness harness = harness();
+    // 第 2 次排后台是切换后的站点自愈：让它抛出，模拟切换之后才出的错。
+    harness.rejectAsyncCall(2);
+    harness.registerJob();
+    ConnectedRailNodeDiscoverySession previous = mock(ConnectedRailNodeDiscoverySession.class);
+    harness.continuations().put(harness.cacheKey(), continuation(previous));
+    ConnectedRailNodeDiscoverySession paused = mock(ConnectedRailNodeDiscoverySession.class);
+
+    harness.finish(harness.updateAddingX(Optional.of(continuation(paused))));
+    harness.asyncTasks().get(0).run();
+    harness.mainTasks().get(0).run();
+
+    assertTrue(harness.current().findNode(NodeId.of("X")).isPresent(), "新图已经切上去");
+    verify(harness.locale()).component(eq("command.graph.build.failed"), anyMap());
+    verify(previous, never()).releaseChunkTickets();
+    verify(paused, never()).releaseChunkTickets();
+    assertSame(previous, harness.continuations().get(harness.cacheKey()).discoverySession());
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  @Test
+  void refreshMergesOffMainThreadAndSwitchesOnTheMainThreadStep() throws Exception {
+    Harness harness = harness();
+    RailGraphBuildTask task = harness.registerJob();
+    List<RailNodeRecord> nodes = harness.refreshNodes();
+    harness.storedNodes(nodes);
+
+    harness.refresh(nodes, task);
+
+    assertSame(harness.base(), harness.current());
+    harness.asyncTasks().get(0).run();
+    assertSame(harness.base(), harness.current());
+    harness.mainTasks().get(0).run();
+
+    RailGraph refreshed = harness.current();
+    assertTrue(refreshed.findNode(NodeId.of("X")).isPresent());
+    assertTrue(
+        refreshed.findEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B"))).isPresent(),
+        "沿用仍在节点表里的旧区间");
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  @Test
+  void refreshDoesNotOverwriteNodesChangedDuringTheBackgroundStep() throws Exception {
+    Harness harness = harness();
+    RailGraphBuildTask task = harness.registerJob();
+    List<RailNodeRecord> nodes = harness.refreshNodes();
+    harness.storedNodes(nodes);
+
+    harness.refresh(nodes, task);
+    harness.asyncTasks().get(0).run();
+    // 后台合并期间又放下了一块节点牌子，库里的节点表变了。
+    List<RailNodeRecord> changed = new java.util.ArrayList<>(nodes);
+    changed.add(nodeRecord(harness.worldId(), "Y", 20));
+    harness.storedNodes(changed);
+    harness.mainTasks().get(0).run();
+
+    assertSame(harness.base(), harness.current(), "不拿开始时的节点表写库、切换");
+    verify(harness.edgeRepo(), never()).replaceWorld(any(), any());
+    verify(harness.locale()).component("command.graph.refresh.nodes-changed");
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  @Test
+  void refreshRemergesInTheBackgroundWhenTheGraphChangedMeanwhile() throws Exception {
+    Harness harness = harness();
+    RailGraphBuildTask task = harness.registerJob();
+    List<RailNodeRecord> nodes = harness.refreshNodes();
+    harness.storedNodes(nodes);
+
+    harness.refresh(nodes, task);
+    harness.asyncTasks().get(0).run();
+    RailGraph shorter = harness.lineAb(7);
+    harness.service().putSnapshot(harness.world(), shorter, Instant.now());
+    harness.mainTasks().get(0).run();
+
+    assertSame(shorter, harness.current());
+    assertEquals(2, harness.asyncTasks().size(), "按当前图再交一次后台");
+    harness.asyncTasks().get(1).run();
+    harness.mainTasks().get(1).run();
+
+    RailEdge ab =
+        harness.current().findEdge(EdgeId.undirected(NodeId.of("A"), NodeId.of("B"))).orElseThrow();
+    assertEquals(7, ab.lengthBlocks(), "按期间换上的图重新合并");
+    assertTrue(harness.current().findNode(NodeId.of("X")).isPresent());
+  }
+
+  @Test
+  void deleteHereHoldsTheWorldWhileItComputesAndSwitchesOnTheMainThreadStep() throws Exception {
+    Harness harness = harness();
+    harness.service().putSnapshot(harness.world(), harness.twoComponents(), Instant.now());
+
+    harness.deleteHere(NodeId.of("C"));
+
+    assertTrue(
+        harness.jobs().containsKey(harness.worldId()), "后台计算期间占着本世界：build、continue、整世界删图都要等");
+    assertTrue(harness.current().findNode(NodeId.of("C")).isPresent());
+    harness.asyncTasks().get(0).run();
+    harness.mainTasks().get(0).run();
+
+    assertTrue(harness.current().findNode(NodeId.of("C")).isEmpty());
+    assertTrue(harness.current().findNode(NodeId.of("A")).isPresent());
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  @Test
+  void deleteHereOfTheLastComponentClearsTheGraph() throws Exception {
+    Harness harness = harness();
+
+    harness.deleteHere(NodeId.of("A"));
+    harness.asyncTasks().get(0).run();
+    harness.mainTasks().get(0).run();
+
+    assertTrue(harness.service().getSnapshot(harness.worldId()).isEmpty());
+    verify(harness.edgeRepo()).deleteWorld(harness.worldId());
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  @Test
+  void deleteHereReportsTheSeedGoneWhenTheGraphChangedMeanwhile() throws Exception {
+    Harness harness = harness();
+    harness.service().putSnapshot(harness.world(), harness.twoComponents(), Instant.now());
+
+    harness.deleteHere(NodeId.of("C"));
+    harness.asyncTasks().get(0).run();
+    harness.service().putSnapshot(harness.world(), harness.base(), Instant.now());
+    harness.mainTasks().get(0).run();
+
+    assertSame(harness.base(), harness.current());
+    assertEquals(1, harness.asyncTasks().size(), "种子已不在图里，不再交后台");
+    verify(harness.locale()).component("command.graph.delete.here.no-seed");
+    assertFalse(harness.jobs().containsKey(harness.worldId()));
+  }
+
+  private static RailGraphBuildContinuation continuation(
+      ConnectedRailNodeDiscoverySession session) {
+    return new RailGraphBuildContinuation(Instant.EPOCH, session, List.of());
+  }
+
+  /**
+   * 已激活旧图 A–B、存储可写的命令；调度器把后台与主线程任务各自记下，由测试按顺序执行。
+   *
+   * @param rejectedAsyncCalls 第几次排后台（从 1 数）时抛出，模拟插件停用
+   */
+  private record Harness(
+      FtaGraphCommand command,
+      RailGraphService service,
+      World world,
+      UUID worldId,
+      RailGraph base,
+      List<Runnable> asyncTasks,
+      List<Runnable> mainTasks,
+      Set<Integer> rejectedAsyncCalls,
+      CommandSender sender,
+      Player player,
+      LocaleManager locale,
+      RailNodeRepository nodeRepo,
+      RailEdgeRepository edgeRepo) {
+
+    RailGraph current() {
+      return service.getSnapshot(worldId).orElseThrow().graph();
+    }
+
+    void rejectAsyncCall(int call) {
+      rejectedAsyncCalls.add(call);
+    }
+
+    void storedNodes(List<RailNodeRecord> nodes) {
+      when(nodeRepo.listByWorld(worldId)).thenReturn(List.copyOf(nodes));
+    }
+
+    @SuppressWarnings("unchecked")
+    java.util.concurrent.ConcurrentMap<UUID, RailGraphBuildTask> jobs() throws Exception {
+      java.lang.reflect.Field field = FtaGraphCommand.class.getDeclaredField("jobs");
+      assertTrue(field.trySetAccessible());
+      return (java.util.concurrent.ConcurrentMap<UUID, RailGraphBuildTask>) field.get(command);
+    }
+
+    @SuppressWarnings("unchecked")
+    Map<Object, RailGraphBuildContinuation> continuations() throws Exception {
+      java.lang.reflect.Field field = FtaGraphCommand.class.getDeclaredField("continuations");
+      assertTrue(field.trySetAccessible());
+      return (Map<Object, RailGraphBuildContinuation>) field.get(command);
+    }
+
+    Object cacheKey() throws Exception {
+      Method cacheKey =
+          FtaGraphCommand.class.getDeclaredMethod("cacheKey", UUID.class, CommandSender.class);
+      assertTrue(cacheKey.trySetAccessible());
+      return cacheKey.invoke(command, worldId, sender);
+    }
+
+    RailGraphBuildTask registerJob() throws Exception {
+      RailGraphBuildTask task = mock(RailGraphBuildTask.class);
+      jobs().put(worldId, task);
+      return task;
+    }
+
+    /** A–B，区间长度可调。 */
+    RailGraph lineAb(int length) {
+      return graph(
+          worldId,
+          Set.of(node("A", 1), node("B", 2)),
+          Set.of(edge("A", "B", length)),
+          Map.of(
+              EdgeId.undirected(NodeId.of("A"), NodeId.of("B")),
+              new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(1, 64, 0)))));
+    }
+
+    /** A–B–C 一条线。 */
+    RailGraph lineWithC() {
+      return graph(
+          worldId,
+          Set.of(node("A", 1), node("B", 2), node("C", 3)),
+          Set.of(edge("A", "B", 12), edge("B", "C", 5)),
+          Map.of(
+              EdgeId.undirected(NodeId.of("A"), NodeId.of("B")),
+              new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(1, 64, 0))),
+              EdgeId.undirected(NodeId.of("B"), NodeId.of("C")),
+              new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(2, 64, 0)))));
+    }
+
+    /** A–B 与 C–D 两个连通分量。 */
+    RailGraph twoComponents() {
+      return graph(
+          worldId,
+          Set.of(node("A", 1), node("B", 2), node("C", 30), node("D", 31)),
+          Set.of(edge("A", "B", 12), edge("C", "D", 4)),
+          Map.of(
+              EdgeId.undirected(NodeId.of("A"), NodeId.of("B")),
+              new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(1, 64, 0))),
+              EdgeId.undirected(NodeId.of("C"), NodeId.of("D")),
+              new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(30, 64, 0)))));
+    }
+
+    /** 快速刷新开始时库里的节点表：A、B 之外新放了 X。 */
+    List<RailNodeRecord> refreshNodes() {
+      return List.of(
+          nodeRecord(worldId, "A", 1), nodeRecord(worldId, "B", 2), nodeRecord(worldId, "X", 10));
+    }
+
+    /** build 结果：在 A 上接出 X；结果可能不完整，按 upsert 与旧图合并。 */
+    RailGraphBuildOutcome updateAddingX(Optional<RailGraphBuildContinuation> continuation) {
+      EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("X"));
+      RailGraph update =
+          graph(
+              worldId,
+              Set.of(node("A", 1), node("X", 10)),
+              Set.of(edge("A", "X", 2)),
+              Map.of(
+                  edgeId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(5, 64, 0)))));
+      return outcome(update, continuation);
+    }
+
+    /** build 结果：合并时一读节点就栈溢出。 */
+    RailGraphBuildOutcome updateThatOverflows(Optional<RailGraphBuildContinuation> continuation) {
+      RailGraph overflowing = mock(RailGraph.class);
+      when(overflowing.nodes()).thenThrow(new StackOverflowError("deep"));
+      when(overflowing.edges()).thenThrow(new StackOverflowError("deep"));
+      return outcome(overflowing, continuation);
+    }
+
+    private RailGraphBuildOutcome outcome(
+        RailGraph update, Optional<RailGraphBuildContinuation> continuation) {
+      List<RailNodeRecord> nodes =
+          List.of(nodeRecord(worldId, "A", 1), nodeRecord(worldId, "X", 10));
+      return new RailGraphBuildOutcome(
+          new RailGraphBuildResult(
+              update,
+              Instant.parse("2026-01-03T00:00:00Z"),
+              RailGraphSignature.signatureForNodes(nodes),
+              nodes,
+              List.of(),
+              List.of()),
+          RailGraphBuildCompletion.PARTIAL_UNLOADED_CHUNKS,
+          continuation,
+          List.of());
+    }
+
+    @SuppressWarnings("unchecked")
+    void finish(RailGraphBuildOutcome outcome) throws Exception {
+      Object key = cacheKey();
+      Method buildFinished =
+          FtaGraphCommand.class.getDeclaredMethod(
+              "buildFinished",
+              CommandSender.class,
+              World.class,
+              key.getClass(),
+              long.class,
+              LocaleManager.class);
+      assertTrue(buildFinished.trySetAccessible());
+      java.util.function.Consumer<RailGraphBuildOutcome> consumer =
+          (java.util.function.Consumer<RailGraphBuildOutcome>)
+              buildFinished.invoke(command, sender, world, key, System.nanoTime(), locale);
+      consumer.accept(outcome);
+    }
+
+    /** 快速刷新收尾交给后台：探索没发现区间（新图只有节点），没有作废道岔。 */
+    void refresh(List<RailNodeRecord> nodes, RailGraphBuildTask task) throws Exception {
+      NodeToNodeEdgeExplorer explorer = mock(NodeToNodeEdgeExplorer.class);
+      when(explorer.getExploredEdges()).thenReturn(Map.of());
+      when(explorer.unterminatedDirections()).thenReturn(List.of());
+      Method startRefreshSwitch =
+          FtaGraphCommand.class.getDeclaredMethod(
+              "startRefreshSwitch",
+              CommandSender.class,
+              World.class,
+              List.class,
+              List.class,
+              NodeToNodeEdgeExplorer.class,
+              int.class,
+              long.class,
+              LocaleManager.class,
+              RailGraphBuildTask.class);
+      assertTrue(startRefreshSwitch.trySetAccessible());
+      startRefreshSwitch.invoke(
+          command, sender, world, nodes, List.of(), explorer, 0, System.nanoTime(), locale, task);
+    }
+
+    void deleteHere(NodeId seed) throws Exception {
+      Method startDeleteHere =
+          FtaGraphCommand.class.getDeclaredMethod(
+              "startDeleteHere", Player.class, World.class, NodeId.class, LocaleManager.class);
+      assertTrue(startDeleteHere.trySetAccessible());
+      startDeleteHere.invoke(command, player, world, seed, locale);
+    }
+  }
+
+  private Harness harness() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    when(world.getName()).thenReturn("world");
+    EdgeId baseEdge = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+    RailGraph base =
+        graph(
+            worldId,
+            Set.of(node("A", 1), node("B", 2)),
+            Set.of(edge("A", "B", 12)),
+            Map.of(
+                baseEdge, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(1, 64, 0)))));
+    RailGraphService service = new RailGraphService();
+    service.putSnapshot(world, base, Instant.parse("2026-01-01T00:00:00Z"));
+
+    StorageManager storageManager = mock(StorageManager.class);
+    when(storageManager.isReady()).thenReturn(true);
+    StorageProvider provider = mock(StorageProvider.class);
+    RailNodeRepository nodeRepo = mock(RailNodeRepository.class);
+    RailEdgeRepository edgeRepo = mock(RailEdgeRepository.class);
+    when(provider.railNodes()).thenReturn(nodeRepo);
+    when(provider.railEdges()).thenReturn(edgeRepo);
+    when(provider.railGraphSnapshots()).thenReturn(mock(RailGraphSnapshotRepository.class));
+    when(provider.railInterlockingSnapshots())
+        .thenReturn(mock(RailInterlockingSnapshotRepository.class));
+    when(provider.transactionManager()).thenReturn(new InlineTransactionManager());
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
+    when(plugin.getRailGraphService()).thenReturn(service);
+    when(plugin.getSignNodeRegistry()).thenReturn(new SignNodeRegistry());
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
+    Server server = mock(Server.class);
+    BukkitScheduler scheduler = mock(BukkitScheduler.class);
+    when(plugin.getServer()).thenReturn(server);
+    when(server.getScheduler()).thenReturn(scheduler);
+    List<Runnable> asyncTasks = new java.util.ArrayList<>();
+    List<Runnable> mainTasks = new java.util.ArrayList<>();
+    Set<Integer> rejectedAsyncCalls = new java.util.HashSet<>();
+    java.util.concurrent.atomic.AtomicInteger asyncCalls =
+        new java.util.concurrent.atomic.AtomicInteger();
+    when(scheduler.runTaskAsynchronously(any(), any(Runnable.class)))
+        .thenAnswer(
+            invocation -> {
+              if (rejectedAsyncCalls.contains(asyncCalls.incrementAndGet())) {
+                throw new org.bukkit.plugin.IllegalPluginAccessException("plugin disabled");
+              }
+              asyncTasks.add(invocation.getArgument(1));
+              return mock(BukkitTask.class);
+            });
+    when(scheduler.runTask(any(), any(Runnable.class)))
+        .thenAnswer(
+            invocation -> {
+              mainTasks.add(invocation.getArgument(1));
+              return mock(BukkitTask.class);
+            });
+    return new Harness(
+        new FtaGraphCommand(plugin),
+        service,
+        world,
+        worldId,
+        base,
+        asyncTasks,
+        mainTasks,
+        rejectedAsyncCalls,
+        mock(CommandSender.class),
+        mock(Player.class),
+        mock(LocaleManager.class),
+        nodeRepo,
+        edgeRepo);
+  }
+
   private static Scheduled scheduled(FetaruteTCAddon plugin) {
     Server server = mock(Server.class);
     BukkitScheduler scheduler = mock(BukkitScheduler.class);

@@ -133,6 +133,64 @@ class DriveRewardsTest {
   }
 
   @Test
+  @DisplayName("信号员：每列车按人工停站单价乘比例，再乘评级系数；没有 ATO 折扣与同车加成")
+  void signallerPerTrainThenGraded() {
+    DriveRewards.Reward reward =
+        DriveRewards.signaller(DriveRewardConfig.defaults(), 1.0, 6, ScoreRules.Grade.A);
+
+    // 经验 1.2 × 6 列 × 2 = 14.4；钱币 1.2 × 6 × 5 = 36
+    assertEquals(14, reward.experience());
+    assertEquals(36.0, reward.money(), 1e-9);
+    assertFalse(reward.crewBonus());
+
+    DriveRewards.Reward half =
+        DriveRewards.signaller(DriveRewardConfig.defaults(), 0.5, 6, ScoreRules.Grade.B);
+    // 1.0 × 6 × 0.5 × 2 = 6；钱币 1.0 × 6 × 0.5 × 5 = 15
+    assertEquals(6, half.experience());
+    assertEquals(15.0, half.money(), 1e-9);
+  }
+
+  @Test
+  @DisplayName("信号员：奖励关闭、没有计奖励的车、比例为 0 或非法时什么也不发")
+  void signallerNothingWhenDisabledOrNoTrains() {
+    DriveRewardConfig off =
+        new DriveRewardConfig(
+            false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}", "FRD", 3, 0.5);
+    assertTrue(DriveRewards.signaller(off, 1.0, 10, ScoreRules.Grade.S).empty());
+    assertTrue(
+        DriveRewards.signaller(DriveRewardConfig.defaults(), 1.0, 0, ScoreRules.Grade.S).empty());
+    assertTrue(
+        DriveRewards.signaller(DriveRewardConfig.defaults(), 1.0, -3, ScoreRules.Grade.S).empty());
+    assertTrue(
+        DriveRewards.signaller(DriveRewardConfig.defaults(), 0.0, 10, ScoreRules.Grade.S).empty());
+    assertTrue(
+        DriveRewards.signaller(DriveRewardConfig.defaults(), Double.NaN, 10, ScoreRules.Grade.S)
+            .empty());
+  }
+
+  @Test
+  @DisplayName("配置：信号员每列车比例默认 1，可改，负数回退默认并提示")
+  void parsesSignallerRatio() throws Exception {
+    assertEquals(1.0, DriveRewardConfig.defaults().signallerTrainRatio(), 1e-9);
+    assertEquals(
+        1.0,
+        new DriveRewardConfig(true, 10, 2, 20, 5, 0.5, java.util.Map.of(), "", "FRD", 3, 0.5)
+            .signallerTrainRatio(),
+        1e-9,
+        "不带比例的构造按默认值");
+
+    YamlConfiguration yaml = new YamlConfiguration();
+    yaml.loadFromString("signaller-per-train-ratio: 0.75");
+    assertEquals(0.75, DriveRewardConfig.from(yaml, null).signallerTrainRatio(), 1e-9);
+
+    YamlConfiguration negative = new YamlConfiguration();
+    negative.loadFromString("signaller-per-train-ratio: -2");
+    List<String> warnings = new ArrayList<>();
+    assertEquals(1.0, DriveRewardConfig.from(negative, warnings::add).signallerTrainRatio(), 1e-9);
+    assertEquals(1, warnings.size(), warnings::toString);
+  }
+
+  @Test
   @DisplayName("钱币数额两位小数、去掉末尾的 0")
   void amountFormatting() {
     assertEquals("78", DriveRewards.formatAmount(78.0));

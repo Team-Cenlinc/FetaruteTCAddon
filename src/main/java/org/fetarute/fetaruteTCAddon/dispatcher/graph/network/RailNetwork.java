@@ -103,12 +103,10 @@ public final class RailNetwork {
     }
     Map<EdgeId, RailEdge> portalEdges = new HashMap<>();
     for (PortalLink link : links) {
-      UUID fromWorld = nodeWorld.get(link.fromNode());
-      UUID toWorld = nodeWorld.get(link.toNode());
-      if (fromWorld == null || toWorld == null || fromWorld.equals(toWorld)) {
+      EdgeId id = portalEdgeId(link, nodeWorld);
+      if (id == null) {
         continue;
       }
-      EdgeId id = EdgeId.undirected(link.fromNode(), link.toNode());
       portalEdges.putIfAbsent(
           id,
           new RailEdge(
@@ -124,6 +122,35 @@ public final class RailNetwork {
         Map.copyOf(nodeWorld),
         Map.copyOf(portalEdges),
         adjacency);
+  }
+
+  /** 连接成边的条件：两端节点都在已加载的图里、且分属不同世界；不成边时为 {@code null}。 */
+  private static EdgeId portalEdgeId(PortalLink link, Map<NodeId, UUID> nodeWorld) {
+    UUID fromWorld = nodeWorld.get(link.fromNode());
+    UUID toWorld = nodeWorld.get(link.toNode());
+    if (fromWorld == null || toWorld == null || fromWorld.equals(toWorld)) {
+      return null;
+    }
+    return EdgeId.undirected(link.fromNode(), link.toNode());
+  }
+
+  /**
+   * 这张路网里的每条传送门连接边，在给出的连接里是否都还成边（节点归属按本路网算）。
+   *
+   * <p>各世界的图没换时，连接只多不少的旧路网比现状更保守：少了新连接只是暂时还绕不过去。连接被删时旧路网会让列车规划穿过 已不存在的门，不能再用。
+   */
+  public boolean portalEdgesBackedBy(Collection<PortalLink> links) {
+    if (portalEdges.isEmpty()) {
+      return true;
+    }
+    Set<EdgeId> backed = new HashSet<>();
+    for (PortalLink link : links) {
+      EdgeId id = portalEdgeId(link, nodeWorld);
+      if (id != null) {
+        backed.add(id);
+      }
+    }
+    return backed.containsAll(portalEdges.keySet());
   }
 
   /** 有没有跨世界的连接边。 */

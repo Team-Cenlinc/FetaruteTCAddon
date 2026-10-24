@@ -70,6 +70,15 @@ public final class StationStopCoordinator {
   /** 联挂等对方：列车名 → 扣到几点（不扣时为空）。上限由联挂指令的等候秒数定，不受按表扣车上限约束。 */
   private volatile Function<String, Optional<Instant>> couplingHold = name -> Optional.empty();
 
+  /**
+   * 信号员扣车：列车名 → 扣到几点（不扣时为空）。上限由信号员模块自己管（不超过扣车开始后的发车门锁时限），这里不再按 {@link #HOLD_CEILING}
+   * 截短；放行（返回空）在下一次出站门控检查即生效。
+   */
+  private volatile Function<String, Optional<Instant>> signallerHold = name -> Optional.empty();
+
+  /** 信号员改停股道：计划站台的一个来源，仅次于联挂搭档。调度服务构造时接上；单独构造时没有可改的停站。 */
+  private volatile SignallerPlatforms signallerPlatforms = SignallerPlatforms.detached();
+
   private volatile Recovery recovery = Recovery.DISABLED;
 
   /** 正在按表扣留的车 → 扣到几点。只用来回答健康检查"它是不是在等点"，不参与任何放行判定。 */
@@ -219,37 +228,65 @@ public final class StationStopCoordinator {
     this.couplingHold = hold == null ? name -> Optional.empty() : hold;
   }
 
+  /**
+   * 注册信号员扣车：列车名 → 扣到几点，不扣时为空；判定出错时按不扣处理。扣车期间与按表扣车一样对健康检查豁免（{@link #holdingForSchedule}）。
+   *
+   * @param hold 扣车来源；{@code null} 恢复不扣
+   */
+  public void setSignallerHold(Function<String, Optional<Instant>> hold) {
+    this.signallerHold = hold == null ? name -> Optional.empty() : hold;
+  }
+
+  /** 接上信号员改停股道（调度服务构造时）。 */
+  void attachSignallerPlatforms(SignallerPlatforms next) {
+    SignallerPlatforms attached = next == null ? SignallerPlatforms.detached() : next;
+    attached.attachDisplay(this::displayPlatform);
+    this.signallerPlatforms = attached;
+  }
+
+  /**
+   * 信号员改停股道的调度侧实现（{@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk}）。
+   */
+  public SignallerPlatforms signallerPlatforms() {
+    return signallerPlatforms;
+  }
+
   /** 注册发车计划源；{@code null} 会立刻停止一切计划扣留，不需要等任何超时。 */
   public void setPlan(ScheduledDeparturePlan next) {
     this.plan = next;
   }
 
   /**
-   * 计划站台（{@link DynamicPlatformAllocator.PlatformPreference}）：按当前计划源查这辆车在该停靠点排定的股道；时刻表没有排定时，
-   * 看这辆车有没有预先指定的站台（叫来的车停右键的那条）。都没有时为空。
+   * 计划站台（{@link
+   * DynamicPlatformAllocator.PlatformPreference}）：联挂搭档停着的股道最先；其次信号员给这一站选的股道；再按当前计划源查这辆车在该停靠点排定的股道；
+   * 时刻表没有排定时，看这辆车有没有预先指定的站台（叫来的车停右键的那条）。都没有时为空。
    */
   Optional<NodeId> plannedPlatform(String trainName, RouteDefinition route, int stopIndex) {
     if (route == null || routeDefinitions == null) {
       return Optional.empty();
     }
     Optional<UUID> routeId = routeDefinitions.findUuid(route.id());
-    if (routeId.isEmpty()) {
-      return Optional.empty();
-    }
-    // 联挂：要开进搭档停着的那条股道，先于时刻表排定的计划站台
-    try {
-      Optional<NodeId> partner = couplingPartners.platformOf(trainName, routeId.get(), stopIndex);
-      if (partner != null && partner.isPresent()) {
-        return partner;
+    if (routeId.isPresent()) {
+      // 联挂：要开进搭档停着的那条股道，先于信号员与时刻表
+      try {
+        Optional<NodeId> partner = couplingPartners.platformOf(trainName, routeId.get(), stopIndex);
+        if (partner != null && partner.isPresent()) {
+          return partner;
+        }
+      } catch (RuntimeException ex) {
+        debugLogger.accept(
+            "COUPLING_PLATFORM_READ_FAILED train="
+                + trainName
+                + " stopIndex="
+                + stopIndex
+                + " error="
+                + ex);
       }
-    } catch (RuntimeException ex) {
-      debugLogger.accept(
-          "COUPLING_PLATFORM_READ_FAILED train="
-              + trainName
-              + " stopIndex="
-              + stopIndex
-              + " error="
-              + ex);
+    }
+    Optional<NodeId> chosen = signallerPlatforms.chosen(trainName, route, stopIndex);
+    if (chosen.isPresent() || routeId.isEmpty()) {
+      return chosen;
     }
     ScheduledDeparturePlan current = plan;
     Optional<String> planned =
@@ -361,8 +398,10 @@ public final class StationStopCoordinator {
       Instant now) {
     Optional<Instant> heldUntil =
         later(
-            scheduledHoldTarget(trainName, route, routeUuid, currentIndex, nodeId, now),
-            couplingHoldTarget(trainName, now));
+            later(
+                scheduledHoldTarget(trainName, route, routeUuid, currentIndex, nodeId, now),
+                couplingHoldTarget(trainName, now)),
+            signallerHoldTarget(trainName, now));
     String key = holdKey(trainName);
     if (key != null) {
       heldUntil.ifPresentOrElse(
@@ -412,6 +451,19 @@ public final class StationStopCoordinator {
       return couplingHold.apply(trainName).filter(until -> now != null && now.isBefore(until));
     } catch (RuntimeException ex) {
       debugLogger.accept("COUPLING_HOLD_FAILED train=" + trainName + " error=" + ex);
+      return Optional.empty();
+    }
+  }
+
+  /** 信号员扣到几点；判定出错时不扣（按现状放行）。 */
+  private Optional<Instant> signallerHoldTarget(String trainName, Instant now) {
+    try {
+      Optional<Instant> until = signallerHold.apply(trainName);
+      return until != null && until.isPresent() && now != null && now.isBefore(until.get())
+          ? until
+          : Optional.empty();
+    } catch (RuntimeException ex) {
+      debugLogger.accept("SIGNALLER_HOLD_FAILED train=" + trainName + " error=" + ex);
       return Optional.empty();
     }
   }
@@ -807,13 +859,21 @@ public final class StationStopCoordinator {
             : allocator != null
                 ? allocator.preferredPlatform(trainName, route, index)
                 : Optional.empty();
+    // 信号员改选时撤掉了上一次写定的覆盖：以被改掉的那条作为“原来的”，站台变更照常发出。
+    Optional<NodeId> before = previous;
+    if (before.isEmpty() && dynamic) {
+      Optional<NodeId> displaced = signallerPlatforms.takeDisplaced(trainName, route, index);
+      if (displaced.isPresent() && !displaced.get().equals(node)) {
+        before = displaced;
+      }
+    }
     notifyPlatform(
         new PlatformResolution(
             trainName,
             route.id().value(),
             index,
             declared,
-            previous,
+            before,
             node,
             planned,
             dynamic,

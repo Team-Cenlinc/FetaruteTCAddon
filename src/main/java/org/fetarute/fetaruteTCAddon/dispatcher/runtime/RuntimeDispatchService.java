@@ -71,6 +71,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostic
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.MovementAuthorityService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShortestPathDistanceCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.CanonicalForwardPathEvidence;
@@ -138,6 +139,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputClassif
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputType;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalPublicationGate;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.utils.DiagnosticSink;
 import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
@@ -270,6 +272,9 @@ public final class RuntimeDispatchService {
    */
   private final StationStopCoordinator stationStopCoordinator;
 
+  /** 信号员进路许可闸：各放行入口在内核本来会放行时问它；没有接上信号员模块时一律放行。 */
+  private final SignallerGateCoordinator signallerGates;
+
   /** 拆分/联挂：插件自己发起的操作登记，与操作后按现场车身重新认列车的入口。 */
   private final org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime
       couplingRuntime;
@@ -289,6 +294,7 @@ public final class RuntimeDispatchService {
   private final ShortestPathDistanceCache shortestPathDistanceCache;
   private final MovementAuthorityService movementAuthorityService = new MovementAuthorityService();
   private final SmartDispatcherController smartDispatcherController;
+  private final SmartPlannerCycle smartPlanner;
   private final java.util.Set<String> missingSignalWarned = new HashSet<>();
   private final java.util.concurrent.ConcurrentMap<String, WaypointStopState> waypointStopStates =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -416,11 +422,8 @@ public final class RuntimeDispatchService {
   private final java.util.concurrent.ConcurrentMap<String, Instant> queuePositionYieldCooldowns =
       new java.util.concurrent.ConcurrentHashMap<>();
 
-  private final java.util.concurrent.ConcurrentMap<String, SmartDirectionAuditSnapshot>
-      smartDirectionAuditSnapshots = new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, SameDirectionLeaderHold>
       sameDirectionLeaderHolds = new java.util.concurrent.ConcurrentHashMap<>();
-  private volatile String lastSmartDispatchPlannerThrottleKey = "";
   private final java.util.concurrent.ConcurrentMap<String, String> survivorRefreshAfterRemoval =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentMap<String, DepartureGate> departureGates =
@@ -1631,10 +1634,12 @@ public final class RuntimeDispatchService {
             this::resolveTrackedTrainName,
             this::resolveRouteDefinition,
             this::readRouteUuid);
+    this.signallerGates = new SignallerGateCoordinator(this.debugLogger, occupancyManager);
     this.couplingRuntime =
         new org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime(
             this::forgetPhysicalHydration);
     this.smartDispatcherController = new SmartDispatcherController(this.debugLogger);
+    this.smartPlanner = new SmartPlannerCycle(new SmartPlannerHost(), this.debugLogger);
     this.launchAuthorizationService =
         new LaunchAuthorizationService(
             occupancyManager,
@@ -1654,6 +1659,17 @@ public final class RuntimeDispatchService {
     // 计划站台跟着停靠协调器的计划源走，站牌经协调器读暂定站台：方法引用不占本类方法数。
     this.dynamicAllocator.setPreference(this.stationStopCoordinator::plannedPlatform);
     this.stationStopCoordinator.attachPlatforms(this.dynamicAllocator);
+    // 信号员改停股道：撤选台缓存要动有效节点覆盖，唤醒走闸协作者的下一 tick 重评估。
+    this.stationStopCoordinator.attachSignallerPlatforms(
+        new SignallerPlatforms(
+            this.debugLogger,
+            routeDefinitions,
+            this.progressRegistry,
+            railGraphService,
+            occupancyManager,
+            this.dynamicAllocator,
+            effectiveNodeOverrides,
+            this.signallerGates::wake));
     this.dynamicDestinationResolver =
         new DynamicDestinationResolver(dynamicAllocator, railGraphService, this.debugLogger);
     this.shortestPathDistanceCache =
@@ -1726,6 +1742,18 @@ public final class RuntimeDispatchService {
     return stationStopCoordinator;
   }
 
+  /**
+   * 返回信号员进路许可闸的协作者：接闸（{@link SignallerGateCoordinator#setGate}）与发许可后的唤醒都在它上面。
+   *
+   * <p>与 {@link #stationStops()} 同理只留这一个访问器：本类方法数贴着 SpotBugs 单类分析上限。
+   */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP",
+      justification = "故意交出协作者本体：主类要接闸，车库出车与健康层要问同一个闸；不能为此再摊 setter。")
+  public SignallerGateCoordinator signallerGates() {
+    return signallerGates;
+  }
+
   /** 返回拆分/联挂协作者：插件自己发起的操作登记，与操作后按现场车身重新认列车。 */
   public org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime coupling() {
     return couplingRuntime;
@@ -1757,6 +1785,8 @@ public final class RuntimeDispatchService {
             : trainName -> {
               throw new IllegalStateException("signal-reevaluation-requester-not-configured");
             };
+    // 信号员发许可、改停股道后的唤醒走同一个下一 tick 入口；撤销时闸协作者退回不唤醒，不沿用上面的失效关闭占位。
+    signallerGates.setWakeRequester(requester);
   }
 
   /**
@@ -2033,50 +2063,52 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 构建并输出 Smart Dispatcher 全局快照。
+   * 构建并输出 Smart Dispatcher 全局快照，再跑一轮等待图规划。
    *
    * <p>该快照在每轮巡检开始时生成，只做全局状态归纳与 trace，不直接写 destination、占用或 TrainCarts 控车命令。 后续每列车局部 tick
-   * 会继续把同一轮的风险与决策写入更细的 trace。
+   * 会继续把同一轮的风险与决策写入更细的 trace。全局归纳只为 trace 服务，调试输出关闭时不做。
+   *
+   * <p>规划的采集、提交与回收见 {@link SmartPlannerCycle}。
    *
    * @param activeTrainNames 本轮巡检确认仍存在的 FTA 逻辑列车名
    * @param now 快照时间
    */
   public void traceSmartDispatchGlobalSnapshot(Set<String> activeTrainNames, Instant now) {
+    Instant capturedAt = now == null ? clockNow() : now;
     Set<String> active = activeTrainNames == null ? Set.of() : Set.copyOf(activeTrainNames);
     Map<String, RouteProgressRegistry.RouteProgressEntry> progress = progressRegistry.snapshot();
-    List<String> trainIds = new ArrayList<>();
-    trainIds.addAll(active);
-    for (String trainName : progress.keySet()) {
-      if (trainName != null && !trainName.isBlank() && !trainIds.contains(trainName)) {
-        trainIds.add(trainName);
-      }
-    }
-    int queueCount =
-        occupancyManager instanceof OccupancyQueueSupport queueSupport
-            ? queueSupport.snapshotQueues().size()
-            : 0;
     List<OccupancyClaim> liveClaims =
         occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
-    int claimCount = liveClaims.size();
-    SmartDispatcherController.GlobalRailwayStateSnapshot snapshot =
-        new SmartDispatcherController.GlobalRailwayStateSnapshot(
-            now == null ? clockNow() : now,
-            trainIds.size(),
-            active.size(),
-            progress.size(),
-            claimCount,
-            queueCount,
-            blockerSnapshots.size(),
-            movementAuthorizationTokens.size(),
-            movementInhibitors.size(),
-            occupancyVersion(),
-            progressRegistry.version(),
-            0,
-            0,
-            trainIds);
-    smartDispatcherController.traceGlobalSnapshot(snapshot);
-    traceBlockingStateSnapshot(progress, liveClaims, now == null ? clockNow() : now);
-    traceSmartMinimalForwardPlanner(active, progress, now == null ? clockNow() : now, liveClaims);
+    if (DiagnosticSink.enabled(debugLogger)) {
+      Set<String> trainIds = new LinkedHashSet<>(active);
+      for (String trainName : progress.keySet()) {
+        if (trainName != null && !trainName.isBlank()) {
+          trainIds.add(trainName);
+        }
+      }
+      int queueCount =
+          occupancyManager instanceof OccupancyQueueSupport queueSupport
+              ? queueSupport.snapshotQueues().size()
+              : 0;
+      smartDispatcherController.traceGlobalSnapshot(
+          new SmartDispatcherController.GlobalRailwayStateSnapshot(
+              capturedAt,
+              trainIds.size(),
+              active.size(),
+              progress.size(),
+              liveClaims.size(),
+              queueCount,
+              blockerSnapshots.size(),
+              movementAuthorizationTokens.size(),
+              movementInhibitors.size(),
+              occupancyVersion(),
+              progressRegistry.version(),
+              0,
+              0,
+              List.copyOf(trainIds)));
+    }
+    traceBlockingStateSnapshot(progress, liveClaims, capturedAt);
+    traceSmartMinimalForwardPlanner(active, progress, capturedAt, liveClaims);
   }
 
   /**
@@ -2214,144 +2246,535 @@ public final class RuntimeDispatchService {
         + blockers;
   }
 
+  /** 跑一轮等待图规划；采集、提交、回收与执行见 {@link SmartPlannerCycle#runRound}。 */
   private void traceSmartMinimalForwardPlanner(
       Set<String> activeTrainNames,
       Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
       Instant now,
       List<OccupancyClaim> liveClaims) {
-    ConfigManager.SmartDispatcherPlannerSettings config = smartDispatcherPlannerSettings();
-    if (!config.enabled()
-        || config.mode() == SmartDispatcherPlannerMode.OFF
-        || smartDispatcherMode() == SmartDispatcherMode.OFF) {
-      return;
-    }
-    observeSmartUnlockReservations(now);
-    Map<ProtectiveRetainClaimKey, List<String>> protectiveRetainClaims =
-        indexProtectiveRetainClaims(liveClaims);
-    SmartWaitForPlanner.PlannerInput input =
-        new SmartWaitForPlanner.PlannerInput(
-            now,
-            new SmartWaitForPlanner.PlannerSettings(
-                config.enabled(),
-                config.mode(),
-                config.maxReservationResources(),
-                config.reservationTtlTicks(),
-                config.blockerSnapshotTtlMs(),
-                config.requireSameDirection(),
-                config.allowReverse(),
-                config.allowTurnbackBeforeBoundary(),
-                config.oneActiveReservationPerCycle()),
-            smartPlannerInputEdges(
-                progress, activeTrainNames, now, config.blockerSnapshotTtlMs(), liveClaims),
-            smartPlannerTrainStates(
-                progress,
-                activeTrainNames,
-                now,
-                config.blockerSnapshotTtlMs(),
-                liveClaims,
-                protectiveRetainClaims),
-            smartUnlockReservationsByCycle.keySet(),
-            smartUnlockReservationsByTrain.keySet());
-    SmartWaitForPlanner.PlanResult result =
-        smartDispatcherController.planMinimalForwardUnlock(input);
-    rememberSmartDirectionAudit(result, now);
-    if (result.traceLines().isEmpty()) {
-      return;
-    }
-    boolean traceUnchanged = result.throttleKey().equals(lastSmartDispatchPlannerThrottleKey);
-    if (traceUnchanged) {
-      result
-          .selectedPlan()
-          .ifPresent(
-              plan -> {
-                traceSmartUnlockPlanApply(
-                    plan, null, "selected", "unchanged-suppressed", true, "-");
-                traceMutualConflictOwnerSet(input, plan, true, liveClaims);
-              });
-      debugLogger.accept(
-          "SMART_DISPATCH_PLAN_UNCHANGED_SUPPRESSED graphHash="
-              + result.graphHash()
-              + " selectedPlanHash="
-              + result.selectedPlanHash()
-              + " throttleKey="
-              + result.throttleKey());
-    } else {
-      lastSmartDispatchPlannerThrottleKey = result.throttleKey();
-      smartDispatcherController.traceMinimalForwardPlan(result);
-      result
-          .selectedPlan()
-          .ifPresent(
-              plan -> {
-                traceSmartUnlockPlanApply(plan, null, "selected", "selected", false, "-");
-                traceMutualConflictOwnerSet(input, plan, false, liveClaims);
-              });
-    }
-    // throttle 只控制重复 trace；执行资格必须每轮复核，否则 reservation 回滚后的 cooldown
-    // 到期也会因 blocker graph 未变化而永久失去重试机会。
-    if (config.mode() == SmartDispatcherPlannerMode.ENFORCE_MINIMAL_FORWARD) {
-      result
-          .selectedPlan()
-          .ifPresent(
-              plan -> {
-                DispatchAction action = smartPlannerAction(plan);
-                String skipReason =
-                    smartDispatchExecutorSkipReason(plan, config, action, now, liveClaims);
-                if (!"-".equals(skipReason)) {
-                  traceSmartUnlockReservationWouldCreate(plan, action, skipReason);
-                  traceSmartDispatchExecutorSkipped(plan, skipReason);
-                  return;
-                }
-                if (isHeadOnYieldPlan(plan)) {
-                  executeSmartHeadOnYield(plan, config, now);
-                } else {
-                  executeSmartUnlockReservation(plan, config, now, liveClaims);
-                }
-              });
-    }
+    smartPlanner.runRound(activeTrainNames, progress, now, liveClaims);
   }
 
-  private void rememberSmartDirectionAudit(SmartWaitForPlanner.PlanResult result, Instant now) {
-    if (result == null || result.candidates().isEmpty()) {
-      return;
-    }
-    Instant capturedAt = now == null ? clockNow() : now;
-    for (SmartWaitForPlanner.UnlockCandidate candidate : result.candidates()) {
-      if (candidate == null || !smartDirectionAuditReason(candidate.rejectReason())) {
-        continue;
-      }
-      smartDirectionAuditSnapshots.put(
-          normalizeTrainKey(candidate.train()),
-          new SmartDirectionAuditSnapshot(candidate.train(), candidate.rejectReason(), capturedAt));
-    }
+  /**
+   * Smart 等待图规划的每轮编排。
+   *
+   * <p>默认在调用线程直接规划；插件启用后可调 {@link SmartPlannerCycle#useBackgroundExecutor()} 把规划挪到后台，停用时调 {@link
+   * SmartPlannerCycle#shutdown()}。与 {@link #stationStops()} 同理只留这一个访问器。
+   */
+  @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "故意交出协作者本体：主类要切执行器、停用时关线程；不能为此再摊方法。")
+  public SmartPlannerCycle smartPlanner() {
+    return smartPlanner;
   }
 
   /** 返回列车最近一次 planner 方向审计原因；过期或不存在时为空。 */
   public Optional<String> recentDirectionAuditReason(String trainName, Duration ttl) {
-    if (trainName == null || trainName.isBlank()) {
-      return Optional.empty();
-    }
-    Duration effectiveTtl = ttl == null || ttl.isNegative() ? Duration.ZERO : ttl;
-    String key = normalizeTrainKey(trainName);
-    SmartDirectionAuditSnapshot snapshot = smartDirectionAuditSnapshots.get(key);
-    if (snapshot == null) {
-      return Optional.empty();
-    }
-    Instant now = clockNow();
-    if (!effectiveTtl.isZero() && snapshot.capturedAt().plus(effectiveTtl).isBefore(now)) {
-      smartDirectionAuditSnapshots.remove(key, snapshot);
-      return Optional.empty();
-    }
-    return Optional.of(snapshot.reason());
+    return smartPlanner.recentDirectionAuditReason(trainName, ttl, clockNow());
   }
 
-  private static boolean smartDirectionAuditReason(String reason) {
-    if (reason == null || reason.isBlank()) {
-      return false;
+  /**
+   * {@link SmartPlannerCycle} 读写调度现场的入口。
+   *
+   * <p>写成嵌套类，是为了把规划相关的采集与 trace 从本类的方法表里挪出去（见 {@code docs/dev/runtime-dispatch.md}「类体积约束」），
+   * 同时照旧直接访问本类的私有状态。除 {@link #plan} 外全部只在主线程调用；{@link #plan} 只读不可变的规划输入。
+   */
+  private final class SmartPlannerHost implements SmartPlannerCycle.Host {
+
+    @Override
+    public ConfigManager.SmartDispatcherPlannerSettings plannerSettings() {
+      return smartDispatcherPlannerSettings();
     }
-    String normalized = reason.trim().toUpperCase(Locale.ROOT);
-    return normalized.equals("INSUFFICIENT_DIRECTION_EVIDENCE")
-        || normalized.equals("NEED_DIRECTION_AUDIT")
-        || normalized.equals("WOULD_CREATE_OPPOSITE_DIRECTION_CLAIM");
+
+    @Override
+    public boolean dispatcherOff() {
+      return smartDispatcherMode() == SmartDispatcherMode.OFF;
+    }
+
+    @Override
+    public void observeReservations(Instant now) {
+      observeSmartUnlockReservations(now);
+    }
+
+    @Override
+    public List<OccupancyClaim> snapshotClaims() {
+      return occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
+    }
+
+    @Override
+    public List<SmartWaitForPlanner.InputEdge> inputEdges(
+        Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+        Set<String> activeTrainNames,
+        Instant now,
+        long blockerSnapshotTtlMs,
+        List<OccupancyClaim> liveClaims) {
+      return smartPlannerInputEdges(
+          progress, activeTrainNames, now, blockerSnapshotTtlMs, liveClaims);
+    }
+
+    /**
+     * 为等待边上的车采集规划状态。
+     *
+     * <p>候选名单与采集方式不变（存活车、进度表、blocker 快照里的车，逐个解析运行时名），只是不在边上的车不再采集：
+     * 规划器只按边上的车名查表。解析仍对每个候选各做一次，因为状态表的键是解析名，要靠它判断候选与边是否相关， 见 {@link
+     * SmartPlannerCycle#plannerRelevantTrains}。冲突 claim 先按车归组，不再每车扫一遍账本。
+     */
+    @Override
+    public Map<String, SmartWaitForPlanner.TrainState> trainStates(
+        Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+        Set<String> activeTrainNames,
+        Instant now,
+        long movementPlanTtlMs,
+        List<OccupancyClaim> liveClaims,
+        List<SmartWaitForPlanner.InputEdge> edges) {
+      Set<String> names = new LinkedHashSet<>();
+      if (activeTrainNames != null) {
+        names.addAll(activeTrainNames);
+      }
+      if (progress != null) {
+        names.addAll(progress.keySet());
+      }
+      for (BlockerSnapshot snapshot : blockerSnapshots.values()) {
+        if (snapshot == null) {
+          continue;
+        }
+        for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
+          if (blocker != null && !blocker.trainName().isBlank()) {
+            names.add(blocker.trainName());
+          }
+        }
+      }
+      List<String> candidates = new ArrayList<>(names.size());
+      List<String> resolvedNames = new ArrayList<>(names.size());
+      List<RuntimeTrainResolution> resolutions = new ArrayList<>(names.size());
+      for (String trainName : names) {
+        if (trainName == null || trainName.isBlank()) {
+          continue;
+        }
+        RuntimeTrainResolution resolution =
+            resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.GET_STATE);
+        candidates.add(trainName);
+        resolutions.add(resolution);
+        resolvedNames.add(resolution.resolved() ? resolution.resolvedName() : trainName);
+      }
+      boolean[] relevant =
+          SmartPlannerCycle.plannerRelevantTrains(candidates, resolvedNames, edges);
+      Map<ProtectiveRetainClaimKey, List<String>> protectiveRetainClaims =
+          indexProtectiveRetainClaims(liveClaims);
+      Map<String, List<OccupancyClaim>> conflictClaims = conflictClaimsByTrain(liveClaims);
+      Map<String, SmartWaitForPlanner.TrainState> states = new LinkedHashMap<>();
+      for (int i = 0; i < candidates.size(); i++) {
+        if (!relevant[i]) {
+          continue;
+        }
+        String trainName = candidates.get(i);
+        PlannerForwardPathResolution pathResolution =
+            smartPlannerForwardPathEvidence(
+                trainName, now, movementPlanTtlMs, protectiveRetainClaims);
+        SmartRecoveryInput input =
+            smartRecoveryInput(
+                trainName,
+                Duration.ZERO,
+                SignalAspect.STOP,
+                ownConflictClaims(conflictClaims, trainName, resolvedNames.get(i)),
+                resolutions.get(i));
+        Optional<CanonicalForwardPathEvidence> forwardPathEvidence = pathResolution.evidence();
+        // 方向只在前向证明成立时才取——那份证明已经过 TTL 与进度对齐校验。
+        CorridorDirection inferredDirection =
+            smartPlannerForwardDirection(input.train(), forwardPathEvidence.isPresent());
+        String routeId =
+            forwardPathEvidence
+                .map(CanonicalForwardPathEvidence::routeId)
+                .filter(value -> !value.equals("-"))
+                .orElse(input.routeId());
+        int currentIndex =
+            forwardPathEvidence
+                .map(CanonicalForwardPathEvidence::routeIndex)
+                .orElse(input.currentIndex());
+        String currentNode =
+            forwardPathEvidence
+                .map(CanonicalForwardPathEvidence::fromNode)
+                .orElseGet(() -> nodeText(input.currentNode()));
+        String nextNode =
+            forwardPathEvidence
+                .map(CanonicalForwardPathEvidence::toNode)
+                .orElseGet(() -> nodeText(input.nextNode()));
+        String lastPassedGraphNode =
+            forwardPathEvidence
+                .map(CanonicalForwardPathEvidence::lastPassedGraphNode)
+                .filter(value -> !value.equals("-"))
+                .orElse(input.lastPassedGraphNode());
+        states.put(
+            input.train(),
+            new SmartWaitForPlanner.TrainState(
+                input.train(),
+                routeId,
+                currentIndex,
+                currentNode,
+                nextNode,
+                lastPassedGraphNode,
+                inferredDirection,
+                forwardPathEvidence.isPresent()
+                    ? forwardPathEvidence.orElseThrow().evidenceKind()
+                    : inferredDirection == CorridorDirection.UNKNOWN
+                        ? "UNKNOWN"
+                        : "RUNTIME_ROUTE_CONTEXT",
+                forwardPathEvidence.isPresent()
+                    ? "-"
+                    : inferredDirection == CorridorDirection.UNKNOWN
+                        ? smartPlannerDirectionFailureReason(input, pathResolution.failureReason())
+                        : "-",
+                input.stuckDurationSeconds(),
+                input.signal() == SignalAspect.STOP,
+                false,
+                false,
+                false,
+                input.oppositeSingleConflictPresent(),
+                false,
+                input.movementTokenState().name(),
+                forwardPathEvidence));
+      }
+      return Map.copyOf(states);
+    }
+
+    /** 冲突 claim 按规范车名归组，保持账本顺序；只收 {@code currentConflictClaimKeys} 会看的那一类。 */
+    private Map<String, List<OccupancyClaim>> conflictClaimsByTrain(
+        Collection<OccupancyClaim> liveClaims) {
+      Map<String, List<OccupancyClaim>> byTrain = new HashMap<>();
+      if (liveClaims == null) {
+        return byTrain;
+      }
+      for (OccupancyClaim claim : liveClaims) {
+        if (claim == null
+            || claim.trainName() == null
+            || claim.resource() == null
+            || claim.resource().kind() != ResourceKind.CONFLICT) {
+          continue;
+        }
+        String key = normalizeTrainKey(claim.trainName());
+        if (!key.isEmpty()) {
+          byTrain.computeIfAbsent(key, unused -> new ArrayList<>()).add(claim);
+        }
+      }
+      return byTrain;
+    }
+
+    /**
+     * 一辆车按解析名与原名两个规范名持有的冲突 claim。
+     *
+     * <p>{@code currentConflictClaimKeys} 只按规范名挑 claim，给它这份子集与给全账本得出的结果相同。
+     */
+    private List<OccupancyClaim> ownConflictClaims(
+        Map<String, List<OccupancyClaim>> conflictClaims, String trainName, String resolvedName) {
+      String resolvedKey = normalizeTrainKey(resolvedName);
+      String ownKey = normalizeTrainKey(trainName);
+      List<OccupancyClaim> claims =
+          new ArrayList<>(conflictClaims.getOrDefault(resolvedKey, List.of()));
+      if (!ownKey.equals(resolvedKey)) {
+        claims.addAll(conflictClaims.getOrDefault(ownKey, List.of()));
+      }
+      return claims;
+    }
+
+    @Override
+    public Set<String> activeCycleReservations() {
+      return smartUnlockReservationsByCycle.keySet();
+    }
+
+    @Override
+    public Set<String> activeReservationTrains() {
+      return smartUnlockReservationsByTrain.keySet();
+    }
+
+    @Override
+    public long occupancyVersion() {
+      return RuntimeDispatchService.this.occupancyVersion();
+    }
+
+    @Override
+    public long progressVersion() {
+      return progressRegistry.version();
+    }
+
+    @Override
+    public String progressWindow(String trainName) {
+      return progressRegistry
+          .get(trainName)
+          .map(
+              entry ->
+                  entry.routeId().value()
+                      + "|"
+                      + entry.currentIndex()
+                      + "|"
+                      + entry.lastPassedGraphNode().map(NodeId::value).orElse("-"))
+          .orElse("-");
+    }
+
+    @Override
+    public SmartWaitForPlanner.PlanResult plan(SmartWaitForPlanner.PlannerInput input) {
+      return smartDispatcherController.planMinimalForwardUnlock(input);
+    }
+
+    @Override
+    public void tracePlan(SmartWaitForPlanner.PlanResult result) {
+      smartDispatcherController.traceMinimalForwardPlan(result);
+    }
+
+    @Override
+    public void traceSelected(
+        SmartWaitForPlanner.UnlockCandidate plan,
+        SmartWaitForPlanner.PlannerInput input,
+        boolean suppressedAsUnchanged,
+        List<OccupancyClaim> liveClaims) {
+      if (!DiagnosticSink.enabled(debugLogger)) {
+        return;
+      }
+      traceSmartUnlockPlanApply(
+          plan,
+          null,
+          "selected",
+          suppressedAsUnchanged ? "unchanged-suppressed" : "selected",
+          suppressedAsUnchanged,
+          "-");
+      traceMutualConflictOwnerSet(input, plan, suppressedAsUnchanged, liveClaims);
+    }
+
+    @Override
+    public String executorSkipReason(
+        SmartWaitForPlanner.UnlockCandidate plan,
+        ConfigManager.SmartDispatcherPlannerSettings config,
+        Instant now,
+        List<OccupancyClaim> liveClaims) {
+      return smartDispatchExecutorSkipReason(
+          plan, config, smartPlannerAction(plan), now, liveClaims);
+    }
+
+    @Override
+    public void traceExecutorSkipped(SmartWaitForPlanner.UnlockCandidate plan, String reason) {
+      traceSmartUnlockReservationWouldCreate(plan, smartPlannerAction(plan), reason);
+      traceSmartDispatchExecutorSkipped(plan, reason);
+    }
+
+    @Override
+    public void execute(
+        SmartWaitForPlanner.UnlockCandidate plan,
+        ConfigManager.SmartDispatcherPlannerSettings config,
+        Instant now,
+        List<OccupancyClaim> liveClaims) {
+      if (isHeadOnYieldPlan(plan)) {
+        executeSmartHeadOnYield(plan, config, now);
+      } else {
+        executeSmartUnlockReservation(plan, config, now, liveClaims);
+      }
+    }
+
+    private void traceMutualConflictOwnerSet(
+        SmartWaitForPlanner.PlannerInput input,
+        SmartWaitForPlanner.UnlockCandidate selectedPlan,
+        boolean suppressedAsUnchanged,
+        Collection<OccupancyClaim> liveClaims) {
+      if (input == null || selectedPlan == null) {
+        return;
+      }
+      // owner 全部来自等待边；先按车把车体/保持 claim 归好，免得每个 owner 各扫一遍账本。
+      Map<String, List<OccupancyClaim>> footprintClaims = footprintClaimsByTrain(liveClaims);
+      Set<String> resources = new LinkedHashSet<>();
+      resources.addAll(selectedPlan.resources());
+      resources.addAll(selectedPlan.releaseResources());
+      for (String resource : resources) {
+        if (resource == null || resource.isBlank() || "-".equals(resource)) {
+          continue;
+        }
+        List<SmartWaitForPlanner.InputEdge> edges =
+            input.edges().stream().filter(edge -> resource.equals(edge.resource())).toList();
+        if (edges.isEmpty()) {
+          continue;
+        }
+        Set<String> owners = new LinkedHashSet<>();
+        Map<String, String> ownerRoles = new LinkedHashMap<>();
+        Map<String, String> ownerDirections = new LinkedHashMap<>();
+        Map<String, String> ownerRequestInputTypes = new LinkedHashMap<>();
+        Map<String, String> ownerRouteIndexes = new LinkedHashMap<>();
+        Map<String, String> ownerPriorities = new LinkedHashMap<>();
+        Map<String, String> ownerPhysicalFootprints = new LinkedHashMap<>();
+        Map<String, String> ownerReservedAuthorities = new LinkedHashMap<>();
+        for (SmartWaitForPlanner.InputEdge edge : edges) {
+          addPlannerOwner(
+              owners,
+              ownerRoles,
+              ownerDirections,
+              ownerRequestInputTypes,
+              ownerRouteIndexes,
+              ownerPriorities,
+              ownerPhysicalFootprints,
+              ownerReservedAuthorities,
+              input,
+              edge.blockerTrain(),
+              edge.role(),
+              edge.direction(),
+              edge.intent(),
+              footprintClaims);
+          addPlannerOwner(
+              owners,
+              ownerRoles,
+              ownerDirections,
+              ownerRequestInputTypes,
+              ownerRouteIndexes,
+              ownerPriorities,
+              ownerPhysicalFootprints,
+              ownerReservedAuthorities,
+              input,
+              edge.blockedTrain(),
+              "REQUESTER",
+              edge.direction(),
+              edge.source(),
+              footprintClaims);
+        }
+        Set<String> nonSelectedOwners = new LinkedHashSet<>(owners);
+        nonSelectedOwners.removeIf(
+            owner -> TrainNameNormalizer.sameLogicalTrain(owner, selectedPlan.train()));
+        debugLogger.accept(
+            "SMART_MUTUAL_CONFLICT_OWNER_SET cycleId="
+                + safeTraceValue(selectedPlan.cycleId())
+                + " resource="
+                + safeTraceValue(resource)
+                + " owners="
+                + owners
+                + " ownerRoles="
+                + ownerRoles
+                + " ownerDirections="
+                + ownerDirections
+                + " ownerRequestInputTypes="
+                + ownerRequestInputTypes
+                + " ownerRouteIndexes="
+                + ownerRouteIndexes
+                + " ownerPriorities="
+                + ownerPriorities
+                + " ownerPhysicalFootprints="
+                + ownerPhysicalFootprints
+                + " ownerReservedAuthorities="
+                + ownerReservedAuthorities
+                + " selectedOwner="
+                + safeTraceValue(selectedPlan.train())
+                + " nonSelectedOwners="
+                + nonSelectedOwners
+                + " tieBreakReason="
+                + "score:"
+                + selectedPlan.score()
+                + ":"
+                + safeTraceValue(selectedPlan.recommendation())
+                + " selectedPlanKind="
+                + selectedPlan.kind()
+                + " canDowngradeNonSelectedReservationDryRun=unknown"
+                + " noDowngradeReason=diagnostic-only"
+                + " suppressedAsUnchanged="
+                + suppressedAsUnchanged);
+      }
+    }
+
+    private void addPlannerOwner(
+        Set<String> owners,
+        Map<String, String> ownerRoles,
+        Map<String, String> ownerDirections,
+        Map<String, String> ownerRequestInputTypes,
+        Map<String, String> ownerRouteIndexes,
+        Map<String, String> ownerPriorities,
+        Map<String, String> ownerPhysicalFootprints,
+        Map<String, String> ownerReservedAuthorities,
+        SmartWaitForPlanner.PlannerInput input,
+        String owner,
+        String role,
+        CorridorDirection direction,
+        String requestInputType,
+        Map<String, List<OccupancyClaim>> footprintClaims) {
+      String safeOwner = safeTraceValue(owner);
+      if ("-".equals(safeOwner)) {
+        return;
+      }
+      owners.add(safeOwner);
+      SmartWaitForPlanner.TrainState state = input.trainStates().get(safeOwner);
+      ownerRoles.put(safeOwner, safeTraceValue(role));
+      ownerDirections.put(
+          safeOwner, String.valueOf(direction == null ? CorridorDirection.UNKNOWN : direction));
+      ownerRequestInputTypes.put(safeOwner, safeTraceValue(requestInputType));
+      ownerRouteIndexes.put(safeOwner, state == null ? "-" : String.valueOf(state.currentIndex()));
+      ownerPriorities.put(safeOwner, plannerOwnerPriorityEvidence(safeOwner));
+      ownerPhysicalFootprints.put(
+          safeOwner, plannerOwnerPhysicalFootprintEvidence(safeOwner, state, footprintClaims));
+      ownerReservedAuthorities.put(safeOwner, plannerOwnerReservedAuthorityEvidence(safeOwner));
+    }
+
+    /** 返回 mutual-owner 仲裁时实际参与 Gate Queue 的最近请求优先级证据。 */
+    private String plannerOwnerPriorityEvidence(String owner) {
+      BlockerSnapshot snapshot = blockerSnapshots.get(normalizeTrainKey(owner));
+      if (snapshot == null || snapshot.blockedRequest().isEmpty()) {
+        return "unavailable:no-live-request";
+      }
+      OccupancyRequest request = snapshot.blockedRequest().orElseThrow();
+      String source =
+          request
+              .directedContext()
+              .map(DirectedTraversalContext::source)
+              .filter(value -> value != null && !value.isBlank())
+              .orElse(request.purpose().name());
+      return request.priority() + "@" + safeTraceValue(source);
+    }
+
+    /** 返回仲裁时当前实体位置与物理/保持 claim 的只读证据。 */
+    private String plannerOwnerPhysicalFootprintEvidence(
+        String owner,
+        SmartWaitForPlanner.TrainState state,
+        Map<String, List<OccupancyClaim>> footprintClaims) {
+      List<String> claims = new ArrayList<>();
+      for (OccupancyClaim claim :
+          footprintClaims.getOrDefault(TrainNameNormalizer.normalizeKey(owner), List.of())) {
+        claims.add(claim.resource() + "@" + claim.role());
+      }
+      claims.sort(String.CASE_INSENSITIVE_ORDER);
+      String currentNode = state == null ? "-" : safeTraceValue(state.currentNode());
+      return "currentNode=" + currentNode + ";claims=" + claims;
+    }
+
+    /** 车体与保持 claim 按规范车名归组，保持账本顺序。 */
+    private Map<String, List<OccupancyClaim>> footprintClaimsByTrain(
+        Collection<OccupancyClaim> liveClaims) {
+      Map<String, List<OccupancyClaim>> byTrain = new HashMap<>();
+      if (liveClaims == null) {
+        return byTrain;
+      }
+      for (OccupancyClaim claim : liveClaims) {
+        if (claim == null
+            || (claim.role() != ClaimRole.PHYSICAL_FOOTPRINT
+                && claim.role() != ClaimRole.HOLD_ONLY)) {
+          continue;
+        }
+        String key = TrainNameNormalizer.normalizeKey(claim.trainName());
+        if (!key.isEmpty()) {
+          byTrain.computeIfAbsent(key, unused -> new ArrayList<>()).add(claim);
+        }
+      }
+      return byTrain;
+    }
+
+    /** 返回仲裁时已签发 movement token 的实际硬授权资源；无 token 时显式记录缺失原因。 */
+    private String plannerOwnerReservedAuthorityEvidence(String owner) {
+      MovementAuthorizationToken token = movementToken(owner).orElse(null);
+      if (token == null) {
+        return "active=false;claimVersion=-;resources=[];reason=no-token";
+      }
+      List<String> resources =
+          token.resources().stream()
+              .filter(Objects::nonNull)
+              .map(Object::toString)
+              .sorted()
+              .toList();
+      return "active="
+          + token.active()
+          + ";claimVersion="
+          + token.claimVersion()
+          + ";aspect="
+          + token.aspect()
+          + ";resources="
+          + resources;
+    }
   }
 
   private ConfigManager.SmartDispatcherPlannerSettings smartDispatcherPlannerSettings() {
@@ -2378,7 +2801,23 @@ public final class RuntimeDispatchService {
       Instant now,
       long topologyTtlMs,
       List<OccupancyClaim> liveClaims) {
+    if (blockerSnapshots.isEmpty()) {
+      // 没有阻塞快照就没有边，也就不必为现场复核去扫账本。
+      return List.of();
+    }
     List<SmartWaitForPlanner.InputEdge> edges = new ArrayList<>();
+    // 只有快照里出现过的挡车方会被复核，其余车的 claim 不必进索引。
+    Set<String> blockerKeys = new HashSet<>();
+    for (BlockerSnapshot snapshot : blockerSnapshots.values()) {
+      if (snapshot == null) {
+        continue;
+      }
+      for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
+        if (blocker != null) {
+          blockerKeys.add(TrainNameNormalizer.normalizeKey(blocker.trainName()));
+        }
+      }
+    }
     // 现场持有索引：(列车规范名, 资源) → 该 claim 真的会挡人。每轮只建一次。
     //
     // 用它把“这条边还成不成立”从“多久没重新采样”里分出来——两者不是同一个量：
@@ -2390,7 +2829,10 @@ public final class RuntimeDispatchService {
           || !OccupancyClaimEvidence.obstructs(claim.role(), claim.resource())) {
         continue;
       }
-      liveHolds.add(TrainNameNormalizer.normalizeKey(claim.trainName()) + "|" + claim.resource());
+      String holderKey = TrainNameNormalizer.normalizeKey(claim.trainName());
+      if (blockerKeys.contains(holderKey)) {
+        liveHolds.add(holderKey + "|" + claim.resource());
+      }
     }
     for (Map.Entry<String, BlockerSnapshot> entry : blockerSnapshots.entrySet()) {
       BlockerSnapshot snapshot = entry.getValue();
@@ -2476,99 +2918,6 @@ public final class RuntimeDispatchService {
     long ageMs =
         Math.max(0L, Duration.between(snapshot.movementPlanSampledAt(), evaluatedAt).toMillis());
     return ageMs <= Math.max(1L, topologyTtlMs);
-  }
-
-  private Map<String, SmartWaitForPlanner.TrainState> smartPlannerTrainStates(
-      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
-      Set<String> activeTrainNames,
-      Instant now,
-      long movementPlanTtlMs,
-      List<OccupancyClaim> liveClaims,
-      Map<ProtectiveRetainClaimKey, List<String>> protectiveRetainClaims) {
-    Set<String> names = new LinkedHashSet<>();
-    if (activeTrainNames != null) {
-      names.addAll(activeTrainNames);
-    }
-    if (progress != null) {
-      names.addAll(progress.keySet());
-    }
-    for (BlockerSnapshot snapshot : blockerSnapshots.values()) {
-      if (snapshot == null) {
-        continue;
-      }
-      for (DeadlockBlockerInfo blocker : snapshot.blockers()) {
-        if (blocker != null && !blocker.trainName().isBlank()) {
-          names.add(blocker.trainName());
-        }
-      }
-    }
-    Map<String, SmartWaitForPlanner.TrainState> states = new LinkedHashMap<>();
-    for (String trainName : names) {
-      if (trainName == null || trainName.isBlank()) {
-        continue;
-      }
-      PlannerForwardPathResolution pathResolution =
-          smartPlannerForwardPathEvidence(
-              trainName, now, movementPlanTtlMs, protectiveRetainClaims);
-      SmartRecoveryInput input =
-          smartRecoveryInput(trainName, Duration.ZERO, SignalAspect.STOP, liveClaims);
-      Optional<CanonicalForwardPathEvidence> forwardPathEvidence = pathResolution.evidence();
-      // 方向只在前向证明成立时才取——那份证明已经过 TTL 与进度对齐校验。
-      CorridorDirection inferredDirection =
-          smartPlannerForwardDirection(input.train(), forwardPathEvidence.isPresent());
-      String routeId =
-          forwardPathEvidence
-              .map(CanonicalForwardPathEvidence::routeId)
-              .filter(value -> !value.equals("-"))
-              .orElse(input.routeId());
-      int currentIndex =
-          forwardPathEvidence
-              .map(CanonicalForwardPathEvidence::routeIndex)
-              .orElse(input.currentIndex());
-      String currentNode =
-          forwardPathEvidence
-              .map(CanonicalForwardPathEvidence::fromNode)
-              .orElseGet(() -> nodeText(input.currentNode()));
-      String nextNode =
-          forwardPathEvidence
-              .map(CanonicalForwardPathEvidence::toNode)
-              .orElseGet(() -> nodeText(input.nextNode()));
-      String lastPassedGraphNode =
-          forwardPathEvidence
-              .map(CanonicalForwardPathEvidence::lastPassedGraphNode)
-              .filter(value -> !value.equals("-"))
-              .orElse(input.lastPassedGraphNode());
-      states.put(
-          input.train(),
-          new SmartWaitForPlanner.TrainState(
-              input.train(),
-              routeId,
-              currentIndex,
-              currentNode,
-              nextNode,
-              lastPassedGraphNode,
-              inferredDirection,
-              forwardPathEvidence.isPresent()
-                  ? forwardPathEvidence.orElseThrow().evidenceKind()
-                  : inferredDirection == CorridorDirection.UNKNOWN
-                      ? "UNKNOWN"
-                      : "RUNTIME_ROUTE_CONTEXT",
-              forwardPathEvidence.isPresent()
-                  ? "-"
-                  : inferredDirection == CorridorDirection.UNKNOWN
-                      ? smartPlannerDirectionFailureReason(input, pathResolution.failureReason())
-                      : "-",
-              input.stuckDurationSeconds(),
-              input.signal() == SignalAspect.STOP,
-              false,
-              false,
-              false,
-              input.oppositeSingleConflictPresent(),
-              false,
-              input.movementTokenState().name(),
-              forwardPathEvidence));
-    }
-    return Map.copyOf(states);
   }
 
   /**
@@ -3309,194 +3658,6 @@ public final class RuntimeDispatchService {
             + suppressedAsUnchanged
             + " failureReason="
             + safeTraceValue(failureReason));
-  }
-
-  private void traceMutualConflictOwnerSet(
-      SmartWaitForPlanner.PlannerInput input,
-      SmartWaitForPlanner.UnlockCandidate selectedPlan,
-      boolean suppressedAsUnchanged,
-      Collection<OccupancyClaim> liveClaims) {
-    if (input == null || selectedPlan == null) {
-      return;
-    }
-    Set<String> resources = new LinkedHashSet<>();
-    resources.addAll(selectedPlan.resources());
-    resources.addAll(selectedPlan.releaseResources());
-    for (String resource : resources) {
-      if (resource == null || resource.isBlank() || "-".equals(resource)) {
-        continue;
-      }
-      List<SmartWaitForPlanner.InputEdge> edges =
-          input.edges().stream().filter(edge -> resource.equals(edge.resource())).toList();
-      if (edges.isEmpty()) {
-        continue;
-      }
-      Set<String> owners = new LinkedHashSet<>();
-      Map<String, String> ownerRoles = new LinkedHashMap<>();
-      Map<String, String> ownerDirections = new LinkedHashMap<>();
-      Map<String, String> ownerRequestInputTypes = new LinkedHashMap<>();
-      Map<String, String> ownerRouteIndexes = new LinkedHashMap<>();
-      Map<String, String> ownerPriorities = new LinkedHashMap<>();
-      Map<String, String> ownerPhysicalFootprints = new LinkedHashMap<>();
-      Map<String, String> ownerReservedAuthorities = new LinkedHashMap<>();
-      for (SmartWaitForPlanner.InputEdge edge : edges) {
-        addPlannerOwner(
-            owners,
-            ownerRoles,
-            ownerDirections,
-            ownerRequestInputTypes,
-            ownerRouteIndexes,
-            ownerPriorities,
-            ownerPhysicalFootprints,
-            ownerReservedAuthorities,
-            input,
-            edge.blockerTrain(),
-            edge.role(),
-            edge.direction(),
-            edge.intent(),
-            liveClaims);
-        addPlannerOwner(
-            owners,
-            ownerRoles,
-            ownerDirections,
-            ownerRequestInputTypes,
-            ownerRouteIndexes,
-            ownerPriorities,
-            ownerPhysicalFootprints,
-            ownerReservedAuthorities,
-            input,
-            edge.blockedTrain(),
-            "REQUESTER",
-            edge.direction(),
-            edge.source(),
-            liveClaims);
-      }
-      Set<String> nonSelectedOwners = new LinkedHashSet<>(owners);
-      nonSelectedOwners.removeIf(
-          owner -> TrainNameNormalizer.sameLogicalTrain(owner, selectedPlan.train()));
-      debugLogger.accept(
-          "SMART_MUTUAL_CONFLICT_OWNER_SET cycleId="
-              + safeTraceValue(selectedPlan.cycleId())
-              + " resource="
-              + safeTraceValue(resource)
-              + " owners="
-              + owners
-              + " ownerRoles="
-              + ownerRoles
-              + " ownerDirections="
-              + ownerDirections
-              + " ownerRequestInputTypes="
-              + ownerRequestInputTypes
-              + " ownerRouteIndexes="
-              + ownerRouteIndexes
-              + " ownerPriorities="
-              + ownerPriorities
-              + " ownerPhysicalFootprints="
-              + ownerPhysicalFootprints
-              + " ownerReservedAuthorities="
-              + ownerReservedAuthorities
-              + " selectedOwner="
-              + safeTraceValue(selectedPlan.train())
-              + " nonSelectedOwners="
-              + nonSelectedOwners
-              + " tieBreakReason="
-              + "score:"
-              + selectedPlan.score()
-              + ":"
-              + safeTraceValue(selectedPlan.recommendation())
-              + " selectedPlanKind="
-              + selectedPlan.kind()
-              + " canDowngradeNonSelectedReservationDryRun=unknown"
-              + " noDowngradeReason=diagnostic-only"
-              + " suppressedAsUnchanged="
-              + suppressedAsUnchanged);
-    }
-  }
-
-  private void addPlannerOwner(
-      Set<String> owners,
-      Map<String, String> ownerRoles,
-      Map<String, String> ownerDirections,
-      Map<String, String> ownerRequestInputTypes,
-      Map<String, String> ownerRouteIndexes,
-      Map<String, String> ownerPriorities,
-      Map<String, String> ownerPhysicalFootprints,
-      Map<String, String> ownerReservedAuthorities,
-      SmartWaitForPlanner.PlannerInput input,
-      String owner,
-      String role,
-      CorridorDirection direction,
-      String requestInputType,
-      Collection<OccupancyClaim> liveClaims) {
-    String safeOwner = safeTraceValue(owner);
-    if ("-".equals(safeOwner)) {
-      return;
-    }
-    owners.add(safeOwner);
-    SmartWaitForPlanner.TrainState state = input.trainStates().get(safeOwner);
-    ownerRoles.put(safeOwner, safeTraceValue(role));
-    ownerDirections.put(
-        safeOwner, String.valueOf(direction == null ? CorridorDirection.UNKNOWN : direction));
-    ownerRequestInputTypes.put(safeOwner, safeTraceValue(requestInputType));
-    ownerRouteIndexes.put(safeOwner, state == null ? "-" : String.valueOf(state.currentIndex()));
-    ownerPriorities.put(safeOwner, plannerOwnerPriorityEvidence(safeOwner));
-    ownerPhysicalFootprints.put(
-        safeOwner, plannerOwnerPhysicalFootprintEvidence(safeOwner, state, liveClaims));
-    ownerReservedAuthorities.put(safeOwner, plannerOwnerReservedAuthorityEvidence(safeOwner));
-  }
-
-  /** 返回 mutual-owner 仲裁时实际参与 Gate Queue 的最近请求优先级证据。 */
-  private String plannerOwnerPriorityEvidence(String owner) {
-    BlockerSnapshot snapshot = blockerSnapshots.get(normalizeTrainKey(owner));
-    if (snapshot == null || snapshot.blockedRequest().isEmpty()) {
-      return "unavailable:no-live-request";
-    }
-    OccupancyRequest request = snapshot.blockedRequest().orElseThrow();
-    String source =
-        request
-            .directedContext()
-            .map(DirectedTraversalContext::source)
-            .filter(value -> value != null && !value.isBlank())
-            .orElse(request.purpose().name());
-    return request.priority() + "@" + safeTraceValue(source);
-  }
-
-  /** 返回仲裁时当前实体位置与物理/保持 claim 的只读证据。 */
-  private String plannerOwnerPhysicalFootprintEvidence(
-      String owner, SmartWaitForPlanner.TrainState state, Collection<OccupancyClaim> liveClaims) {
-    List<String> claims = new ArrayList<>();
-    if (liveClaims != null) {
-      for (OccupancyClaim claim : liveClaims) {
-        if (claim == null
-            || !TrainNameNormalizer.sameLogicalTrain(owner, claim.trainName())
-            || (claim.role() != ClaimRole.PHYSICAL_FOOTPRINT
-                && claim.role() != ClaimRole.HOLD_ONLY)) {
-          continue;
-        }
-        claims.add(claim.resource() + "@" + claim.role());
-      }
-    }
-    claims.sort(String.CASE_INSENSITIVE_ORDER);
-    String currentNode = state == null ? "-" : safeTraceValue(state.currentNode());
-    return "currentNode=" + currentNode + ";claims=" + claims;
-  }
-
-  /** 返回仲裁时已签发 movement token 的实际硬授权资源；无 token 时显式记录缺失原因。 */
-  private String plannerOwnerReservedAuthorityEvidence(String owner) {
-    MovementAuthorizationToken token = movementToken(owner).orElse(null);
-    if (token == null) {
-      return "active=false;claimVersion=-;resources=[];reason=no-token";
-    }
-    List<String> resources =
-        token.resources().stream().filter(Objects::nonNull).map(Object::toString).sorted().toList();
-    return "active="
-        + token.active()
-        + ";claimVersion="
-        + token.claimVersion()
-        + ";aspect="
-        + token.aspect()
-        + ";resources="
-        + resources;
   }
 
   private static String reservationTrain(SmartUnlockReservation reservation) {
@@ -5423,6 +5584,44 @@ public final class RuntimeDispatchService {
               + " localOnlyHold=true destinationMutated=false tokenInvalidated=false");
       return false;
     }
+    // 信号员闸（出站许可）：Smart 准入之后、释放与授权之前问；车掌看到的“出站信号开放”因此已包含信号员的许可。
+    Optional<SignallerGate.Hold> signallerHold =
+        signallerGates.admit(trainName, authorizationRequest, now);
+    if (signallerHold.isPresent()) {
+      NodeId departureNext = resolveEffectiveNode(trainName, route, currentIndex + 1);
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(
+              trainName, train, graph, authorizationRequest, definition.nodeId(), departureNext);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          definition.nodeId(),
+          Optional.of(SignallerGateCoordinator.withoutQueuePosition(authorizationRequest)),
+          graph,
+          now,
+          train,
+          braking.retainedResources());
+      String waitDetail = signallerHold.get().detail(now);
+      applyNonInvalidatingBlockedStop(
+          train,
+          properties,
+          trainName,
+          SignallerGateCoordinator.STOP_REASON,
+          waitDetail,
+          route,
+          definition.nodeId(),
+          departureNext,
+          graph,
+          SignallerGateCoordinator.blockedDecision(now),
+          authorizationRequest,
+          stationAdmissionAuthorityEnd,
+          braking);
+      rememberDepartureGateBlockers(
+          trainName, SignallerGateCoordinator.DECISION_REASON + " " + waitDetail, now);
+      signallerGates.withdrawQueuedEntries(trainName, signallerHold.get());
+      return false;
+    }
     Optional<NodeId> nextNode =
         currentIndex + 1 < route.waypoints().size()
             ? Optional.of(resolveEffectiveNode(trainName, route, currentIndex + 1))
@@ -6527,6 +6726,38 @@ public final class RuntimeDispatchService {
     OccupancyRequest request =
         prepareRuntimeAuthorizationRequest(
             authorizationContext, graph, SignalComputationTrace.Source.PROGRESS_TRIGGER);
+    // 信号员闸：在释放与申请之前问；被拦按普通占用等待停车，不走会作废令牌的硬停车。
+    Optional<SignallerGate.Hold> signallerHold = signallerGates.admit(trainName, request, now);
+    if (signallerHold.isPresent()) {
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(trainName, train, graph, request, currentNode, nextNode);
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNode,
+          Optional.of(SignallerGateCoordinator.withoutQueuePosition(request)),
+          graph,
+          now,
+          train,
+          braking.retainedResources());
+      applyNonInvalidatingBlockedStop(
+          train,
+          properties,
+          trainName,
+          SignallerGateCoordinator.STOP_REASON,
+          signallerHold.get().detail(now),
+          route,
+          currentNode,
+          nextNode,
+          graph,
+          SignallerGateCoordinator.blockedDecision(now),
+          request,
+          AuthorityEnd.none(),
+          braking);
+      signallerGates.withdrawQueuedEntries(trainName, signallerHold.get());
+      return;
+    }
     List<OccupancyResource> keepResources =
         mergeKeepResourcesWithCurrentPosition(
             context.request().resourceList(),
@@ -9006,6 +9237,8 @@ public final class RuntimeDispatchService {
     hydratedPhysicalOwnerIdentities.remove(key);
     expectedMaterializedSpawns.remove(key);
     liveRailFootprintDiagnosticStates.remove(key);
+    signallerGates.forget(trainName);
+    stationStopCoordinator.signallerPlatforms().discard(trainName);
   }
 
   /**
@@ -9894,19 +10127,6 @@ public final class RuntimeDispatchService {
           externalClaim == null ? null : externalClaim.resource(),
           exitEdge,
           exitNode);
-    }
-  }
-
-  /**
-   * Smart planner 最近一次方向证据审计快照。
-   *
-   * <p>HealthMonitor destroy review 只读取这个快照作为“需要重新审计方向”的证据，不把它视为可执行行车授权。
-   */
-  private record SmartDirectionAuditSnapshot(String trainName, String reason, Instant capturedAt) {
-    private SmartDirectionAuditSnapshot {
-      trainName = trainName == null || trainName.isBlank() ? "-" : trainName.trim();
-      reason = reason == null || reason.isBlank() ? "NEED_DIRECTION_AUDIT" : reason.trim();
-      capturedAt = capturedAt == null ? Instant.EPOCH : capturedAt;
     }
   }
 
@@ -10804,16 +11024,24 @@ public final class RuntimeDispatchService {
       String trainName, Duration stuckDuration, SignalAspect fallbackSignal) {
     List<OccupancyClaim> liveClaims =
         occupancyManager == null ? List.of() : occupancyManager.snapshotClaims();
-    return smartRecoveryInput(trainName, stuckDuration, fallbackSignal, liveClaims);
+    return smartRecoveryInput(
+        trainName,
+        stuckDuration,
+        fallbackSignal,
+        liveClaims,
+        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.GET_STATE));
   }
 
+  /**
+   * @param liveClaims 只用于取该车的冲突 claim；传入只含该车两个规范名下冲突 claim 的子集，结果与传全账本相同
+   * @param resolution 调用方已为 {@code trainName} 做好的运行时名解析
+   */
   private SmartRecoveryInput smartRecoveryInput(
       String trainName,
       Duration stuckDuration,
       SignalAspect fallbackSignal,
-      Collection<OccupancyClaim> liveClaims) {
-    RuntimeTrainResolution resolution =
-        resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.GET_STATE);
+      Collection<OccupancyClaim> liveClaims,
+      RuntimeTrainResolution resolution) {
     String resolvedName = resolution.resolved() ? resolution.resolvedName() : trainName;
     Optional<RouteProgressRegistry.RouteProgressEntry> entryOpt =
         progressRegistry.get(resolvedName);
@@ -12486,10 +12714,12 @@ public final class RuntimeDispatchService {
     boolean depotRelated =
         routeOpt.map(route -> isDepotRelated(entry, route, operationType)).orElse(false);
     boolean nearRouteEnd = routeSize > 0 && entry.currentIndex() >= Math.max(0, routeSize - 2);
+    // 停在控制区入口等信号员也算人工扣车：受控停车、卡住清理与阻挡状态显示都按计划内静止对待。
     boolean manualHold =
         TrainTagHelper.readTagValue(properties, "FTA_MANUAL_HOLD").isPresent()
             || TrainTagHelper.readTagValue(properties, "FTA_MAINTENANCE_HOLD").isPresent()
-            || runtimeTrainController.hasDriver(entry.trainName());
+            || runtimeTrainController.hasDriver(entry.trainName())
+            || signallerGates.waiting(entry.trainName());
     return Optional.of(
         new DeadlockTrainContext(
             entry.trainName(),
@@ -13114,6 +13344,15 @@ public final class RuntimeDispatchService {
     if (trainName == null || trainName.isBlank()) {
       return false;
     }
+    // 已停在控制区入口等信号员的车不重发目的地；还没等的车在下面申请进路前照样问闸。
+    if (signallerGates.waiting(trainName)) {
+      debugLogger.accept(
+          "HealthMonitor reissueDestination blocked: train="
+              + trainName
+              + " reason="
+              + SignallerGateCoordinator.DECISION_REASON);
+      return false;
+    }
     TrainProperties properties = resolveTrainPropertiesByName(trainName).orElse(null);
     if (properties == null) {
       return false;
@@ -13240,6 +13479,19 @@ public final class RuntimeDispatchService {
               + trainName
               + " reason="
               + reissueAdmission.reason());
+      return false;
+    }
+    // 恢复层同样过信号员闸，否则重发目的地会绕过人工控制区的许可。
+    Optional<SignallerGate.Hold> signallerHold =
+        signallerGates.admit(trainName, authorizationRequest, recoveryNow);
+    if (signallerHold.isPresent()) {
+      debugLogger.accept(
+          "HealthMonitor reissueDestination blocked: train="
+              + trainName
+              + " reason="
+              + SignallerGateCoordinator.DECISION_REASON
+              + " "
+              + signallerHold.get().detail(recoveryNow));
       return false;
     }
     if (occupancyManager == null) {
@@ -13419,6 +13671,15 @@ public final class RuntimeDispatchService {
    */
   public boolean forceRelaunchByName(String trainName) {
     if (trainName == null || trainName.isBlank()) {
+      return false;
+    }
+    // 停在控制区入口等信号员的车不重发：重发会绕过人工闸，等待有超时自动排列兜底。
+    if (signallerGates.waiting(trainName)) {
+      debugLogger.accept(
+          "HealthMonitor forceRelaunch blocked: train="
+              + trainName
+              + " reason=blocked:"
+              + SignallerGateCoordinator.DECISION_REASON);
       return false;
     }
     TrainProperties properties = resolveTrainPropertiesByName(trainName).orElse(null);
@@ -14834,6 +15095,46 @@ public final class RuntimeDispatchService {
           authorizationRequest,
           authorityEnd,
           braking);
+      return;
+    }
+    // 信号员闸放在 canEnter 之前：没有许可的车停在控制区外，不进控制区资源的排队，次序由信号员定。
+    // 停车保持只借本次申请的行车计划、不带资源，免得替它在区内刷新排队位次。
+    Optional<SignallerGate.Hold> signallerHold =
+        signallerGates.admit(trainName, authorizationRequest, now);
+    if (signallerHold.isPresent()) {
+      HeldAuthorityBraking.Decision braking =
+          resolveHeldAuthorityBraking(
+              trainName,
+              train,
+              graph,
+              authorizationRequest,
+              currentNodeForSignal,
+              nextNode.orElse(null));
+      retainStopOccupancy(
+          trainName,
+          route,
+          currentIndex,
+          currentNodeForSignal,
+          Optional.of(SignallerGateCoordinator.withoutQueuePosition(authorizationRequest)),
+          graph,
+          now,
+          train,
+          braking.retainedResources());
+      applyNonInvalidatingBlockedStop(
+          train,
+          properties,
+          trainName,
+          SignallerGateCoordinator.STOP_REASON,
+          signallerHold.get().detail(now),
+          route,
+          currentNodeOpt.orElse(null),
+          nextNode.orElse(null),
+          graph,
+          SignallerGateCoordinator.blockedDecision(now),
+          authorizationRequest,
+          authorityEnd,
+          braking);
+      signallerGates.withdrawQueuedEntries(trainName, signallerHold.get());
       return;
     }
     // 本拍开始时生效的令牌。本拍 acquire 成功后会签新令牌，之后再回滚时要沿已持有授权刹车，依据只能是这一张。
@@ -16557,6 +16858,8 @@ public final class RuntimeDispatchService {
     }
     // 新任务开始前清理旧的“有效节点覆盖”，避免跨线路遗留导致寻路/占用异常。
     effectiveNodeOverrides.remove(normalizeTrainKey(trainName));
+    // 信号员给上一趟选的股道同样不带进新任务：同一交路再跑一趟时停站下标会撞上。
+    stationStopCoordinator.signallerPlatforms().discard(trainName);
     dynamicCapacityWaits.remove(trainName);
     blockerSnapshots.remove(normalizeTrainKey(trainName));
     // 车体指纹与采样时刻同样按车名键：不随任务重置清掉，就会随 layover 改名无界增长，
@@ -16698,6 +17001,19 @@ public final class RuntimeDispatchService {
       ctx = ctxOpt.get();
     }
     OccupancyRequest request = ctx.request();
+    // 信号员闸：认领票据之前问；被拦就本次不接续，候选与票据原样留着等下一次重试。
+    Optional<SignallerGate.Hold> signallerHold = signallerGates.admit(trainName, request, now);
+    if (signallerHold.isPresent()) {
+      debugLogger.accept(
+          "Layover 发车等待: train="
+              + trainName
+              + " reason="
+              + SignallerGateCoordinator.DECISION_REASON
+              + " "
+              + signallerHold.get().detail(now));
+      signallerGates.withdrawQueuedEntries(trainName, signallerHold.get());
+      return LayoverDispatchResult.failed(trainName, SignallerGateCoordinator.DECISION_REASON);
+    }
     Optional<LayoverRegistry.DispatchAttempt> dispatchAttempt =
         layoverRegistry.claimDispatch(
             trainName,
@@ -21540,6 +21856,9 @@ public final class RuntimeDispatchService {
         }
       }
     }
+    // 信号员的许可、等待与改停股道同样按名记：随车迁到新名，迁完唤醒新名重评估（拆分出的新车不经这里，没有许可）。
+    stationStopCoordinator.signallerPlatforms().renamed(previousKey, currentKey);
+    signallerGates.renamed(previousKey, currentKey);
   }
 
   private void rollbackRuntimeOwnerRegistries(
@@ -29627,7 +29946,10 @@ public final class RuntimeDispatchService {
           releasedResources);
     }
     OccupancyDecision decision = occupancyManager.acquire(request);
-    retainForwardQueuePositionAtStop(canonicalRequest, now, priority);
+    // 停在控制区入口等信号员的车不刷新前方排队位次：它进不了控制区，替它排队只会挡住拿到许可的车（区外站台等出站许可时同样如此）。
+    if (!signallerGates.waiting(trainName)) {
+      retainForwardQueuePositionAtStop(canonicalRequest, now, priority);
+    }
     return decision != null && decision.allowed();
   }
 

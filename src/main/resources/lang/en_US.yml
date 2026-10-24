@@ -625,6 +625,7 @@ drive:
         disabled: "<prefix> <red>Guards are not available right now</red>"
         on-duty: "<prefix> <red>You are on duty; go off duty first</red>"
         driving: "<prefix> <red>You cannot take guard duty while driving or holding a driving task</red>"
+        signaller-on-duty: "<prefix> <red>You cannot take guard duty while staffing a signal box; go off duty first (/fta signal off)</red>"
         already-has-task: "<prefix> <red>You already have a guard duty; finish or abandon it first (/fta guard task abandon)</red>"
         taken: "<prefix> <red>This trip already has a guard</red>"
         unavailable: "<prefix> <red>This trip is cancelled or terminates here</red>"
@@ -940,7 +941,8 @@ drive:
         disabled: "<prefix> <red>Guard duty is disabled</red>"
         unavailable: "<prefix> <red>Guard duty is unavailable, check the console log</red>"
         already-on-duty: "<prefix> <yellow>You are already on duty</yellow>"
-        driving: "<prefix> <red>You are driving and cannot be the guard at the same time</red>"
+        driving: "<prefix> <red>You cannot be the guard while driving or holding a driving task</red>"
+        signaller-on-duty: "<prefix> <red>You are staffing a signal box and cannot be the guard at the same time; go off duty first (/fta signal off)</red>"
         bad-game-mode: "<prefix> <red>Your game mode does not allow guard duty</red>"
         not-seated: "<prefix> <red>Sit in a seat in the rear cab of the train first</red>"
         not-managed: "<prefix> <red>Only dispatched trains carry a guard</red>"
@@ -961,6 +963,10 @@ drive:
       confirmed: "<green>Departure confirmed</green>"
     signal:
       acknowledged: "<green>Signal acknowledged</green>"
+    # With no guard on board, two short rings call the signaller (action bar)
+    signaller:
+      called: "<aqua>Signaller called; please wait for a reply</aqua>"
+      none: "<yellow>No signaller is on duty</yellow>"
     rescue:
       warn: "<prefix> <yellow>The train has not moved for <white><seconds></white> s; resume running soon or it will switch to ATO</yellow>"
       ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
@@ -972,6 +978,20 @@ drive:
     protection:
       tripped: "<prefix> <red>Congestion protection: <white><reason></white>; handed back <white><count></white> player-driven train(s); takeovers are paused</red>"
     skip-handback: "<prefix> <red>This trip has skipped <white><count></white> station(s); the train will stop and return to automatic operation, and the trip is marked incomplete with no reward</red>"
+  # Signaller shift settlement and records (the state column of driving records shows why the shift ended)
+  signaller:
+    result:
+      summary: "<prefix> <white>Signaller shift ended: zone <aqua><zone></aqua>, score <yellow><points></yellow>, grade <gold><grade></gold>; handled <white><trains></white> train(s), <white><auto></white> of them routed automatically after timing out</white>"
+      detail: "<prefix> <gray><white><pre></white> pre-routed · <white><kept></white> kept on time · <white><lost></white> lost time in the zone · junction order good <white><good></white>, poor <white><bad></white> · <white><wrong></white> wrong replies</gray>"
+      no-trains: "<prefix> <gray>No trains passed through zone <white><zone></white> during this shift; no score or reward</gray>"
+    end:
+      off-duty: "Off duty"
+      left-console: "Left the console"
+      quit: "Logged out"
+      incapacitated: "Unable to continue"
+      revoked: "Removed from duty"
+      shutdown: "Plugin stopped"
+      exam: "Exam over"
   task:
     board:
       title: "<dark_gray>Task board · </dark_gray><black><station></black>"
@@ -1021,6 +1041,7 @@ drive:
       cancelled: "<prefix> <red>This trip cannot be taken right now</red>"
       continuing: "<prefix> <red>You are waiting to continue with this train's next trip; end driving before taking another trip</red>"
       guard-busy: "<prefix> <red>You cannot take a driving task while on guard duty or holding one (/fta guard task abandon to give it up)</red>"
+      signaller-busy: "<prefix> <red>You cannot take a driving task while staffing a signal box; go off duty first (/fta signal off)</red>"
       assigned: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to the terminus</green>"
       assigned-interval: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to <white><handover></white></green>"
       already-has-task: "<prefix> <red>You already have a task; finish or abandon it first (/fta drive task abandon)</red>"
@@ -1254,22 +1275,30 @@ drive:
       not-running: "<prefix> <red>No tutorial is running</red>"
       invalid: "<prefix> <red>Action must be start, restart, stop, reset or skip</red>"
   license:
-    disabled: "<prefix> <red>Driving licences are not enabled</red>"
-    loading: "<prefix> <yellow>Loading your licence, please try again in a moment</yellow>"
+    disabled: "<prefix> <red>Operating licences are not enabled</red>"
+    loading: "<prefix> <yellow>Loading your operating licence, please try again in a moment</yellow>"
     storage-unavailable: "<prefix> <red>Licence storage is unavailable, please try again later</red>"
     level-name: "Level <level> · <name>"
-    endorsement-name: "<name> endorsement"
-    granted-desc: "<prefix> <gray>You can now: <white><description></white> (valid for every FTCA train)</gray>"
+    granted-desc: "<prefix> <gray>You can now: <white><description></white> (valid on every FTCA line)</gray>"
     next: "<prefix> <white>Next: Level <level> · <aqua><name></aqua></white> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up</gray>'><green>[Take the exam]</green></hover></click>"
     next-endorsement: "<prefix> <white>You can also earn the <aqua><name></aqua></white> <click:run_command:'/fta license'><hover:show_text:'<gray>See how to practise and sign up</gray>'><aqua>[Details]</aqua></hover></click>"
-    top: "<prefix> <gold>You hold every licence level</gold>"
+    top: "<prefix> <gold>You hold every qualification on the operating licence</gold>"
+    abandon:
+      none: "<prefix> <gray>No exam or practice in progress</gray>"
+      exam: "<prefix> <yellow>Abandoned the <white><name></white> exam; it does not count</yellow>"
+      practice: "<prefix> <yellow>Abandoned the <white><name></white> practice; it does not count</yellow>"
+      signaller-on-duty: "<prefix> <yellow>You are on duty: go off duty with <white>/fta signal off</white> to end this <white><name></white> exam or practice (an exam then does not count)</yellow>"
     exam:
       guard-unavailable: "<prefix> <red>Guard duty is not available right now, so the <white><name></white> exam or practice cannot be taken</red>"
       guard-on-duty: "<prefix> <red>You cannot sign up for an exam or practice while on guard duty; go off duty first (/fta guard off)</red>"
       has-guard-task: "<prefix> <red>You have a guard duty claimed; finish or abandon it (/fta guard task abandon) before signing up for an exam or practice</red>"
+      signaller-on-duty: "<prefix> <red>You cannot sign up for an exam or practice while staffing a signal box; go off duty first (/fta signal off)</red>"
       platform: ", platform <platform>"
       in-progress-guard: "<prefix> <yellow>You are taking the <white><name></white> exam; finish it first</yellow> <click:run_command:'/fta guard task abandon'><hover:show_text:'<gray>Abandon this exam (it does not count)</gray>'><gray>[Abandon exam]</gray></hover></click>"
       need-training-guard: "<prefix> <yellow>Before the <white><name></white> exam, complete <white><required></white> guard practice run(s) (done: <white><done></white>): board the dispatched train you want to practise on and run <white>/fta license practice <class></white></yellow>"
+      signaller-unavailable: "<prefix> <red>The signaller feature is not open; you cannot sign up for the <white><name></white> exam or practice</red>"
+      in-progress-signaller: "<prefix> <yellow>You are signed up for the <white><name></white> exam; go on duty at a signal box console in time</yellow> <click:run_command:'/fta license abandon'><hover:show_text:'<gray>Abandon this exam (does not count)</gray>'><gray>[Abandon the exam]</gray></hover></click>"
+      need-training-signaller: "<prefix> <yellow>Before the <white><name></white> exam, complete <white><required></white> signaller practice run(s) (done: <white><done></white>): run <white>/fta license practice <class></white>, then go on duty at a signal box console</yellow>"
       guard:
         stop: "<prefix> <gray>Guard exam <done>/<total></gray> <white><station></white> <gray>open</gray> <open> <gray>close</gray> <close> <gray>closing watch</gray> <closing> <gray>signal</gray> <signal> <gray>departure watch</gray> <departure>"
         passed: "<prefix> <green><bold>Guard exam passed</bold></green> <white><reason>; you now hold the <name></white>"
@@ -1295,7 +1324,28 @@ drive:
           left-behind: "<prefix> <gray>Tip: return to your guard seat after closing the doors and stay aboard until the signal is given.</gray>"
           cab-change: "<prefix> <gray>Tip: when the train reverses at a terminal, walk to the cab at the other end as prompted, or use Back to seat in the guard menu.</gray>"
           drill: "<prefix> <gray>Tip: when the platform reports someone or something caught in a door, right-click a door slot at once to reopen and right-click slot 4 to report \"Person or object caught\"; close again once clear.</gray>"
-      unknown-class: "<prefix> <red>No such licence level: <white><class></white></red>"
+      signaller:
+        started: "<prefix> <gold>Signaller exam started</gold> <gray>zone <white><zone></white>: set routes yourself for <white><trains></white> trains to finish</gray>"
+        wait-manual: "<prefix> <yellow>The rail graph is not ready, so the zone is on auto for now; press \"Switch to manual\" once it is ready, and the exam counts from then</yellow>"
+        progress: "<prefix> <gray>Signaller exam</gray> <white><manual>/<trains></white> <gray>trains · <white><points></white> points now</gray>"
+        deduct-auto-routed: "<prefix> <yellow>Signaller exam: a train waited too long and was routed by the system, -<penalty></yellow> <gray><white><points></white> points now (pass mark <min>)</gray>"
+        deduct-call-missed: "<prefix> <yellow>Signaller exam: a call went unanswered, -<penalty></yellow> <gray><white><points></white> points now (pass mark <min>)</gray>"
+        deduct-call-wrong: "<prefix> <yellow>Signaller exam: the reply did not fit the call, -<penalty></yellow> <gray><white><points></white> points now (pass mark <min>)</gray>"
+        passed: "<prefix> <green><bold>Signaller exam passed</bold></green> <white><reason>; you now hold the <name></white>"
+        failed: "<prefix> <red><bold>Signaller exam failed</bold></red> <white><reason></white>"
+        void: "<prefix> <yellow>This signaller exam does not count: <reason></yellow>"
+        reason:
+          passed: "<manual> trains routed by hand, <auto> auto-routed, <missed> calls missed, <wrong> wrong replies, <points> points"
+          points: "<points> points, below the pass mark of <min> (<auto> auto-routed, <missed> calls missed, <wrong> wrong replies)"
+          to-auto: "you switched the zone back to auto during the exam"
+          idle-auto: "several trains went unattended and the system switched the zone to auto"
+          ended: "you went off duty before routing <trains> trains (<manual> routed)"
+          expired: "the sign-up time ran out with only <manual>/<trains> trains routed"
+        tip:
+          points: "<prefix> <gray>Tip: watch the trains marked \"waiting at entry\" in the train list; select one and press \"Set route\". Approaching trains can be routed in advance. When the call badge lights up, click it and pick the reply that fits the reason.</gray>"
+          to-auto: "<prefix> <gray>Tip: keep the zone on manual during the exam; set \"Auto pass\" for routes you do not need to watch instead of switching to auto.</gray>"
+          idle-auto: "<prefix> <gray>Tip: if several trains in a row are routed by the system with no action from you, the zone is treated as unattended and switched to auto. Stay at the console and handle waiting trains in time.</gray>"
+      unknown-class: "<prefix> <red>No such qualification on the operating licence: <white><class></white></red>"
       already-held: "<prefix> <yellow>You already hold the <white><name></white></yellow>"
       requires: "<prefix> <red>The <white><name></white> requires: <white><required></white></red>"
       in-progress: "<prefix> <yellow>You are taking the <white><name></white> exam; finish it first</yellow>"
@@ -1379,6 +1429,12 @@ drive:
           how: "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport to the takeover platform; if the train is already in, right beside the leading cab</gray>'><green>[Go to takeover]</green></hover></click>"
           handbook: "<prefix> <white>Study: </white><gray>the FTCA driver handbook is in your inventory; read it before taking over, the road test is judged on its points.</gray>"
           feedback: "<prefix> <gray>Each stop is reviewed as you go, and anything that fails the test is reported immediately.</gray>"
+        signaller:
+          header: "<prefix> <gold><bold><name> exam</bold></gold> <gray>signed up; go on duty at any signal box console within <white><window></white> min</gray>"
+          how: "<prefix> <white>Going on duty:</white><gray> right-click the console screen, then confirm with <white>/fta signal on</white>; the zone switches to manual. You hold signaller permission during the exam.</gray>"
+          pass: "<prefix> <white>Finishing:</white><gray> from going on duty, set routes yourself for <white><trains></white> trains (counted when the train enters the zone; auto-pass routes do not count); one simulated call will come in and needs a fitting reply. Out of 100, each train routed by the system after waiting too long, each unanswered call and each reply that does not fit costs <white><penalty></white>; pass mark <white><min></white>.</gray>"
+          fail: "<prefix> <white>Instant fail:</white><gray> falling below the pass mark; switching to auto; several trains unattended so the system switches to auto. Going off duty early or running out of time does not count and you may retry at once. The shift ends when the exam does; go on duty again to keep signalling.</gray>"
+          handbook: "<prefix> <gray>The FTCA Signaller Handbook is in your inventory; run /fta handbook signaller for another copy.</gray>"
     practice:
       expired: "<prefix> <yellow>The <white><name></white> practice run timed out; you can sign up again</yellow>"
       in-progress: "<prefix> <yellow>You are on a <white><name></white> practice run; finish it first</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>Abandon this practice run (it does not count)</gray>'><gray>[Abandon practice]</gray></hover></click>"
@@ -1440,6 +1496,76 @@ drive:
           not-counted: "<prefix> <yellow>You did not work all the stops; this run does not count.</yellow>"
           ready: "<prefix> <green>Guard practice done <done>/<required>; once you hand over at the next stop you can take the exam</green> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>After handing over, click near a station to sign up</gray>'><green>[Take the exam]</green></hover></click>"
           more: "<prefix> <yellow>Guard practice done <done>/<required>; keep practising: board the dispatched train you want and run <white>/fta license practice <class></white></yellow>"
+      signaller:
+        in-progress: "<prefix> <yellow>You are doing the <white><name></white> practice</yellow> <click:run_command:'/fta license abandon'><hover:show_text:'<gray>Abandon this practice (does not count)</gray>'><gray>[Abandon the practice]</gray></hover></click>"
+        expired: "<prefix> <yellow>You did not go on duty in time; the <white><name></white> practice was cancelled, sign up again</yellow>"
+        brief:
+          header: "<prefix> <gold><bold><name> practice</bold></gold> <gray>go on duty at any signal box console within <white><window></white> min; you will be guided step by step</gray>"
+          how: "<prefix> <white>Going on duty:</white><gray> right-click the console screen, then confirm with <white>/fta signal on</white>. You hold signaller permission during practice.</gray>"
+          pass: "<prefix> <white>Counting:</white><gray> finish every step, then go off duty with /fta signal off to count one practice run. Practice writes no record and pays no reward; unattended trains are still routed by the system, so nothing gets stuck.</gray>"
+          handbook: "<prefix> <gray>The FTCA Signaller Handbook is in your inventory; run /fta handbook signaller for another copy.</gray>"
+        step: "<prefix> <gold>Signaller practice</gold> <gray>(<index>/<total>)</gray> <text>"
+        step-first: "<prefix> <gold>Signaller practice</gold> <text>"
+        skipped: "<prefix> <gray>This zone has no stations; skipping \"<step>\"</gray>"
+        all-done: "<prefix> <green>All practice steps done</green>"
+        steps:
+          on-duty:
+            name: "Go on duty"
+            chat: "<white>Go on duty:</white><gray> walk up to a signal box console, right-click the screen, then confirm with <white>/fta signal on</white>. You hold signaller permission during practice.</gray>"
+            subtitle: "<yellow>Right-click the console, then /fta signal on</yellow>"
+          screen:
+            name: "The console"
+            chat: "<white>The console:</white><gray> the title bar shows the zone, the mode badge (manual/auto), the signaller and short notices; the yard diagram shows tracks, platforms, entry signals and trains, with occupied track in red; the train list shows approaching, waiting, in-zone and dwelling trains; the button area has six buttons. Continues shortly.</gray>"
+            subtitle: "<yellow>Look around: title bar, yard, train list, buttons</yellow>"
+          manual:
+            name: "Manual mode"
+            chat: "<white>Manual mode:</white><gray> going on duty switched the zone to manual and the badge reads \"manual\": trains need a route from you to enter. If it reads \"auto\", press \"Switch to manual\".</gray>"
+            subtitle: "<yellow>Check the badge reads \"manual\"</yellow>"
+          select:
+            name: "Select a train"
+            chat: "<white>Select a train:</white><gray> click a train in the train list; its route is previewed in light blue on the yard. When it can be moved to another platform, the platform numbers appear under the buttons.</gray>"
+            subtitle: "<yellow>Click a train in the train list</yellow>"
+          set-route:
+            name: "Set a route"
+            chat: "<white>Set a route:</white><gray> wait for a train at the zone entry (the list says \"waiting at entry\", the entry signal is red), select it and press \"Set route\"; approaching trains can be routed in advance. Trains left waiting too long are routed by the system (costs points in the exam).</gray>"
+            subtitle: "<yellow>Select a waiting train, press \"Set route\"</yellow>"
+          hold:
+            name: "Hold a train"
+            chat: "<white>Hold a train:</white><gray> select a train dwelling in the zone (the list says \"dwelling\") and press \"Hold\": it will not depart when its dwell ends.</gray>"
+            subtitle: "<yellow>Select a dwelling train, press \"Hold\"</yellow>"
+          release:
+            name: "Release"
+            chat: "<white>Release:</white><gray> select the held train and press \"Release\". Holds have a limit and release on their own.</gray>"
+            subtitle: "<yellow>Select the held train, press \"Release\"</yellow>"
+          auto-pass:
+            name: "Auto pass"
+            chat: "<white>Auto pass:</white><gray> select a train and press \"Auto pass\": later trains from the same entry to the same track are let through, and the entry signal shows \"A\". Good for routes you do not need to watch.</gray>"
+            subtitle: "<yellow>Select a train, press \"Auto pass\"</yellow>"
+          auto-pass-off:
+            name: "Cancel auto pass"
+            chat: "<white>Cancel auto pass:</white><gray> select a train on that route and press \"Cancel auto pass\", or click the entry signal marked \"A\".</gray>"
+            subtitle: "<yellow>Press \"Cancel auto pass\" or click the A signal</yellow>"
+          answer-call:
+            name: "Answer a call"
+            chat: "<white>Answer a call:</white><gray> a train will make a simulated call shortly: the call badge lights up in the title bar with the train and the reason. Click it; the buttons turn into four replies. Pick by reason: waiting at the signal - \"Route is being set\" or \"Train ahead, please wait\"; door fault - \"Acknowledged\"; something on the line - \"Proceed at caution speed\". A wrong or missed reply brings another call.</gray>"
+            subtitle: "<yellow>Click the call badge and reply by reason</yellow>"
+          off-duty:
+            name: "Go off duty"
+            chat: "<white>Go off duty:</white><gray> all steps done. Run <white>/fta signal off</white>; the zone goes back to auto and the practice counts.</gray>"
+            subtitle: "<yellow>Run /fta signal off</yellow>"
+        tips:
+          call: "<prefix> <aqua>Signaller tip</aqua> <gray>A driver is calling: click the call badge in the title bar and pick a reply. An unanswered call counts as missed (costs points in the exam).</gray>"
+          auto-routed: "<prefix> <aqua>Signaller tip</aqua> <gray>A train waited too long and the system routed it (costs points in the exam). Watch for \"waiting at entry\" in the train list.</gray>"
+          call-missed: "<prefix> <aqua>Signaller tip</aqua> <gray>A call went unanswered and counts as missed (costs points in the exam).</gray>"
+          to-auto: "<prefix> <aqua>Signaller tip</aqua> <gray>The zone is on auto: the system lets trains through. Switching to auto fails the exam; press \"Switch to manual\" to carry on practising.</gray>"
+          idle-auto: "<prefix> <aqua>Signaller tip</aqua> <gray>Several trains went unattended, so the system switched the zone to auto (an instant fail in the exam). Press \"Switch to manual\" to carry on.</gray>"
+        review:
+          header: "<prefix> <gold><bold><name> practice review</bold></gold> <gray>zone <white><zone></white></gray>"
+          counts: "<prefix> <gray><white><manual></white> routed by hand · <white><auto></white> auto-routed · <white><missed></white> calls missed · <white><wrong></white> wrong replies · <white><points></white> points by exam standards (pass mark <min>)</gray>"
+          not-counted: "<prefix> <yellow>Practice not finished; this run does not count. Still to do: <white><steps></white></yellow>"
+          separator: ", "
+          ready: "<prefix> <green>Signaller practice done <done>/<required>; you can sign up for the exam</green> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>After signing up, go on duty at a console in time</gray>'><green>[Take the exam]</green></hover></click>"
+          more: "<prefix> <yellow>Signaller practice done <done>/<required>; keep practising</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice</gray>'><aqua>[Practise again]</aqua></hover></click>"
     guard:
       late: "<prefix> <yellow>This trip is <white><delay></white> s late. Drive smoothly within the limit and recover time; if the delay keeps growing, the train will be handed back to automatic operation.</yellow>"
       drill-cancelled: "<prefix> <gray>The incident drill was cancelled and the fault cleared.</gray>"
@@ -1490,11 +1616,11 @@ drive:
         emergency: "emergency stop"
         breaker-trip: "main breaker trip"
     reissue:
-      none: "<prefix> <yellow>You have no licence yet; run /fta license to see the exams</yellow>"
+      none: "<prefix> <yellow>You have no operating licence yet; run /fta license to see the exams</yellow>"
       cooldown: "<prefix> <yellow>Too many reissues; try again in <white><minutes></white> min</yellow>"
-      done: "<prefix> <green>Licence reissued (no. <white><serial></white>) and placed in your inventory</green>"
+      done: "<prefix> <green>Operating licence reissued (no. <white><serial></white>) and placed in your inventory</green>"
     info:
-      header: "<prefix> <gold>My driving licence</gold> <gray>no. <white><serial></white> · valid for every FTCA train</gray>"
+      header: "<prefix> <gold>My operating licence</gold> <gray>no. <white><serial></white> · valid on every FTCA line</gray>"
       level-held-exam: "  <green>✔</green> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>passed <date></gray>"
       level-held-admin: "  <green>✔</green> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>granted by <by> <date></gray>"
       level-exam-running: "  <yellow>…</yellow> <white>Level <level> · <name></white> <yellow>exam in progress</yellow>"
@@ -1505,7 +1631,6 @@ drive:
       level-locked: "  <dark_gray>○ Level <level> · <name> (requires <required>)</dark_gray>"
       level-closed: "  <dark_gray>○ Level <level> · <name> (not yet available)</dark_gray>"
       endorsement:
-        header: "  <gray>Endorsements</gray>"
         held-exam: "  <green>✔</green> <white><hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>earned by exam <date></gray>"
         held-admin: "  <green>✔</green> <white><hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>granted by <by> <date></gray>"
         exam-running: "  <yellow>…</yellow> <white><name></white> <yellow>exam in progress</yellow>"
@@ -1514,8 +1639,11 @@ drive:
         open: "  <aqua>○</aqua> <white><hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>guard duty <stops> stops, pass mark <min></gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Board the dispatched train you want to practise on, then click (no licence)</gray>'><aqua>[Practise]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up (near a station)</gray>'><green>[Take the exam]</green></hover></click>"
         locked: "  <dark_gray>○ <name> (requires <required>)</dark_gray>"
         closed: "  <dark_gray>○ <name> (not open)</dark_gray>"
-      footer: "<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>Get the driver handbook</gray>'><aqua>[Driver handbook]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>Lost your licence? Click to reissue</gray>'><aqua>[Reissue licence]</aqua></hover></click>"
-      none: "  <gray>No licence yet</gray>"
+      signaller:
+        need-practice: "  <aqua>○</aqua> <white><hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>complete practice first (<done>/<required>)</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>After signing up, go on duty at a console and follow the steps</gray>'><green>[Start practice]</green></hover></click>"
+        open: "  <aqua>○</aqua> <white><hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>route <trains> trains by hand, pass mark <min></gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>After signing up, go on duty at a console and follow the steps (no licence)</gray>'><aqua>[Practise]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>After signing up, go on duty at a console in time</gray>'><green>[Take the exam]</green></hover></click>"
+      footer: "<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>Get the driver handbook</gray>'><aqua>[Driver handbook]</aqua></hover></click> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>Get the guard handbook</gray>'><aqua>[Guard handbook]</aqua></hover></click> <click:run_command:'/fta handbook signaller'><hover:show_text:'<gray>Get the signaller handbook</gray>'><aqua>[Signaller handbook]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>Lost your licence? Click to reissue</gray>'><aqua>[Reissue licence]</aqua></hover></click>"
+      none: "  <gray>No operating licence yet</gray>"
       held-exam: "  <green>✔</green> <white><name></white> <gray>passed <date></gray>"
       held-admin: "  <green>✔</green> <white><name></white> <gray>granted by <by> <date></gray>"
     admin:
@@ -1525,17 +1653,22 @@ drive:
       granted-notice: "<prefix> <green>An administrator granted you the <white><name></white></green>"
       revoked: "<prefix> <yellow>Revoked the <white><name></white> from <white><player></white></yellow>"
       not-held: "<prefix> <gray><player> does not hold the <name></gray>"
-      list-header: "<prefix> <gold>Licences of <player></gold> <gray>no. <serial></gray>"
+      list-header: "<prefix> <gold>Operating licence of <player></gold> <gray>no. <serial></gray>"
     card:
-      title: "FTCA Driving Licence"
+      title: "FTCA Operating Licence"
       author: "Fetarute"
-      heading: "<dark_blue><bold>FTCA Driving Licence</bold></dark_blue>"
+      heading: "<dark_blue><bold>FTCA Operating Licence</bold></dark_blue>"
       holder: "<dark_gray>Holder</dark_gray> <black><player></black>"
       serial: "<dark_gray>No.</dark_gray> <black><serial></black>"
-      classes: "<dark_gray>Levels</dark_gray>"
-      endorsements: "<dark_gray>Endorsements</dark_gray>"
-      class: "<black>· <name></black>\n  <dark_gray><date></dark_gray>"
-      notice: "<black>Valid across the server for every FTCA train.</black>\n\n<dark_gray>Driving permission follows the system record; this book is only a certificate. Lost it? Run /fta license reissue.\n\nLevels and exams: /fta license</dark_gray>"
+      rule: "<dark_gray>──────────</dark_gray>"
+      post:
+        driver: "<dark_aqua><bold>Driver</bold></dark_aqua>"
+        guard: "<dark_aqua><bold>Guard</bold></dark_aqua>"
+        signaller: "<dark_aqua><bold>Signaller</bold></dark_aqua>"
+      entry: "<black> <name></black>\n<dark_gray> since <date></dark_gray>"
+      none: "<dark_gray> not held</dark_gray>"
+      upgraded: "<prefix> <green>Your driving licence was replaced by an operating licence (no. <white><serial></white> unchanged) in the same slot</green>"
+      notice: "<black>Valid across the server: the holder may take the posts listed here on every FTCA line.</black>\n\n<dark_gray>Permissions follow the system record; this book is only a certificate. Lost it? Run /fta license reissue.\n\nQualifications and exams: /fta license</dark_gray>"
   handbook:
     guard:
       title: "FTCA Guard Handbook"
@@ -1548,13 +1681,26 @@ drive:
       page-5: "<dark_blue><bold>4. Buzzer and emergency</bold></dark_blue>\n<black>Seated, right-click 6 once the starting signal clears, then hold right-click on 7 for a second (one long). One short: received; two clicks: call the driver. Right-click 9: emergency stop; one long releases it.</black>"
       page-6: "<dark_blue><bold>5. Terminals and scores</bold></dark_blue>\n<black>At a terminal move to the cab at the other end; you and the driver swap together, and are moved for you when time is short. Timeouts and wrong doors cost 5 points, early closing and missed watches 2; incident reports cost nothing.</black>"
       page-7: "<dark_blue><bold>6. Practice and exam</bold></dark_blue>\n<black>Practice: board a dispatched train and run /fta license practice guard.\nExam: sign up at a station with /fta license exam guard; a trip is assigned. A timeout or wrong door fails.</black>"
+    signaller:
+      title: "FTCA Signaller Handbook"
+      author: "Fetarute"
+      given: "<prefix> <green>The FTCA Signaller Handbook is in your inventory</green>"
+      page-1: "<dark_blue><bold>FTCA Signaller Handbook</bold></dark_blue>\n\n<black>1. Zones and duty\n2. The console\n3. Setting routes\n4. Holds and platforms\n5. Auto pass and modes\n6. Calls\n7. Scores and rewards\n8. Practice and exam</black>"
+      page-2: "<dark_blue><bold>1. Zones and duty</bold></dark_blue>\n<black>A signaller runs a control zone: trains need a route from you to enter it. Right-click a signal box console and run /fta signal on to go on duty; the zone switches to manual. /fta signal off ends the duty and the zone goes back to auto. Leaving the console too far for too long ends it too.</black>"
+      page-3: "<dark_blue><bold>2. The console</bold></dark_blue>\n<black>Title bar: zone, mode badge, signaller and notices. Yard: tracks, platforms, entry signals and trains; red is occupied, light blue the selected train's route, dashed white a route set but not yet locked. A manned station zone nested inside yours is framed in dashed amber and run by its own signaller.</black>"
+      page-4: "<dark_blue><bold>3. Setting routes</bold></dark_blue>\n<black>A train stops at the entry and waits: the list says \"waiting at entry\" and the entry signal is red. Select it and press \"Set route\"; if another train is in the way, the route stays pending. Approaching trains can be routed in advance. Cancelling a route with a train on approach time-locks the entry for a while. Unattended trains are routed by the system after a while.</black>"
+      page-5: "<dark_blue><bold>4. Holds and platforms</bold></dark_blue>\n<black>Select a train dwelling in the zone and press \"Hold\": it will not depart when its dwell ends; \"Release\" lets it go, and holds release on their own at the limit. When the selected train can use another platform, the numbers appear under the buttons; click one to switch. Once the route locks it cannot change.</black>"
+      page-6: "<dark_blue><bold>5. Auto pass and modes</bold></dark_blue>\n<black>Select a train and press \"Auto pass\": later trains from the same entry to the same track go through on their own, shown by an A at the entry signal; \"Cancel auto pass\" or clicking the A signal undoes it. \"Switch to auto\" hands the whole zone back to the system; several unattended trains in a row do the same.</black>"
+      page-7: "<dark_blue><bold>6. Calls</bold></dark_blue>\n<black>When a driver calls, the call badge lights up with the reason; click it and reply to fit:\nwaiting at the signal - \"Route is being set\" or \"Train ahead, please wait\";\ndoor fault - \"Acknowledged\";\nsomething on the line - \"Proceed at caution speed\".\nNo reply in time counts as missed; an unfitting one as wrong.</black>"
+      page-8: "<dark_blue><bold>7. Scores and rewards</bold></dark_blue>\n<black>Each shift starts at 100: auto-routing, missed calls and wrong replies cost 5 each, a train losing time in the zone 2, and two trains from different entries losing too much time together at a junction 3. Rewards count trains routed by hand; pre-routing and keeping time add half a train each, a good junction order a whole one.</black>"
+      page-9: "<dark_blue><bold>8. Practice and exam</bold></dark_blue>\n<black>Practice: run /fta license practice signaller, go on duty at a console, follow the steps, then go off duty with /fta signal off to count it.\nExam: run /fta license exam signaller, go on duty in time and route the required number of trains by hand; one simulated call comes in. Auto-routing, missed calls and wrong replies cost points; falling below the pass mark or switching to auto fails.</black>\n<dark_gray>See /fta license for the train count, pass mark and time limit.</dark_gray>"
     driver:
       title: "FTCA Driver Handbook"
       author: "Fetarute"
       given: "<prefix> <green>The FTCA driver handbook is in your inventory</green>"
-      page-1: "<dark_blue><bold>FTCA Driver Handbook</bold></dark_blue>\n\n<black>1. What FTCA does\n2. Licences\n3. Tasks and taking over\n4. The cab\n5. Signals and speed\n6. Stopping and doors\n7. Departing on time\n8. Termini and changing ends\n9. When things go wrong</black>"
+      page-1: "<dark_blue><bold>FTCA Driver Handbook</bold></dark_blue>\n\n<black>1. What FTCA does\n2. Operating licence\n3. Tasks and taking over\n4. The cab\n5. Signals and speed\n6. Stopping and doors\n7. Departing on time\n8. Termini and changing ends\n9. When things go wrong</black>"
       page-2: "<dark_blue><bold>1. What FTCA does</bold></dark_blue>\n<black>FTCA dispatches trains to the timetable, sets routes and controls signals. Players can take over these trains: dispatch gives movement authority and stops; the driver drives smoothly, stops accurately, works the doors and keeps time.</black>"
-      page-3: "<dark_blue><bold>2. Licences</bold></dark_blue>\n<black>Level 1 learner: finish the tutorial; drive non-dispatched trains.\nLevel 2 driver: practise on a dispatched train you board, then take the road test.\nGuard endorsement: see the Guard Handbook.</black>\n<dark_gray>/fta license</dark_gray>"
+      page-3: "<dark_blue><bold>2. Operating licence</bold></dark_blue>\n<black>The operating licence lists three posts side by side: driver, guard and signaller.\nDriver level 1 learner: finish the tutorial; drive non-dispatched trains.\nLevel 2 driver: practise on a dispatched train you board, then take the road test.\nGuard and signaller: see their own handbooks.</black>\n<dark_gray>/fta license</dark_gray>"
       page-4: "<dark_blue><bold>3. Tasks and taking over</bold></dark_blue>\n<black>At a station run /fta drive tasks: left-click for manual, right-click for ATO. When the train arrives, sit in the leading cab, confirm your seat and run /fta drive on. If you are not in the driver's seat, a chat button can move you there.</black>"
       page-5: "<dark_blue><bold>4. The cab</bold></dark_blue>\n<black>Hotbar 1–3 power P3–P1, 4 coast N, 5–8 brake B1–B4, 9 emergency EB.\nOnce stopped, F opens the cab panel (doors, end driving).\nAction bar: speed and limit.\nSidebar: signal, stop, times, doors.</black>"
       page-6: "<dark_blue><bold>5. Signals and speed</bold></dark_blue>\n<black>The sidebar signal is your authority: proceed at the limit; caution/slow means reduce speed; stop means stop ahead. Right-click to acknowledge a restrictive signal.\nThe advised speed in the boss bar follows the timetable curve; follow it to keep time.</black>"
@@ -1604,6 +1750,7 @@ drive:
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- Show the current driving state</gray>"
       entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- Set the reverser while stopped</gray>"
       entry-split: "  <gray>•</gray> <white>/fta drive split <keep|switch|end></white> <gray>- After the train divides: keep driving the part that stays, switch to the detached part, or end driving</gray>"
+      entry-call: "  <gray>•</gray> <white>/fta drive call [signal|doors|obstruction]</white> <gray>- Call the signaller while driving a dispatched train, optionally with a reason (waiting at the signal, door fault, something on the line); with no guard on board, two short rings do the same</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- List all driving sessions</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [player]</white> <gray>- Force a player to stop driving</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"
@@ -1643,10 +1790,16 @@ drive:
       reserved-by-other-revoke: "<prefix> <red>A trip of this train has been taken by <white><player></white>, who is due to take it over; revoke their task before taking it over</red> <click:suggest_command:'/fta drive revoke <player>'><hover:show_text:'<gray>Click to fill in:</gray> <white>/fta drive revoke <player></white>'><yellow>[Revoke task]</yellow></hover></click>"
       cab-seat-unavailable: "<prefix> <red>Cannot move you to the driver's seat: it is taken, or you are too far from the train</red>"
       cab-offer: "<prefix> <click:run_command:'/fta drive on cab'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive on cab</white>'><aqua>[Move to the driver's seat and start driving]</aqua></hover></click>"
-      guard-on-duty: "<prefix> <red>You are on guard duty and cannot drive at the same time</red>"
+      guard-on-duty: "<prefix> <red>You cannot drive while on guard duty or holding a guard duty; go off duty (/fta guard off) or abandon it (/fta guard task abandon) first</red>"
+      signaller-on-duty: "<prefix> <red>You are staffing a signal box and cannot drive at the same time; go off duty first (/fta signal off)</red>"
     stop:
       stopped: "<prefix> <yellow>Driving ended</yellow>"
       not-driving: "<prefix> <red>You are not driving</red>"
+    call:
+      called: "<prefix> <aqua>Signaller called; please wait for a reply</aqua>"
+      none: "<prefix> <yellow>No signaller is on duty</yellow>"
+      not-dispatch: "<prefix> <red>You can only call the signaller while driving a dispatched train</red>"
+      bad-reason: "<prefix> <red>The reason must be signal (waiting at the signal), doors (door fault), obstruction (something on the line) or general</red>"
     status: "<prefix> <white><train></white> <gray>|</gray> Notch <yellow><notch></yellow> <gray>|</gray> Speed <white><speed_kmh></white> km/h <gray>(limit <limit_kmh>)</gray> <gray>|</gray> <mode> accel <accel> decel <decel> m/s² <gray>|</gray> <direction> <gray>|</gray> <phase>"
     reverser:
       set: "<prefix> Reverser: <aqua><direction></aqua>"
@@ -1677,7 +1830,7 @@ drive:
       not-dispatch: "<prefix> <red>ATO is only available when driving a dispatched train</red>"
       need-stop: "<prefix> <red>Stop the train before switching the driving mode</red>"
       cab-change: "<prefix> <red>The driving mode cannot be switched while changing ends</red>"
-      exam: "<prefix> <red>The licence road test and its practice must be driven manually; the mode cannot be switched</red>"
+      exam: "<prefix> <red>The road test and its practice must be driven manually; the mode cannot be switched</red>"
       invalid: "<prefix> <red>Mode must be manual or ato</red>"
       no-permission: "<prefix> <red>You are not allowed to drive with ATO</red>"
       manual: "<prefix> <yellow>Switched to manual driving</yellow>"
@@ -1714,6 +1867,84 @@ drive:
     confirm: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; this trip will then count as abandoned</yellow>"
     confirm-handback: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; driving then ends and the train returns to automatic operation</yellow>"
     confirm-terminal: "<prefix> <yellow>You are at the terminus: open the doors first to score this trip, then leave the seat to change ends; leaving now abandons the trip. Press Shift again within 2 seconds to leave</yellow>"
+# Station signaller: console (PIDS screen with a signalbox layout), duty, calls and replies
+signaller:
+  mode:
+    manual: "Manual"
+    auto: "Auto"
+  command:
+    player-only: "<prefix> <red>Only players can run this command</red>"
+    unavailable: "<prefix> <red>The signaller feature is not ready</red>"
+    not-on-duty: "<prefix> <gray>You are not on duty at a signal box</gray>"
+    status:
+      header: "<prefix> <dark_aqua>Signal boxes</dark_aqua>"
+      line: "<gray>-</gray> <white><name></white> <gray>(<operator>:<zone>)</gray> <aqua><mode></aqua> <gray>Signaller:</gray> <white><signaller></white> <gray>waiting <white><waiting></white> · permits <white><permits></white> · held <white><holds></white></gray>"
+      empty: "<prefix> <gray>No signal box is in use</gray>"
+      nobody: "nobody"
+  duty:
+    prompt: "<prefix> <white>Control zone <aqua><zone></aqua> is unstaffed.</white> <click:run_command:'/fta signal on'><hover:show_text:'<gray>Click to run:</gray> <white>/fta signal on</white>'><green>[Go on duty]</green></hover></click>"
+    occupied: "<prefix> <yellow>Control zone <white><zone></white> is staffed by <white><signaller></white></yellow>"
+    started: "<prefix> <green>On duty at <aqua><zone></aqua>; the zone is now manual.</green> <gray>Trains entering the zone need a route set by the signaller. Staying more than <white><range></white> blocks from the console for over <white><grace></white> seconds ends the duty and returns the zone to auto. /fta signal off to go off duty</gray>"
+    started-auto: "<prefix> <yellow>On duty at <aqua><zone></aqua>; the dispatch graph is not ready, so the zone stays in auto for now. Switch to manual on the console once it is ready</yellow>"
+    start:
+      disabled: "<prefix> <red>The signaller feature is disabled</red>"
+      no-permission: "<prefix> <red>You do not have the signaller permission</red>"
+      no-request: "<prefix> <red>Right-click a signal box console first, then confirm</red>"
+      zone-not-found: "<prefix> <red>The console's control zone no longer exists</red>"
+      already-on-duty: "<prefix> <yellow>Already on duty at <white><zone></white></yellow>"
+      zone-taken: "<prefix> <red>Control zone <white><zone></white> is already staffed by <white><signaller></white></red>"
+      busy-driver: "<prefix> <red>You are driving or hold a driving task, so you cannot staff a signal box at the same time</red>"
+      busy-guard: "<prefix> <red>You are working as a guard or hold a guard task, so you cannot staff a signal box at the same time</red>"
+    away: "<prefix> <yellow>You left the <white><zone></white> console; return within <white><grace></white> seconds or the duty ends</yellow>"
+    away-bar: "<yellow>Away from the console; duty ends in <white><grace></white> s</yellow>"
+    back: "<prefix> <green>Back at the <white><zone></white> console</green>"
+    back-bar: "<green>Back at the console</green>"
+    # Several trains in a row were auto-routed with no input: the zone goes to auto (still on duty)
+    idle-auto: "<prefix> <yellow><white><count></white> trains in a row were auto-routed with no input; <white><zone></white> is now in auto.</yellow> <gray>Switch back to manual on the console when ready</gray>"
+    idle-auto-bar: "<yellow>No input for a while; the zone is now in auto</yellow>"
+    ended:
+      off-duty: "<prefix> <gray>Off duty at <white><zone></white>; the zone is back to auto</gray>"
+      left-console: "<prefix> <yellow>Away from the console too long; off duty at <white><zone></white>, the zone is back to auto</yellow>"
+      quit: "<prefix> <gray>Off duty at <white><zone></white></gray>"
+      incapacitated: "<prefix> <yellow>Your state changed; off duty at <white><zone></white>, the zone is back to auto</yellow>"
+      revoked: "<prefix> <yellow>Control zone <white><zone></white> was changed; the duty ends</yellow>"
+      shutdown: "<prefix> <gray>The signaller feature stopped; off duty at <white><zone></white></gray>"
+      exam: "<prefix> <gray>Exam over; off duty at <white><zone></white>, the zone is back to auto. Go on duty again to keep signalling</gray>"
+  call:
+    unanswered: "<prefix> <yellow>The <white><zone></white> signal box did not answer the call</yellow>"
+    incoming-signal: "<prefix> <gold>Train <white><train></white> is calling: waiting at the signal</gold> <gray>click the call badge on the console and reply \"Route is being set\" or \"Train ahead, please wait\"</gray>"
+    incoming-signal-bar: "<gold>Train <white><train></white> calling: waiting at the signal</gold>"
+    incoming-doors: "<prefix> <gold>Train <white><train></white> is calling: door fault</gold> <gray>click the call badge on the console and reply \"Acknowledged\"</gray>"
+    incoming-doors-bar: "<gold>Train <white><train></white> calling: door fault</gold>"
+    incoming-obstruction: "<prefix> <gold>Train <white><train></white> is calling: something on the line</gold> <gray>click the call badge on the console and reply \"Proceed at caution speed\"</gray>"
+    incoming-obstruction-bar: "<gold>Train <white><train></white> calling: something on the line</gold>"
+    incoming-general: "<prefix> <gold>Train <white><train></white> is calling the signal box</gold> <gray>click the call badge on the console to reply</gray>"
+    incoming-general-bar: "<gold>Train <white><train></white> calling the signal box</gold>"
+    wrong-signal: "<prefix> <yellow>The reply did not fit: <white><train></white> reported waiting at the signal; reply \"Route is being set\" (and set it) or \"Train ahead, please wait\"</yellow>"
+    wrong-doors: "<prefix> <yellow>The reply did not fit: <white><train></white> reported a door fault; reply \"Acknowledged\"</yellow>"
+    wrong-obstruction: "<prefix> <yellow>The reply did not fit: <white><train></white> reported something on the line; reply \"Proceed at caution speed\"</yellow>"
+  # Passive alerts while on duty (chat, action bar and a chime)
+  alert:
+    waiting: "<prefix> <gold>Train <white><train></white> has waited <white><seconds></white> s at the <white><zone></white> entry</gold> <gray>It will be auto-routed when the time limit is reached</gray>"
+    waiting-bar: "<gold>Train <white><train></white> waiting at entry for <white><seconds></white> s</gold>"
+    auto-routed: "<prefix> <yellow>Train <white><train></white> waited too long at the <white><zone></white> entry and was auto-routed</yellow>"
+    auto-routed-bar: "<yellow>Train <white><train></white> was auto-routed</yellow>"
+    hold-expired: "<prefix> <yellow>Train <white><train></white> reached the hold limit and was released</yellow>"
+    hold-expired-bar: "<yellow>Train <white><train></white> hold limit reached, released</yellow>"
+    hold-ended: "<prefix> <yellow>Train <white><train></white> is no longer dwelling; the hold is cleared</yellow>"
+    hold-ended-bar: "<yellow>Train <white><train></white> departed; hold cleared</yellow>"
+  cue:
+    approaching: "<gold>Train <white><train></white> approaching <white><zone></white></gold>"
+    waiting: "<yellow>Train <white><train></white> waiting at the <white><zone></white> entry for a route</yellow>"
+  reply:
+    wait: "<prefix> <aqua><zone></aqua> <white>signal box: train ahead, please wait</white>"
+    wait-bar: "<aqua>Signal box:</aqua> <white>train ahead, please wait</white>"
+    route-setting: "<prefix> <aqua><zone></aqua> <white>signal box: route is being set</white>"
+    route-setting-bar: "<aqua>Signal box:</aqua> <white>route is being set</white>"
+    caution: "<prefix> <aqua><zone></aqua> <white>signal box: proceed at caution</white>"
+    caution-bar: "<aqua>Signal box:</aqua> <white>proceed at caution</white>"
+    ack: "<prefix> <aqua><zone></aqua> <white>signal box: received</white>"
+    ack-bar: "<aqua>Signal box:</aqua> <white>received</white>"
 sign:
   # AutoStation sign line 4 is blank or unrecognised: the doors will not open at this stop
   autostation-door-missing: "<prefix> <yellow>Line 4 has no valid door direction; trains stopping here will not open their doors.</yellow>\n<gray>Write the world direction of the doors (N/E/S/W/NE/NW/SE/SW) or BOTH; write NONE if this platform has no doors to open.</gray>"
@@ -1780,3 +2011,102 @@ command:
       unlinked: "<prefix> <yellow>Removed the link from <white><from></white></yellow>"
       myworlds-unavailable: "<prefix> <red>MyWorlds portals are unavailable; existing links were left unchanged</red>"
       save-failed: "<prefix> <red>Saving portal links failed; nothing was changed. Check the console log</red>"
+pids:
+  board:
+    # Signal box console (signalbox-3x5, signalbox-4x8): header, train list, buttons and transient notices
+    signalbox:
+      # Header: mode badge, signaller on duty (<name>), driver call badge (<train>)
+      mode:
+        manual: "Manual"
+        auto: "Auto"
+      signaller: "On duty: <name>"
+      unattended: "Unattended"
+      call: "<train> calling: <reason>"
+      call-reason:
+        signal: "at signal"
+        doors: "door fault"
+        obstruction: "line issue"
+        general: "contact"
+      # Train list column headers
+      header:
+        train: "Train"
+        destination: "To"
+        status: "Status"
+        delay: "Delay"
+      # Train list status; <seconds> is how long the train has been in it
+      status:
+        approaching: "Approaching"
+        waiting: "Waiting at entry <seconds> s"
+        route-pending: "Route being set"
+        route-set: "Route locked"
+        in-zone: "In zone"
+        dwelling: "Dwelling"
+        held: "Held <seconds> s"
+      # Auto-routed trains: <status> is the status above
+      auto-routed: "<status> (auto)"
+      # Area handed to a staffed nested zone; <zone> is its name, <name> its signaller
+      delegated: "<zone> · station control (<name>)"
+      on-time: "On time"
+      no-trains: "No trains in the control zone"
+      # Buttons: primary 12 px over secondary 10 px, 100 px wide
+      button:
+        set-route: "Set route"
+        set-route-secondary: ""
+        cancel-route: "Cancel route"
+        cancel-route-secondary: ""
+        hold: "Hold"
+        hold-secondary: ""
+        release: "Release"
+        release-secondary: ""
+        auto-pass: "Auto pass"
+        auto-pass-secondary: ""
+        to-auto: "Switch to auto"
+        to-auto-secondary: ""
+        to-manual: "Switch to manual"
+        to-manual-secondary: ""
+        cancel-auto-pass: "Cancel auto pass"
+        cancel-auto-pass-secondary: ""
+      # The four fixed replies to a driver's call
+      reply:
+        wait: "Train ahead, please wait"
+        wait-secondary: ""
+        route-setting: "Route is being set"
+        route-setting-secondary: ""
+        caution: "Proceed at caution speed"
+        caution-secondary: ""
+        ack: "Acknowledged"
+        ack-secondary: ""
+      # Transient notices on the right of the header; <train> in route-blocked-by is the blocking train
+      notice:
+        route-blocked: "Route occupied, permission pending"
+        route-blocked-by: "Route occupied by <train>"
+        route-locked: "Route locked, cannot cancel"
+        not-dwelling: "Train is not dwelling, cannot hold"
+        platform-unavailable: "The platform can no longer be changed"
+        platform-locked: "Route to the original platform is locked"
+        auto-pass-on: "Auto pass set"
+        auto-pass-off: "Auto pass cleared"
+        reply-sent: "Reply sent"
+        reply-wrong: "Reply did not fit the call from <train>"
+        hold-expired: "<train> hold limit reached, released"
+        hold-ended: "<train> is no longer dwelling; hold cleared"
+        no-route: "Entry unknown, cannot set auto pass"
+        graph-not-ready: "Rail graph not ready, cannot go manual"
+        graph-not-ready-auto: "Rail graph not ready; auto for now"
+        no-selection: "Select a train first"
+        auto-mode: "Trains run automatically; switch to manual first"
+        already-routed: "This train already has a route"
+        in-zone: "This train is already in the zone"
+        no-permit: "No route to cancel for this train"
+        already-held: "This train is already held"
+        not-held: "This train is not held"
+        auto-routed: "<train> waited too long and was auto-routed"
+        auto-route-due: "Past the time limit; <train> will be auto-routed now"
+        idle-auto: "No input for a while; switched to auto"
+        approach-locking: "<train> is on approach: entry time-locked"
+        approach-locked: "Entry for <train> is time-locked; try again shortly"
+      # Shown in place of the train list when there is no console data
+      not-ready: "Signal box console not ready"
+      not-ready-secondary: ""
+      no-zone: "No control zone: bind one with /fta signal console set <console> zone <zone>"
+      no-zone-secondary: ""

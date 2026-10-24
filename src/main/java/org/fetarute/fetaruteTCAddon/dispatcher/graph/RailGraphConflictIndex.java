@@ -37,6 +37,23 @@ public final class RailGraphConflictIndex {
 
   public static RailGraphConflictIndex fromGraph(RailGraph graph) {
     Objects.requireNonNull(graph, "graph");
+    return fromGraph(graph, RailGraphComponentIndex.fromGraph(graph));
+  }
+
+  /**
+   * 用已建好的连通分量索引构建冲突组索引，免得重算一遍分量。只给图快照自己缓存索引时用。
+   *
+   * @param componentIndex 同一张图的连通分量索引
+   * @throws IllegalArgumentException 分量索引里缺这张图的节点（不是同一张图的索引）
+   */
+  static RailGraphConflictIndex fromGraph(RailGraph graph, RailGraphComponentIndex componentIndex) {
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(componentIndex, "componentIndex");
+    for (RailNode node : graph.nodes()) {
+      if (node != null && node.id() != null && componentIndex.componentKey(node.id()) == null) {
+        throw new IllegalArgumentException("连通分量索引不属于这张图：缺节点 " + node.id().value());
+      }
+    }
     Map<EdgeId, String> conflictByEdge = new HashMap<>();
     Map<EdgeId, RailGraphCorridorInfo> corridorByEdge = new HashMap<>();
     Set<EdgeId> assigned = new HashSet<>();
@@ -62,8 +79,6 @@ public final class RailGraphConflictIndex {
         boundaries.add(id);
       }
     }
-
-    RailGraphComponentIndex componentIndex = RailGraphComponentIndex.fromGraph(graph);
 
     for (NodeId boundary : boundaries) {
       for (RailEdge edge : graph.edgesFrom(boundary)) {

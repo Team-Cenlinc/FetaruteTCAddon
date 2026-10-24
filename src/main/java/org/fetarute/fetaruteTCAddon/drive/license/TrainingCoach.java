@@ -23,7 +23,7 @@ import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 路考练习的教练与应急演练，以及练习、路考共用的延误保护。只在服务器主线程、由驾驶证服务定时调用。
+ * 路考练习的教练与应急演练，以及练习、路考共用的延误保护。只在服务器主线程、由操作许可证服务定时调用。
  *
  * <ul>
  *   <li>教练（只在练习）：每个停站阶段说一句该做什么（进站减速、开哪一侧的门、关门、等信号、起步），信号变严提醒确认，超速提醒降速；

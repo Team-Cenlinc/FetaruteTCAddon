@@ -1,0 +1,39 @@
+# 站场图 4×8（1024×512，4 行 8 列地图）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 与 yard-3x5 同样的组件，画面更大：适合跨几个车站的控制区，或股道多的大站。
+# 只读，绑定车站或控制区后显示；不能与其他布局组合翻页。
+format: 1
+name: 站场图 4×8
+tiles:
+  rows: 4
+  cols: 8
+widgets:
+  - type: station-title
+    x: 8
+    y: 4
+    width: 800
+    sizes: [24, 20]
+    secondary: 12
+    gap: 8
+  # 右对齐时 x 为右缘
+  - type: clock
+    x: 1012
+    y: 8
+    size: 20
+    align: right
+  # inset：轨道距组件边缘的留白；label：股道号、车次窗与去向的字号
+  - type: yard
+    x: 0
+    y: 32
+    width: 1024
+    height: 396
+    inset: 6
+    label: 10
+  # 两行样例加一行说明，贴着底边
+  - type: yard-legend
+    x: 0
+    y: 428
+    width: 1024
+    height: 84
+    label: {size: 12, secondary: 10, gap: 6}
+    note: 10

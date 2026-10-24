@@ -1,12 +1,19 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
+import com.bergerkiller.bukkit.tc.properties.CartProperties;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
@@ -133,5 +140,33 @@ final class TrainSignBypassListenerTest {
     verify(event).setCancelled(true);
     verify(event, never()).getAction();
     assertEquals(0, debugCount.get());
+  }
+
+  /** 任一节车厢带 FTA_BYPASS 即算；与 TrainCarts 的 matchTag 一样按整串、区分大小写比较，不认前缀相同或大小写不同的标签。 */
+  @Test
+  void bypassTagIsAnExactTagOnAnyCar() {
+    assertTrue(
+        TrainSignBypassListener.carriesBypassTag(
+            train(Set.of("FTA_OPERATOR_CODE=SURC"), Set.of("FTA_BYPASS", "FTA_LINE_CODE=MT"))));
+    assertFalse(
+        TrainSignBypassListener.carriesBypassTag(
+            train(Set.of("FTA_OPERATOR_CODE=SURC"), Set.of("FTA_LINE_CODE=MT"))));
+    assertFalse(TrainSignBypassListener.carriesBypassTag(train(Set.of("fta_bypass"))));
+    assertFalse(TrainSignBypassListener.carriesBypassTag(train(Set.of("FTA_BYPASS_OFF"))));
+    assertFalse(TrainSignBypassListener.carriesBypassTag(train()));
+    assertFalse(TrainSignBypassListener.carriesBypassTag(null));
+  }
+
+  @SafeVarargs
+  private static TrainProperties train(Set<String>... carts) {
+    List<CartProperties> cars = new ArrayList<>();
+    for (Set<String> tags : carts) {
+      CartProperties cart = mock(CartProperties.class);
+      when(cart.getTags()).thenReturn(tags);
+      cars.add(cart);
+    }
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.iterator()).thenAnswer(invocation -> cars.iterator());
+    return properties;
   }
 }

@@ -36,6 +36,8 @@ final class LocaleKeyMoves {
     moved.put("drive.hud.driver.confirm-signal", "drive.hud.driver.acknowledge-signal");
     moved.put("drive.driver.signal.confirmed", "drive.driver.signal.acknowledged");
     moved.put("drive.tutorial.tips.signal-confirm.", "drive.tutorial.tips.signal-acknowledge.");
+    moved.put("signaller.call.incoming", "signaller.call.incoming-general");
+    moved.put("signaller.call.incoming-bar", "signaller.call.incoming-general-bar");
     return Collections.unmodifiableMap(moved);
   }
 

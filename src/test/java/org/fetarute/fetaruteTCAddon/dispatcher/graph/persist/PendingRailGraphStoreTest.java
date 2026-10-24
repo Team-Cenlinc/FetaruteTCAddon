@@ -186,6 +186,73 @@ class PendingRailGraphStoreTest {
     assertThrows(java.io.IOException.class, () -> store.load(world), "联锁与拓扑不匹配时拒绝候选");
   }
 
+  /** 节点的开门方向随候选写盘；旧缓存没有这一栏时读回为空，照常可以激活。 */
+  @Test
+  void doorDirectionRoundTripsAndLegacyCacheReadsAsEmpty() throws Exception {
+    UUID world = UUID.randomUUID();
+    NodeId a = NodeId.of("OP:S:A:1"), b = NodeId.of("OP:S:B:1");
+    List<RailNodeRecord> nodes =
+        List.of(
+            new RailNodeRecord(
+                world,
+                a,
+                NodeType.STATION,
+                0,
+                64,
+                0,
+                Optional.of(a.value()),
+                Optional.of(WaypointMetadata.station("OP", "A", 1)),
+                Optional.of("WEST")),
+            new RailNodeRecord(
+                world,
+                b,
+                NodeType.STATION,
+                10,
+                64,
+                0,
+                Optional.of(b.value()),
+                Optional.of(WaypointMetadata.station("OP", "B", 1))));
+    var graph =
+        RailGraphService.buildGraphFromRecords(
+            nodes,
+            List.of(
+                new RailEdgeRecord(
+                    world,
+                    EdgeId.undirected(a, b),
+                    10,
+                    8.0,
+                    true,
+                    Set.of(new RailFootprintCell(5, 64, 0)))));
+    var result =
+        new RailGraphBuildResult(
+            graph,
+            Instant.parse("2026-10-12T00:01:00Z"),
+            RailGraphSignature.signatureForNodes(nodes),
+            nodes,
+            List.of(),
+            List.of());
+    var store = new PendingRailGraphStore(directory);
+    store.save(world, new PendingRailGraphStore.Candidate(result, Optional.empty(), ""));
+
+    var restored = store.load(world).orElseThrow();
+    assertEquals(nodes, restored.result().nodes());
+    assertEquals(
+        Optional.of("WEST"), restored.result().graph().findNode(a).orElseThrow().doorDirection());
+
+    // 旧缓存：节点没有 door 这一栏
+    Path file = directory.resolve(world + ".json");
+    var json = com.google.gson.JsonParser.parseString(Files.readString(file)).getAsJsonObject();
+    assertTrue(json.toString().contains("\"door\":\"WEST\""));
+    json.getAsJsonArray("nodes").forEach(node -> node.getAsJsonObject().remove("door"));
+    Files.writeString(file, json.toString());
+
+    var legacy = store.load(world).orElseThrow();
+    assertTrue(
+        legacy.result().nodes().stream().allMatch(node -> node.doorDirection().isEmpty()),
+        "旧缓存读回没有开门方向");
+    assertEquals(2, legacy.result().graph().nodes().size());
+  }
+
   /** 状态显示只读文件开头的元数据：后面的拓扑与联锁即使损坏也不去解码。 */
   @Test
   void summaryReadsOnlyTheHeader() throws Exception {

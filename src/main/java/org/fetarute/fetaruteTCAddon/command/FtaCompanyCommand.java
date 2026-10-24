@@ -1116,6 +1116,7 @@ public final class FtaCompanyCommand {
                   // 永久删除公司记录，不可恢复。
                   provider.companies().delete(company.id());
                   plugin.refreshStationDirectory();
+                  plugin.refreshControlZones();
                   sender.sendMessage(
                       locale.component(
                           "command.company.admin.purge.success", Map.of("code", company.code())));

@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 
@@ -33,6 +34,23 @@ public final class TrainNameFormatter {
     int normalized = raw == Integer.MIN_VALUE ? 0 : Math.abs(raw);
     String seq = String.format(Locale.ROOT, "%04d", normalized % 10000);
     return op + "-" + ln + "-" + patternInit + destInit + "-" + seq;
+  }
+
+  /**
+   * {@link #buildTrainName} 生成的名字末尾的 4 位序号：站场图车次窗、信号员控制台用它当车次（短、一车一号）；别的名字为空。
+   *
+   * @param trainName 列车名
+   */
+  public static Optional<String> sequence(String trainName) {
+    if (trainName == null) {
+      return Optional.empty();
+    }
+    int dash = trainName.lastIndexOf('-');
+    String tail = dash < 0 ? "" : trainName.substring(dash + 1);
+    if (dash > 0 && tail.length() == 4 && tail.chars().allMatch(c -> c >= '0' && c <= '9')) {
+      return Optional.of(tail);
+    }
+    return Optional.empty();
   }
 
   private static String patternInitial(RoutePatternType pattern) {

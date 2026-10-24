@@ -146,6 +146,25 @@ class PidsScreenRepositoryTest {
   }
 
   @Test
+  void zoneRoundTrips() {
+    PidsScreen pending = screens.save(screen(5));
+    assertTrue(screens.findById(pending.id()).orElseThrow().zone().isEmpty());
+
+    PidsScreen zoned =
+        screens.save(
+            pending
+                .withOperator("SURC", Set.of(), pending.updatedAt())
+                .withZone(Optional.of("north"), now()));
+
+    PidsScreen loaded = screens.findById(pending.id()).orElseThrow();
+    assertEquals(zoned, loaded);
+    assertEquals(Optional.of("NORTH"), loaded.zone());
+
+    screens.save(loaded.withZone(Optional.empty(), now()));
+    assertTrue(screens.findById(pending.id()).orElseThrow().zone().isEmpty());
+  }
+
+  @Test
   void twoScreensCannotShareAnAnchor() {
     screens.save(screen(5));
 

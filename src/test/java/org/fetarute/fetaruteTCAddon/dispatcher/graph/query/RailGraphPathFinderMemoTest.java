@@ -101,6 +101,26 @@ final class RailGraphPathFinderMemoTest {
   }
 
   @Test
+  void remembersReportsMemoWithoutSearching() {
+    SimpleRailGraph graph = diamond(Set.of());
+    EdgeId bd = EdgeId.undirected(B, D);
+    EdgeOverrideRailGraph blocked =
+        new EdgeOverrideRailGraph(graph, Map.of(bd, block(bd, Optional.empty(), true)), NOW);
+
+    assertFalse(RailGraphPathFinder.remembers(graph, A, D));
+    assertFalse(RailGraphPathFinder.remembers(graph, A, D), "只查不算");
+
+    shortest(graph);
+
+    assertTrue(RailGraphPathFinder.remembers(graph, A, D));
+    assertTrue(
+        RailGraphPathFinder.remembers(new EdgeOverrideRailGraph(graph, Map.of(), NOW), A, D),
+        "没有覆盖封锁的视图与底层图同一个键");
+    assertFalse(RailGraphPathFinder.remembers(blocked, A, D), "覆盖封锁不同，键不同");
+    assertFalse(RailGraphPathFinder.remembers(graph, D, A), "有方向");
+  }
+
+  @Test
   void unreachableResultIsRememberedAsEmpty() {
     SimpleRailGraph graph = new SimpleRailGraph(Map.of(A, node(A), D, node(D)), Map.of(), Set.of());
 

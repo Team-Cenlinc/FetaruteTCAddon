@@ -32,4 +32,14 @@ public interface RailNode {
   default Optional<WaypointMetadata> waypointMetadata() {
     return Optional.empty();
   }
+
+  /**
+   * AutoStation 牌子第 4 行写的开门方向，记为 {@code AutoStationDoorDirection} 的名字（如 {@code NORTH}、{@code
+   * BOTH}）；不是车站节点、没写、写的认不出或建图时还没记下时为空。
+   *
+   * <p>按世界方位理解，站场图据此判断站台在股道哪一侧。
+   */
+  default Optional<String> doorDirection() {
+    return Optional.empty();
+  }
 }

@@ -15,6 +15,7 @@ import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
+import org.fetarute.fetaruteTCAddon.company.api.ControlZoneDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
@@ -39,11 +40,27 @@ public final class PidsStickMenu {
     this.locale = Objects.requireNonNull(locale, "locale");
   }
 
-  /** 发送配置菜单。 */
-  public void open(CommandSender sender, PidsService service, PidsScreen screen) {
-    String set = "/fta pids set " + screen.id() + " ";
-    sender.sendMessage(locale.component("pids.menu.header", headerValues(service, screen)));
+  /** 管这块屏幕的命令：信号员控制台归 {@code /fta signal console}，其余站台屏归 {@code /fta pids}。 */
+  public static String command(PidsService service, PidsScreen screen) {
+    return service.isSignalbox(screen) ? "/fta signal console" : "/fta pids";
+  }
 
+  /**
+   * 发送配置菜单。信号员控制台只列它用得上的几行（运营商、控制区、布局、外观、模式与拆除），点了执行 {@code /fta signal console}
+   * 的命令；布局一行只列同一种屏幕（站台屏或控制台）的布局。
+   */
+  public void open(CommandSender sender, PidsService service, PidsScreen screen) {
+    boolean console = service.isSignalbox(screen);
+    String set = command(service, screen) + " set " + screen.id() + " ";
+    sender.sendMessage(locale.component("pids.menu.header", headerValues(service, screen)));
+    if (!console) {
+      stationRow(sender, service, screen, set);
+    }
+    rows(sender, service, screen, set, console);
+  }
+
+  private void stationRow(
+      CommandSender sender, PidsService service, PidsScreen screen, String set) {
     Component stations = label("pids.menu.station");
     List<PidsStationKey> candidates = new ArrayList<>();
     screen.station().ifPresent(candidates::add);
@@ -62,10 +79,14 @@ public final class PidsStickMenu {
     }
     stations = stations.append(suggest(locale.text("pids.menu.station-manual"), set + "station "));
     sender.sendMessage(stations);
+  }
 
+  private void rows(
+      CommandSender sender, PidsService service, PidsScreen screen, String set, boolean console) {
     boolean lineStatus = service.isLineStatus(screen);
-    if (lineStatus) {
-      // 线路运行状况屏可以不绑车站、只绑运营商（例如挂在大厅里）。
+    boolean yard = service.isYard(screen);
+    if (lineStatus || yard) {
+      // 线路运行状况屏可以不绑车站、只绑运营商（例如挂在大厅里）；站场图屏只绑运营商时再选控制区。
       Component operators = label("pids.menu.operator");
       for (String operator : service.operatorChoices(sender, screen, OPERATOR_CHOICES)) {
         operators =
@@ -85,8 +106,12 @@ public final class PidsStickMenu {
           operators.append(suggest(locale.text("pids.menu.station-manual"), set + "operator "));
       sender.sendMessage(operators);
     }
-    rotationRow(service, screen, set).ifPresent(sender::sendMessage);
-    if (screen.station().isPresent() && !lineStatus) {
+    if (!console) {
+      rotationRow(service, screen, set).ifPresent(sender::sendMessage);
+    }
+    if (yard) {
+      sender.sendMessage(zoneRow(service, screen, set));
+    } else if (screen.station().isPresent() && !lineStatus) {
       sender.sendMessage(platformRow(service, screen, screen.station().get(), set));
       sender.sendMessage(lineRow(service, screen, set));
     } else if (lineStatus && screen.operatorCode().isPresent()) {
@@ -101,7 +126,7 @@ public final class PidsStickMenu {
 
     Component layouts = label("pids.menu.layout");
     for (PidsLayout layout : service.layouts().all()) {
-      if (PidsScreenPages.fits(screen, layout)) {
+      if (layout.signalbox() == console && PidsScreenPages.fits(screen, layout)) {
         layouts =
             layouts.append(
                 button(
@@ -112,7 +137,9 @@ public final class PidsStickMenu {
       }
     }
     sender.sendMessage(layouts);
-    pageRow(service, screen, set).ifPresent(sender::sendMessage);
+    if (!console) {
+      pageRow(service, screen, set).ifPresent(sender::sendMessage);
+    }
 
     Component appearance = label("pids.menu.appearance");
     for (PidsScreen.Appearance value : PidsScreen.Appearance.values()) {
@@ -141,11 +168,11 @@ public final class PidsStickMenu {
                         locale.text("pids.menu.remove"),
                         false,
                         null,
-                        "/fta pids remove " + screen.id())
+                        command(service, screen) + " remove " + screen.id())
                     .color(NamedTextColor.RED)));
   }
 
-  /** 发送屏幕信息（配置棍左键、{@code /fta pids info}）。 */
+  /** 发送屏幕信息（配置棍左键、{@code /fta pids info}、{@code /fta signal console info}）。 */
   public void info(CommandSender sender, PidsService service, PidsScreen screen) {
     sender.sendMessage(locale.component("pids.info.header", headerValues(service, screen)));
     sender.sendMessage(
@@ -169,6 +196,20 @@ public final class PidsStickMenu {
           locale.component(
               "pids.info.rotation", Map.of("operators", String.join(" → ", screen.rotation()))));
     }
+    screen
+        .zone()
+        .ifPresent(
+            code ->
+                sender.sendMessage(
+                    locale.component(
+                        "pids.info.zone",
+                        Map.of(
+                            "zone",
+                            screen
+                                .operatorCode()
+                                .flatMap(operator -> service.findZone(operator, code))
+                                .map(zone -> zone.zone().name() + "（" + code + "）")
+                                .orElse(code)))));
     sender.sendMessage(
         locale.component(
             "pids.info.location",
@@ -188,8 +229,8 @@ public final class PidsStickMenu {
   }
 
   /** 拆除前确认。 */
-  public void promptRemove(CommandSender sender, PidsScreen screen) {
-    String command = "/fta pids remove " + screen.id() + " confirm";
+  public void promptRemove(CommandSender sender, PidsService service, PidsScreen screen) {
+    String command = command(service, screen) + " remove " + screen.id() + " confirm";
     sender.sendMessage(
         locale
             .component("pids.remove.confirm", Map.of("id", PidsComposer.shortId(screen.id())))
@@ -251,6 +292,31 @@ public final class PidsStickMenu {
                             .orElse(operator))
                     .replace("<code>", operator))
         .orElseGet(() -> locale.text("command.pids.list.unbound"));
+  }
+
+  /** 站场图屏的控制区：不绑定，或屏幕所属运营商名下的控制区之一。 */
+  private Component zoneRow(PidsService service, PidsScreen screen, String set) {
+    Component row = label("pids.menu.zone");
+    if (screen.operatorCode().isEmpty()) {
+      return row.append(locale.component("pids.menu.need-binding"));
+    }
+    row =
+        row.append(
+            button(
+                locale.text("pids.menu.zone-none"),
+                screen.zone().isEmpty(),
+                null,
+                set + "zone " + PidsScreen.NONE));
+    for (ControlZoneDirectory.Zone zone : service.zoneChoices(screen)) {
+      row =
+          row.append(
+              button(
+                  zone.zone().name(),
+                  screen.zone().equals(Optional.of(zone.code())),
+                  null,
+                  set + "zone " + zone.code()));
+    }
+    return row.append(suggest(locale.text("pids.menu.station-manual"), set + "zone "));
   }
 
   /**
