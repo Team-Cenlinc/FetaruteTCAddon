@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
@@ -19,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
  * 只读 HTTP 接口的路由：按路径分发到各接口，回应经 {@link WebResponseCache} 短时缓存。只认 GET 与 HEAD。纯逻辑，不碰网络与服务器对象，可在任意线程调用。
  *
  * <ul>
- *   <li>{@code /v1/meta}：版本、服务器时刻与时区、接口清单
+ *   <li>{@code /v1/meta}：版本、本服的服务器 ID、服务器时刻与时区、接口清单
  *   <li>{@code /v1/operators}、{@code /v1/lines}、{@code /v1/stations}：运营商、线路、车站（含停靠线路与车站组）
  *   <li>{@code /v1/trains}：在线列车
  *   <li>{@code /v1/stations/{运营商}/{站码}/board?line=&horizon=}：站牌（{@code horizon} 秒，默认
@@ -58,13 +59,23 @@ final class WebApiRouter {
   private final WebResponseCache cache;
   private final Clock clock;
   private final String apiVersion;
+  private final Supplier<Optional<String>> serverId;
   private final Gson gson = new GsonBuilder().disableHtmlEscaping().create();
 
-  WebApiRouter(WebApiData data, WebResponseCache cache, Clock clock, String apiVersion) {
+  /**
+   * @param serverId 本服的服务器 ID（配置里的 {@code server-id}，重载后可能变）；没配时为空
+   */
+  WebApiRouter(
+      WebApiData data,
+      WebResponseCache cache,
+      Clock clock,
+      String apiVersion,
+      Supplier<Optional<String>> serverId) {
     this.data = Objects.requireNonNull(data, "data");
     this.cache = Objects.requireNonNull(cache, "cache");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.apiVersion = Objects.requireNonNull(apiVersion, "apiVersion");
+    this.serverId = Objects.requireNonNull(serverId, "serverId");
   }
 
   WebResponse route(WebRequest request) {
@@ -77,7 +88,10 @@ final class WebApiRouter {
         return cache.get(
             path,
             META_MAX_AGE,
-            () -> json(WebApiViews.meta(apiVersion, now(), clock.getZone(), ENDPOINTS)));
+            () ->
+                json(
+                    WebApiViews.meta(
+                        apiVersion, serverId.get(), now(), clock.getZone(), ENDPOINTS)));
       case "/v1/operators":
         return cache.get(
             path, CATALOG_MAX_AGE, () -> json(WebApiViews.operators(now(), data.operators())));
