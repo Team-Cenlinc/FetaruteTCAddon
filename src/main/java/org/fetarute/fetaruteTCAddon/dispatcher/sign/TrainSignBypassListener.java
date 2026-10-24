@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
+import com.bergerkiller.bukkit.tc.properties.CartProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.util.Locale;
@@ -134,11 +135,23 @@ public final class TrainSignBypassListener implements Listener {
 
   private static boolean hasBypassTag(SignActionEvent event) {
     MinecartGroup group = resolveGroup(event);
-    if (group == null) {
+    return group != null && carriesBypassTag(group.getProperties());
+  }
+
+  /**
+   * 列车有没有 {@link #FTA_BYPASS_TAG}：逐节车厢查标签集合。与 {@code TrainProperties#matchTag} 同义（查的标签里没有通配符 {@code
+   * *} 与取反 {@code !} 时，TrainCarts 按整串、区分大小写比较），但不对每节车厢的每个标签逐个做通配符匹配：牌子事件每节车厢都会触发，早晚两个监听各查一次。
+   */
+  static boolean carriesBypassTag(TrainProperties properties) {
+    if (properties == null) {
       return false;
     }
-    TrainProperties properties = group.getProperties();
-    return properties != null && properties.matchTag(FTA_BYPASS_TAG);
+    for (CartProperties cart : properties) {
+      if (cart.getTags().contains(FTA_BYPASS_TAG)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static MinecartGroup resolveGroup(SignActionEvent event) {
