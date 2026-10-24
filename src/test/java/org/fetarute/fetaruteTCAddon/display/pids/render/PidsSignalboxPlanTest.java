@@ -1,12 +1,12 @@
 package org.fetarute.fetaruteTCAddon.display.pids.render;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsGlyphForm;
 import org.fetarute.fetaruteTCAddon.display.pids.fixtures.SignalboxFixtures;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
@@ -186,10 +186,79 @@ class PidsSignalboxPlanTest {
             .orElseThrow();
     assertTrue(east.letter().isPresent(), "东头设了自动通过，写 A");
     PidsSignalboxPlan.Box blank = east.square();
-    assertFalse(
-        at(view, blank.x() + 2, blank.y() + 2) instanceof ConsoleTarget.Train train
-            && train.trainName().equals(SignalboxFixtures.WAITING),
-        "没有车在等的信号不是哪列车");
+    assertEquals(
+        new ConsoleTarget.Signal(SignalboxFixtures.EAST_ENTRY),
+        at(view, blank.x() + 2, blank.y() + 2),
+        "没有车在等、设了自动通过的信号：撤掉这个入口的自动通过");
+  }
+
+  /** 选中的车排在列车表画不下的地方时顶替最后一行：按钮作用的那列车总看得见。 */
+  @Test
+  void theSelectedTrainStaysVisibleBeyondTheLastRow() {
+    SignalboxState base = SignalboxFixtures.state();
+    List<SignalboxState.TrainRow> rows = new ArrayList<>(base.rows());
+    for (int i = 0; i < 3; i++) {
+      rows.add(
+          new SignalboxState.TrainRow(
+              "extra-" + i,
+              "E" + i,
+              Optional.empty(),
+              Optional.empty(),
+              SignalboxState.RowStatus.IN_ZONE,
+              0,
+              OptionalLong.empty(),
+              0.0,
+              false,
+              false));
+    }
+
+    PidsSignalboxPlan plan = plan(copy(base, rows, Optional.of("extra-2")));
+
+    assertEquals(4, plan.rows().size());
+    assertEquals(SignalboxFixtures.WAITING, plan.rows().get(0).row().trainName());
+    assertEquals("extra-2", plan.rows().get(3).row().trainName());
+    assertTrue(plan.rows().get(3).selected());
+  }
+
+  /** 选中车的进路已设自动通过时，自动通过按钮写“取消自动通过”。 */
+  @Test
+  void theAutoPassButtonOffersToCancelWhenTheSelectedRouteHasIt() {
+    SignalboxState base = SignalboxFixtures.state();
+
+    String plain = autoPassLabel(plan(base));
+    String set =
+        autoPassLabel(plan(copy(base, base.rows(), Optional.of(SignalboxFixtures.TRAIN_B))));
+
+    assertEquals("自动通过", plain);
+    assertEquals("取消自动通过", set);
+  }
+
+  private static String autoPassLabel(PidsSignalboxPlan plan) {
+    return plan.buttons().stream()
+        .filter(
+            button ->
+                button.target().equals(new ConsoleTarget.Press(SignalboxState.Button.AUTO_PASS)))
+        .findFirst()
+        .orElseThrow()
+        .label()
+        .primary();
+  }
+
+  private static SignalboxState copy(
+      SignalboxState state, List<SignalboxState.TrainRow> rows, Optional<String> selected) {
+    return new SignalboxState(
+        state.mode(),
+        state.signaller(),
+        selected,
+        rows,
+        state.buttons(),
+        state.call(),
+        state.replying(),
+        state.notice(),
+        state.preview(),
+        state.pending(),
+        state.signals(),
+        state.platforms());
   }
 
   @Test

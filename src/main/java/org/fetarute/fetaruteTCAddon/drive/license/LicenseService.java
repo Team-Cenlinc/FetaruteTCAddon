@@ -59,18 +59,20 @@ import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.drive.tutorial.DriveTutorials;
+import org.fetarute.fetaruteTCAddon.signaller.SignallerExaminer;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 驾驶证：玩家自己考试拿驾驶权限，不必等管理员授权。
+ * 操作许可证：玩家自己考试拿驾驶、车掌、信号员的权限，不必等管理员授权。
  *
- * <p>持有哪些等级记在插件的数据库里（多服共用一个库时一起生效）；玩家在线时，插件按持有的等级替他挂上配置里的权限节点（Bukkit 权限附件，子节点随之生效），
- * 不改任何权限插件的数据。考试期间临时挂上所考那一级的节点，考完撤下。
+ * <p>持有哪些资格记在插件的数据库里（多服共用一个库时一起生效）；玩家在线时，插件按持有的资格替他挂上配置里的权限节点（Bukkit 权限附件，子节点随之生效），
+ * 不改任何权限插件的数据。考试期间临时挂上所考那一项的节点，考完撤下。
  *
- * <p>三种考试：完整做完新手教程（练习步骤不能跳过）；路考——给考生派一段调度列车的区间任务，按终态与成绩判定；车掌——给考生派一段调度列车的车掌区间任务，逐站讲评，做满站数后按车掌成绩判定。
- * 路考与车掌考试前要先练习：练习不派车，玩家自己坐上要练的那列调度列车再报名。考过发一本驾驶证（成书，把记录印出来，只是凭证），丢了可以补发。只在服务器主线程调用（数据库读写在异步线程，结果回到主线程）。
+ * <p>四种考试：完整做完新手教程（练习步骤不能跳过）；路考——给考生派一段调度列车的区间任务，按终态与成绩判定；车掌——给考生派一段调度列车的车掌区间任务，逐站讲评，做满站数后按车掌成绩判定；
+ * 信号员——到控制台上岗、亲手排满几列车的进路，按扣分判定（见 {@link SignallerExams}）。路考与车掌考试前要先练习：练习不派车，玩家自己坐上要练的那列调度列车再报名；
+ * 信号员练习是在控制台上的带练。考过发一本操作许可证（成书，把记录印出来，只是凭证），丢了可以补发。只在服务器主线程调用（数据库读写在异步线程，结果回到主线程）。
  */
 public final class LicenseService implements Listener, GuardExaminer {
 
@@ -152,18 +154,20 @@ public final class LicenseService implements Listener, GuardExaminer {
   /** 在线玩家各级的练习次数；还没读到时没有这一项。 */
   private final Map<UUID, Map<String, TrainingRecord>> training = new HashMap<>();
 
-  /** 正在从数据库读驾驶证的玩家：读完（成败都算）才移出，避免重复读。 */
+  /** 正在从数据库读操作许可证的玩家：读完（成败都算）才移出，避免重复读。 */
   private final Set<UUID> loadingNow = new HashSet<>();
 
-  /** 读驾驶证失败的时刻：此后一段时间内命令不再重读，存储故障时不刷屏。 */
+  /** 读操作许可证失败的时刻：此后一段时间内命令不再重读，存储故障时不刷屏。 */
   private final Map<UUID, Instant> loadFailedAt = new HashMap<>();
 
-  /** 读驾驶证失败后，命令触发重读前至少等这么久。 */
+  /** 读操作许可证失败后，命令触发重读前至少等这么久。 */
   private static final Duration LOAD_RETRY_BACKOFF = Duration.ofSeconds(30);
 
   private final DriverHandbook handbook;
   private final DriverHandbook guardHandbook;
+  private final DriverHandbook signallerHandbook;
   private final TrainingCoach coach;
+  private final SignallerExams signallerExams;
   private BukkitTask expiryTask;
   private BukkitTask monitorTask;
 
@@ -174,13 +178,15 @@ public final class LicenseService implements Listener, GuardExaminer {
     this.cards = new LicenseCardItem(plugin);
     this.handbook = new DriverHandbook(plugin);
     this.guardHandbook = DriverHandbook.guard(plugin);
+    this.signallerHandbook = DriverHandbook.signaller(plugin);
     this.coach = new TrainingCoach(plugin::getLocaleManager, () -> this.config, drive);
+    this.signallerExams = new SignallerExams(plugin, this);
     this.config = config == null ? LicenseConfig.defaults() : config;
   }
 
   // ---- 生命周期 ----
 
-  /** 读入在线玩家的驾驶证（插件启用、重载时不会有加入事件），开始检查考试超时。 */
+  /** 读入在线玩家的操作许可证（插件启用、重载时不会有加入事件），开始检查考试超时。 */
   public void start() {
     for (Player player : Bukkit.getOnlinePlayers()) {
       load(player);
@@ -235,6 +241,16 @@ public final class LicenseService implements Listener, GuardExaminer {
     return handbook;
   }
 
+  /** 《FTCA 信号员手册》。 */
+  public DriverHandbook signallerHandbook() {
+    return signallerHandbook;
+  }
+
+  /** 信号员考法的考官：接到信号员服务上。 */
+  public SignallerExaminer signallerExaminer() {
+    return signallerExams;
+  }
+
   // ---- 查询 ----
 
   /** 在线玩家持有的等级，按发证先后；还没读到时为空。 */
@@ -248,12 +264,12 @@ public final class LicenseService implements Listener, GuardExaminer {
     return records;
   }
 
-  /** 在线玩家的驾驶证是否已从数据库读到。 */
+  /** 在线玩家的操作许可证是否已从数据库读到。 */
   public boolean loaded(UUID playerId) {
     return held.containsKey(playerId);
   }
 
-  /** 驾驶证已读到就返回 {@code true}；还没读到且没在读（例如加入时读失败了）时重新读一次，返回 {@code false}。 */
+  /** 操作许可证已读到就返回 {@code true}；还没读到且没在读（例如加入时读失败了）时重新读一次，返回 {@code false}。 */
   public boolean ensureLoaded(Player player) {
     if (loaded(player.getUniqueId())) {
       return true;
@@ -279,17 +295,12 @@ public final class LicenseService implements Listener, GuardExaminer {
     return config.find(classId).map(this::displayName).orElse(classId);
   }
 
-  /** 写在提示句子里的名称：准驾等级就是它的名字，附注在名字后加“附注”（如“车掌附注”）。 */
+  /** 写在提示句子里的名称：就是它的名字（如“正式驾驶”“车掌”“信号员”）。 */
   public String displayName(LicenseClass license) {
-    return license.endorsement()
-        ? plugin
-            .getLocaleManager()
-            .text("drive.license.endorsement-name")
-            .replace("<name>", license.name())
-        : license.name();
+    return license.name();
   }
 
-  /** 带级别的显示名：“第 N 级 · 名称”；附注与配置里已没有的只写名称。 */
+  /** 带级别的显示名：驾驶写“第 N 级 · 名称”；车掌、信号员与配置里已没有的只写名称。 */
   public String levelName(String classId) {
     int level = config.levelOf(classId);
     if (level <= 0) {
@@ -305,7 +316,7 @@ public final class LicenseService implements Listener, GuardExaminer {
   // ---- 考试 ----
 
   /**
-   * 报名考一级驾驶证。正在考这一级的教程时再报名，是从第一步重做教程。
+   * 报名考一项资格。正在考这一级的教程时再报名，是从第一步重做教程。
    *
    * @param stationArg 路考的接班站；为空时取玩家附近的车站
    */
@@ -357,9 +368,11 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (license.exam() != LicenseClass.Exam.TUTORIAL
         && trainingRuns(id, license.id()) < license.trainingRuns()) {
       return new Reply(
-          license.exam() == LicenseClass.Exam.GUARD
-              ? "drive.license.exam.need-training-guard"
-              : "drive.license.exam.need-training",
+          switch (license.exam()) {
+            case GUARD -> "drive.license.exam.need-training-guard";
+            case SIGNALLER -> "drive.license.exam.need-training-signaller";
+            default -> "drive.license.exam.need-training";
+          },
           Map.of(
               "name",
               displayName(license),
@@ -374,7 +387,20 @@ public final class LicenseService implements Listener, GuardExaminer {
       case TUTORIAL -> startTutorialExam(player, license, now);
       case ROAD_TEST -> startRoadTest(player, license, stationArg, now);
       case GUARD -> startGuardExam(player, license, stationArg, now);
+      case SIGNALLER -> startSignaller(player, license, false, now);
     };
+  }
+
+  /** 信号员考试或练习：不能在担任别的角色（在岗登记里有就挡），其余交给 {@link SignallerExams}。 */
+  private Reply startSignaller(Player player, LicenseClass license, boolean practice, Instant now) {
+    DriveSessionManager manager = drive.get();
+    if (manager != null) {
+      Reply busy = crewBusy(manager, player.getUniqueId());
+      if (busy != null) {
+        return busy;
+      }
+    }
+    return signallerExams.start(player, license, practice, now);
   }
 
   /**
@@ -412,6 +438,9 @@ public final class LicenseService implements Listener, GuardExaminer {
     Exam running = exams.get(id);
     if (running != null) {
       return inProgress(running);
+    }
+    if (license.exam() == LicenseClass.Exam.SIGNALLER) {
+      return startSignaller(player, license, true, Instant.now());
     }
     DriveSessionManager manager = drive.get();
     if (manager == null) {
@@ -1140,6 +1169,9 @@ public final class LicenseService implements Listener, GuardExaminer {
           case GUARD -> running.training()
               ? "drive.license.practice.guard.in-progress"
               : "drive.license.exam.in-progress-guard";
+          case SIGNALLER -> running.training()
+              ? "drive.license.practice.signaller.in-progress"
+              : "drive.license.exam.in-progress-signaller";
         };
     return new Reply(key, Map.of("name", nameOf(running.classId())));
   }
@@ -1426,6 +1458,7 @@ public final class LicenseService implements Listener, GuardExaminer {
 
   /** 路考中的列车：触发防护紧急制动、转为 ATO 时当场提醒（每项一次）。 */
   private void monitorExams() {
+    signallerExams.tick(Instant.now());
     DriveSessionManager manager = drive.get();
     if (manager == null) {
       return;
@@ -1471,7 +1504,7 @@ public final class LicenseService implements Listener, GuardExaminer {
   }
 
   /** 考过后提示下一级（带报名按钮）；已到最高一级时说一声。 */
-  private void suggestNext(Player player) {
+  void suggestNext(Player player) {
     UUID id = player.getUniqueId();
     boolean any = false;
     for (LicenseClass license : config.classes()) {
@@ -1481,7 +1514,7 @@ public final class LicenseService implements Listener, GuardExaminer {
       if (license.requires().stream().allMatch(required -> holds(id, required))) {
         tell(
             player,
-            license.endorsement() ? "drive.license.next-endorsement" : "drive.license.next",
+            license.graded() ? "drive.license.next" : "drive.license.next-endorsement",
             passValues(license, ""));
         any = true;
       }
@@ -1530,7 +1563,7 @@ public final class LicenseService implements Listener, GuardExaminer {
   }
 
   /** 发证、提示里常用的占位符：级别、名称、标识、持证后能做什么、得分。 */
-  private Map<String, String> passValues(LicenseClass license, String points) {
+  Map<String, String> passValues(LicenseClass license, String points) {
     Map<String, String> values = new LinkedHashMap<>();
     values.put("level", String.valueOf(config.levelOf(license.id())));
     values.put("name", displayName(license));
@@ -1543,12 +1576,62 @@ public final class LicenseService implements Listener, GuardExaminer {
     return values;
   }
 
-  private void tell(Player player, String key, Map<String, String> values) {
+  void tell(Player player, String key, Map<String, String> values) {
     player.sendMessage(plugin.getLocaleManager().component(key, values));
+  }
+
+  /** 登记一次考试或练习，并按它临时挂上权限。 */
+  void beginExam(Player player, Exam exam) {
+    exams.put(player.getUniqueId(), exam);
+    apply(player);
+  }
+
+  /** 了结一次考试或练习，玩家在线时随即撤下临时权限。 */
+  void closeExam(UUID playerId) {
+    endExam(playerId);
+    Player player = Bukkit.getPlayer(playerId);
+    if (player != null) {
+      apply(player);
+    }
+  }
+
+  /** 不及格：过了冷却才能再考。 */
+  void cooldown(UUID playerId, String classId) {
+    retryAfter.put(
+        retryKey(playerId, classId),
+        Instant.now().plus(Duration.ofMinutes(config.retryCooldownMinutes())));
+  }
+
+  /** 计一次完整的练习（还没读到练习次数时不写：按 0 次加一会覆盖库里的累计）。 */
+  void countPractice(UUID playerId, Player player, String classId, int runs) {
+    if (training.containsKey(playerId)) {
+      recordTraining(playerId, player, classId, runs);
+    }
+  }
+
+  /** 放弃进行中的信号员考试或练习：还没上岗时直接了结，不计成绩；正在值守时下岗即了结。路考、车掌与教程考试照旧用各自的放弃方式，这里只说明。 */
+  public Reply abandon(Player player) {
+    UUID id = player.getUniqueId();
+    Exam running = exams.get(id);
+    if (running == null) {
+      return Reply.of("drive.license.abandon.none");
+    }
+    if (running.kind() != LicenseClass.Exam.SIGNALLER) {
+      return inProgress(running);
+    }
+    Map<String, String> values = Map.of("name", nameOf(running.classId()));
+    if (signallerExams.onExamDuty(id)) {
+      return new Reply("drive.license.abandon.signaller-on-duty", values);
+    }
+    closeExam(id);
+    return new Reply(
+        running.training() ? "drive.license.abandon.practice" : "drive.license.abandon.exam",
+        values);
   }
 
   /** 结束一次考试的记录（不动权限，调用方随后 {@link #apply}）。 */
   private Optional<TrainingCoach.DrillOutcome> endExam(UUID playerId) {
+    signallerExams.forget(playerId);
     exams.remove(playerId);
     examStopsDone.remove(playerId);
     guardExamStops.remove(playerId);
@@ -1662,6 +1745,10 @@ public final class LicenseService implements Listener, GuardExaminer {
         // 正在值乘考试或练习派的那一班：等做满站数或值乘结束再判定。
         continue;
       }
+      if (exam.kind() == LicenseClass.Exam.SIGNALLER && signallerExams.expire(id)) {
+        // 正在值守：考试按作废了结这一班，练习练到下岗为止。
+        continue;
+      }
       endExam(id);
       Player player = Bukkit.getPlayer(id);
       if (player != null) {
@@ -1670,9 +1757,11 @@ public final class LicenseService implements Listener, GuardExaminer {
             plugin
                 .getLocaleManager()
                 .component(
-                    exam.training()
-                        ? "drive.license.practice.expired"
-                        : "drive.license.exam.expired",
+                    !exam.training()
+                        ? "drive.license.exam.expired"
+                        : exam.kind() == LicenseClass.Exam.SIGNALLER
+                            ? "drive.license.practice.signaller.expired"
+                            : "drive.license.practice.expired",
                     Map.of("name", nameOf(exam.classId()))));
       }
     }
@@ -1681,7 +1770,7 @@ public final class LicenseService implements Listener, GuardExaminer {
   // ---- 发证、吊销、补发 ----
 
   /**
-   * 发一级驾驶证。玩家在线时马上生效，并把印着新等级的驾驶证放进背包（换掉背包里的旧证）；不在线时只记进数据库，上线后生效，驾驶证用补发领取。
+   * 发一项资格。玩家在线时马上生效，并把印着新资格的操作许可证放进背包（换掉背包里的旧证）；不在线时只记进数据库，上线后生效，操作许可证用补发领取。
    *
    * @param grantedBy {@code exam} 或管理员名字
    */
@@ -1707,7 +1796,7 @@ public final class LicenseService implements Listener, GuardExaminer {
             plugin
                 .getLogger()
                 .warning(
-                    "驾驶证写入失败（"
+                    "操作许可证写入失败（"
                         + playerName
                         + " "
                         + license.id()
@@ -1716,7 +1805,7 @@ public final class LicenseService implements Listener, GuardExaminer {
   }
 
   /**
-   * 吊销一级驾驶证。
+   * 吊销一项资格。
    *
    * @param done 主线程回调：原来是否持有；存储不可用时为空
    */
@@ -1749,7 +1838,7 @@ public final class LicenseService implements Listener, GuardExaminer {
         failure -> done.accept(Optional.empty()));
   }
 
-  /** 补发驾驶证：按记录再印一本放进背包。 */
+  /** 补发操作许可证：按记录再印一本放进背包。 */
   public Reply reissue(Player player) {
     UUID id = player.getUniqueId();
     if (!config.enabled()) {
@@ -1773,19 +1862,8 @@ public final class LicenseService implements Listener, GuardExaminer {
     return new Reply("drive.license.reissue.done", Map.of("serial", LicenseCardItem.number(id)));
   }
 
-  /** 按记录印一本驾驶证放进背包：先收走背包里这名玩家的旧证，放不下的掉在脚边。 */
+  /** 按记录印一本操作许可证放进背包：先收走背包里这名玩家的旧证，放不下的掉在脚边。 */
   private void giveCard(Player player) {
-    List<LicenseCardItem.Entry> entries = new ArrayList<>();
-    List<LicenseCardItem.Entry> endorsements = new ArrayList<>();
-    for (LicenseRecord record : held(player.getUniqueId())) {
-      Optional<LicenseClass> license = config.find(record.classId());
-      if (license.filter(LicenseClass::endorsement).isPresent()) {
-        // 印在“附注”一栏下，只写名字（如“车掌”）。
-        endorsements.add(new LicenseCardItem.Entry(license.get().name(), record.grantedAt()));
-      } else {
-        entries.add(new LicenseCardItem.Entry(levelName(record.classId()), record.grantedAt()));
-      }
-    }
     PlayerInventory inventory = player.getInventory();
     for (int slot = 0; slot < inventory.getSize(); slot++) {
       if (cards
@@ -1795,15 +1873,47 @@ public final class LicenseService implements Listener, GuardExaminer {
         inventory.setItem(slot, null);
       }
     }
-    ItemStack item =
-        cards.create(
-            plugin.getLocaleManager(),
-            player.getUniqueId(),
-            player.getName(),
-            entries,
-            endorsements);
-    for (ItemStack left : inventory.addItem(item).values()) {
+    for (ItemStack left : inventory.addItem(printCard(player)).values()) {
       player.getWorld().dropItemNaturally(player.getLocation(), left);
+    }
+  }
+
+  /** 按记录印一本现行版式的操作许可证。 */
+  private ItemStack printCard(Player player) {
+    return cards.create(
+        plugin.getLocaleManager(),
+        player.getUniqueId(),
+        player.getName(),
+        LicenseCardItem.sections(config, held(player.getUniqueId()), this::levelName));
+  }
+
+  /**
+   * 背包里这名玩家的证还是旧版式（含改名为操作许可证之前印的驾驶证）：换成新版，证号不变。新版放在第一本旧证的位置，其余旧证收走（与补发一样，一人只留一本）；背包里已有新版时只收走旧证。
+   * 上线读到记录后调一次。
+   */
+  private void upgradeCards(Player player) {
+    PlayerInventory inventory = player.getInventory();
+    int first = -1;
+    boolean current = false;
+    for (int slot = 0; slot < inventory.getSize(); slot++) {
+      ItemStack item = inventory.getItem(slot);
+      if (cards.holderOf(item).filter(player.getUniqueId()::equals).isEmpty()) {
+        continue;
+      }
+      if (!cards.outdated(item)) {
+        current = true;
+      } else if (first < 0) {
+        first = slot;
+      } else {
+        inventory.setItem(slot, null);
+      }
+    }
+    if (first >= 0) {
+      inventory.setItem(first, current ? null : printCard(player));
+      tell(
+          player,
+          "drive.license.card.upgraded",
+          Map.of("serial", LicenseCardItem.number(player.getUniqueId())));
     }
   }
 
@@ -1861,7 +1971,7 @@ public final class LicenseService implements Listener, GuardExaminer {
 
   // ---- 事件 ----
 
-  /** 加入服务器：从数据库读入驾驶证并挂上权限。 */
+  /** 加入服务器：从数据库读入操作许可证并挂上权限。 */
   @EventHandler(priority = EventPriority.MONITOR)
   public void onJoin(PlayerJoinEvent event) {
     load(event.getPlayer());
@@ -1906,11 +2016,12 @@ public final class LicenseService implements Listener, GuardExaminer {
           }
           training.put(id, runs);
           apply(online);
+          upgradeCards(online);
         },
         failure -> {
           loadingNow.remove(id);
           loadFailedAt.put(id, Instant.now());
-          plugin.getLogger().warning("读取驾驶证失败（" + player.getName() + "）: " + failure);
+          plugin.getLogger().warning("读取操作许可证失败（" + player.getName() + "）: " + failure);
         });
   }
 

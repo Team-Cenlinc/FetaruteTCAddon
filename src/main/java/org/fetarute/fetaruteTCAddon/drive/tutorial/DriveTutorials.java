@@ -373,7 +373,8 @@ public final class DriveTutorials {
     sounds.play(player, DriveCue.TUTORIAL_TIP);
   }
 
-  private static void subtitle(Player player, Component text) {
+  /** 副标题一句短提示（教程与带练共用的停留时长）。 */
+  public static void subtitle(Player player, Component text) {
     player.showTitle(Title.title(Component.empty(), text, SUBTITLE_TIMES));
   }
 

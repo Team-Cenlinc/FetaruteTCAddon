@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -120,17 +121,24 @@ final class DispatcherSignallerWorld implements SignallerWorld {
   public TrainInfo info(String trainName) {
     Optional<TimetableService> timetable = plugin.getTimetableService();
     String label =
-        timetable
-            .flatMap(service -> service.assignmentOf(trainName))
-            .map(TimetableAssignment::tripCode)
-            .filter(code -> code != null && !code.isBlank())
+        TrainNameFormatter.sequence(trainName)
+            .or(
+                () ->
+                    timetable
+                        .flatMap(service -> service.assignmentOf(trainName))
+                        .map(TimetableAssignment::tripCode)
+                        .filter(code -> code != null && !code.isBlank()))
             .orElse(trainName);
     OptionalLong delay =
         timetable
             .filter(service -> service.assignmentOf(trainName).isPresent())
             .map(service -> service.currentDelaySeconds(trainName))
             .orElse(OptionalLong.empty());
-    return new TrainInfo(label, lineColor(trainName), delay);
+    Optional<String> stamp =
+        delay.isPresent()
+            ? timetable.flatMap(service -> service.delayStamp(trainName))
+            : Optional.empty();
+    return new TrainInfo(label, lineColor(trainName), delay, stamp);
   }
 
   private Optional<Integer> lineColor(String trainName) {

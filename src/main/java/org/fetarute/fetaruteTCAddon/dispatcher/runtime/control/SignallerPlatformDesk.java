@@ -21,8 +21,8 @@ public interface SignallerPlatformDesk {
         }
 
         @Override
-        public boolean choose(String trainName, NodeId platform) {
-          return false;
+        public Choice choose(String trainName, NodeId platform) {
+          return Choice.UNAVAILABLE;
         }
 
         @Override
@@ -42,9 +42,19 @@ public interface SignallerPlatformDesk {
    *
    * @param trainName 列车名
    * @param platform 候选股道之一
-   * @return 改成了时为 true；不是候选、停站已开始或车不在了时为 false
+   * @return 改成了没有、没改成的原因
    */
-  boolean choose(String trainName, NodeId platform);
+  Choice choose(String trainName, NodeId platform);
+
+  /** 改停的结果。 */
+  enum Choice {
+    /** 改成了。 */
+    CHOSEN,
+    /** 不是候选、停站已开始或车不在了。 */
+    UNAVAILABLE,
+    /** 已锁闭通往原来那条股道的进路（过了分岔点），不能再改。 */
+    ROUTE_LOCKED
+  }
 
   /** 撤销这列车的全部改停（下岗、控制区回到自动或车被删除时）；之后照时刻表与选台器原样选。 */
   void forget(String trainName);

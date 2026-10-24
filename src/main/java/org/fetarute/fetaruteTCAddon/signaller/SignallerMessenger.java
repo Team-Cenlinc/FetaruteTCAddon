@@ -23,4 +23,28 @@ interface SignallerMessenger {
    * @param values 占位符
    */
   void alert(UUID player, String key, Map<String, String> values);
+
+  /**
+   * 提示音加动作栏一行，不进聊天栏：列车开始接近、停到入口等候（这类事很频繁，进聊天栏会刷屏）。
+   *
+   * @param player 玩家
+   * @param cue 哪一种（语言键 {@code signaller.cue.<种类>}，提示音各不相同）
+   * @param values 占位符
+   */
+  default void cue(UUID player, Cue cue, Map<String, String> values) {
+    alert(player, cue.key(), values);
+  }
+
+  /** 提示音的种类。 */
+  enum Cue {
+    /** 有车开始接近控制区。 */
+    APPROACHING,
+    /** 有车停到入口等许可。 */
+    WAITING;
+
+    /** 语言键。 */
+    String key() {
+      return "signaller.cue." + name().toLowerCase(java.util.Locale.ROOT);
+    }
+  }
 }

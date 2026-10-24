@@ -70,6 +70,11 @@ public final class SignallerRecordCodec {
     root.addProperty("holds", shift.holds());
     root.addProperty("callsAnswered", shift.callsAnswered());
     root.addProperty("callsMissed", shift.callsMissed());
+    root.addProperty("callsWrong", shift.callsWrong());
+    root.addProperty("keptTime", shift.keptTime());
+    root.addProperty("lostTime", shift.lostTime());
+    root.addProperty("conflictsGood", shift.conflictsGood());
+    root.addProperty("conflictsBad", shift.conflictsBad());
     root.addProperty("endReason", shift.endReason().name().toLowerCase(Locale.ROOT));
     return root.toString();
   }

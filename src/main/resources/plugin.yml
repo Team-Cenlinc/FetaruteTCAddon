@@ -155,10 +155,10 @@ permissions:
     description: 当车站信号员（/fta signal on|off|status）：在信号楼控制台上排列进路、扣车、改停股道、回复驾驶员呼叫
     default: op
   fetarute.license:
-    description: 驾驶证：查看自己的驾驶证、报名考试、补发（/fta license）；考过后插件按驾驶证替玩家挂上驾驶权限
+    description: 操作许可证：查看自己的许可证、报名考试与练习、补发（/fta license）；考过后插件按许可证替玩家挂上驾驶、车掌、信号员的权限
     default: true
   fetarute.license.admin:
-    description: 驾驶证管理：发证、吊销、查询他人的驾驶证（/fta license grant|revoke|list）
+    description: 操作许可证管理：发证、吊销、查询他人的许可证（/fta license grant|revoke|list）
     default: op
   fetarute.graph.portal:
     description: 查看与管理跨世界传送门连接（/fta graph portal）

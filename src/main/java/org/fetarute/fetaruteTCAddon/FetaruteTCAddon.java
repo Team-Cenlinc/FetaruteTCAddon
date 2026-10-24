@@ -621,7 +621,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
                                                 holder.stationName()))))),
             this);
     driveSessionManager.start();
-    // 驾驶证：考过后按驾驶证替玩家挂上驾驶权限；教程做完时判定教程考试，车掌每做完一站讲评、判定车掌考试。
+    // 操作许可证：考过后按许可证替玩家挂上驾驶、车掌、信号员的权限；教程做完时判定教程考试，车掌每做完一站讲评、判定车掌考试（信号员的考官在 wireSignaller 接上）。
     this.licenseService =
         new LicenseService(this, () -> driveSessionManager, driveSessionManager.config().license());
     getServer().getPluginManager().registerEvents(licenseService, this);
@@ -632,7 +632,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     licenseService.start();
   }
 
-  /** 驾驶证服务（插件启用期间存在）。 */
+  /** 操作许可证服务（插件启用期间存在）。 */
   public LicenseService getLicenseService() {
     return licenseService;
   }
@@ -733,6 +733,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
       drive.setSignallerLink(service);
       service.setSettlement(drive.signallerSettlement());
     }
+    LicenseService licenses = licenseService;
+    service.setExaminer(licenses == null ? null : licenses.signallerExaminer());
     PidsService pids = pidsService;
     if (pids != null) {
       pids.setSignalboxConsole(service);
@@ -751,6 +753,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (drive != null) {
       drive.crewDuty().unregister(CrewDuty.Role.SIGNALLER);
       drive.setSignallerLink(null);
+    }
+    SignallerModule module = signallerModule;
+    if (module != null) {
+      module.service().setExaminer(null);
     }
     PidsService pids = pidsService;
     if (pids != null) {
@@ -1036,6 +1042,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaStationGroupCommand(this).register(commandManager);
     new FtaSignalCommand(this).register(commandManager);
     new FtaSignallerCommand(this).register(commandManager);
+    new FtaPidsCommand(this, FtaPidsCommand.Scope.CONSOLE).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
     new FtaEtaCommand(this).register(commandManager);
     new FtaOccupancyCommand(this).register(commandManager);
@@ -3024,6 +3031,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new org.fetarute.fetaruteTCAddon.api.internal.GuardApiImpl(this));
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.installCall(
         new org.fetarute.fetaruteTCAddon.api.internal.CallApiImpl(this));
+    org.fetarute.fetaruteTCAddon.api.FetaruteApi.installSignaller(
+        new org.fetarute.fetaruteTCAddon.api.internal.SignallerApiImpl(this));
     startApiEvents();
     getLogger()
         .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");

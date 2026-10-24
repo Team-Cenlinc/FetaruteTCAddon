@@ -271,12 +271,13 @@ public final class YardProvider implements PidsYardSource {
     return out;
   }
 
-  /** 落在站场图上的列车：连续在图上的车厢为一段，相邻车厢落在同一像素时只记一次；车次窗信息只查这些车。 */
+  /** 落在站场图上的列车：连续在图上的车厢为一段，段内相邻两节之间沿画出的轨道连（{@link YardGeometry#trace}），落在同一像素的点只记一次； 车次窗信息只查这些车。 */
   static List<YardPicture.TrainMark> trainMarks(YardGeometry geometry, List<YardTrain> trains) {
     List<YardTrainEntry> found = new ArrayList<>();
     for (YardTrain train : trains) {
       List<List<YardGeometry.Point>> runs = new ArrayList<>();
       List<YardGeometry.Point> run = new ArrayList<>();
+      RailFootprintCell previous = null;
       for (RailFootprintCell cell : train.cars()) {
         Optional<YardGeometry.Point> point = geometry.pointOf(cell);
         if (point.isEmpty()) {
@@ -284,9 +285,17 @@ public final class YardProvider implements PidsYardSource {
             runs.add(run);
             run = new ArrayList<>();
           }
-        } else if (run.isEmpty() || !run.get(run.size() - 1).equals(point.get())) {
-          run.add(point.get());
+          previous = null;
+          continue;
         }
+        List<YardGeometry.Point> steps =
+            previous == null ? List.of(point.get()) : geometry.trace(previous, cell);
+        for (YardGeometry.Point step : steps) {
+          if (run.isEmpty() || !run.get(run.size() - 1).equals(step)) {
+            run.add(step);
+          }
+        }
+        previous = cell;
       }
       if (!run.isEmpty()) {
         runs.add(run);

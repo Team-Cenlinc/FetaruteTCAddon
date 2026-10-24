@@ -69,6 +69,11 @@ final class PidsYardPainter {
     /** 空闲轨道画好之后、占用标记之前。 */
     default void routes(YardGeometry geometry) {}
 
+    /** 随后要画在固定位置上的东西（信号方块）所占的矩形 {左, 上, 右, 下}：去向文字避开它们。 */
+    default List<int[]> reserved(YardGeometry geometry) {
+      return List.of();
+    }
+
     /**
      * 车次窗画好之后。
      *
@@ -117,11 +122,13 @@ final class PidsYardPainter {
       List<int[]> texts =
           new ArrayList<>(drawDepots(yard, geometry.get(), view.depot(), view.depotTrack()));
       texts.addAll(drawPlatformLabels(yard, geometry.get(), view.track()));
+      texts.addAll(overlay.reserved(geometry.get()));
       drawLabels(yard, geometry.get(), texts);
       for (YardPicture.TrainMark train : view.picture().trains()) {
         drawBody(train);
       }
-      List<Describer> describers = describers(yard, view.picture().trains(), p.measure());
+      List<Describer> describers =
+          describers(yard, view.picture().trains(), geometry.get().platforms(), p.measure());
       describers.forEach(describer -> drawDescriber(yard, describer));
       overlay.top(geometry.get(), describers);
       view.note()
@@ -286,8 +293,8 @@ final class PidsYardPainter {
 
   /**
    * 股道号写在站台块里、靠左：岛式站台上面那条股道写在块的上沿、下面那条写在下沿；块太薄放不下两行时并排写在一行，侧式站台竖向居中。
-   * 一张图里有几个车站时，站名写在第一个股道号前面（写在块外会压到股道线）；块窄放不下时依次改写“站码 1 道”“站码 1”，股道号也只写数字， 都放不下才截断。
-   * 同一车站只要有一块站台写不下站名，这个车站的站台就都改写站码，免得一站两种写法。
+   * 一张图里有几个车站时，每块站台的第一个股道号前面都写站名（写在块外会压到股道线）；块窄放不下时依次改写“站码 1 道”“站码 1”，股道号也只写数字，
+   * 都放不下才截断。同一车站只要有一块站台写不下站名，这个车站的站台就都改写站码，免得一站两种写法。
    *
    * @return 写下的文字所占的矩形 {左, 上, 右, 下}，去向标签据此避让
    */
@@ -440,16 +447,31 @@ final class PidsYardPainter {
   }
 
   /**
-   * 各车次窗的位置：车头上方，与已放好的重叠时改放下方，仍重叠就往右挪。只按布局与文字宽度推，不依赖画的过程，信号员控制台据此算点击区。
+   * 各车次窗的位置：车头上方，压到已放好的车次窗或站台块（站台块里写着股道号）时改放下方；上下都压到站台块时只避让车次窗，仍重叠就往右挪。
+   * 只按布局、几何与文字宽度推，不依赖画的过程，信号员控制台据此算点击区。
    *
    * @param yard 站场图组件
    * @param trains 站场内的列车，按画的先后
+   * @param platforms 站台块
    * @param measure 量文字的尺子
    */
   static List<Describer> describers(
-      PidsLayout.Yard yard, List<YardPicture.TrainMark> trains, PidsTextMeasure measure) {
+      PidsLayout.Yard yard,
+      List<YardPicture.TrainMark> trains,
+      List<YardGeometry.Platform> platforms,
+      PidsTextMeasure measure) {
     int size = yard.labelSize();
     List<int[]> placed = new ArrayList<>();
+    List<int[]> blocks = new ArrayList<>();
+    for (YardGeometry.Platform platform : platforms) {
+      blocks.add(
+          new int[] {
+            platform.left(),
+            platform.top(),
+            platform.right() - platform.left(),
+            platform.bottom() - platform.top()
+          });
+    }
     List<Describer> out = new ArrayList<>(trains.size());
     for (YardPicture.TrainMark train : trains) {
       String text = measure.ellipsize(train.label(), size, LABEL_MAX);
@@ -461,10 +483,8 @@ final class PidsYardPainter {
       int x = Math.max(left, Math.min(head.x() - width / 2, right));
       int above = head.y() - height - 4;
       int below = head.y() + 5;
-      int y = above < yard.y() + 2 ? below : above;
-      if (overlaps(placed, x, y, width, height)) {
-        y = y == above ? below : above;
-      }
+      List<Integer> choices = above < yard.y() + 2 ? List.of(below) : List.of(above, below);
+      int y = choose(choices, x, width, height, placed, blocks);
       for (int tries = 0; tries < 6 && overlaps(placed, x, y, width, height); tries++) {
         x = Math.min(right, x + width / 2 + 2);
       }
@@ -472,6 +492,23 @@ final class PidsYardPainter {
       out.add(new Describer(train, text, x, y, width, height));
     }
     return out;
+  }
+
+  /** 依次试车次窗的几个纵向位置：先找车次窗与站台块都不压的，再找只不压车次窗的，都没有时取第一个。 */
+  private static int choose(
+      List<Integer> choices, int x, int width, int height, List<int[]> placed, List<int[]> blocks) {
+    for (int choice : choices) {
+      if (!overlaps(placed, x, choice, width, height)
+          && !overlaps(blocks, x, choice, width, height)) {
+        return choice;
+      }
+    }
+    for (int choice : choices) {
+      if (!overlaps(placed, x, choice, width, height)) {
+        return choice;
+      }
+    }
+    return choices.get(0);
   }
 
   /** 车次窗：面板色底、左边线路色条；晚点超过 1 分钟琥珀色字、超过 5 分钟红字。 */

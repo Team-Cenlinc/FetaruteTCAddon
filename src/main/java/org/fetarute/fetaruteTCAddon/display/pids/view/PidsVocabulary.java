@@ -9,6 +9,7 @@ import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
@@ -554,6 +555,10 @@ public final class PidsVocabulary {
     for (SignalboxState.Reply reply : SignalboxState.Reply.values()) {
       replies.put(reply, names("signalbox.reply." + keyOf(reply)));
     }
+    Map<CallReason, String> callReasons = new EnumMap<>(CallReason.class);
+    for (CallReason reason : CallReason.values()) {
+      callReasons.put(reason, primary("signalbox.call-reason." + keyOf(reason)));
+    }
     Map<SignalboxState.NoticeKind, String> notices = new EnumMap<>(SignalboxState.NoticeKind.class);
     for (SignalboxState.NoticeKind kind : SignalboxState.NoticeKind.values()) {
       notices.put(kind, primary("signalbox.notice." + keyOf(kind)));
@@ -564,19 +569,23 @@ public final class PidsVocabulary {
         primary("signalbox.signaller"),
         primary("signalbox.unattended"),
         primary("signalbox.call"),
+        callReasons,
         primary("signalbox.header.train"),
         primary("signalbox.header.destination"),
         primary("signalbox.header.status"),
         primary("signalbox.header.delay"),
         statuses,
+        primary("signalbox.auto-routed"),
         primary("signalbox.on-time"),
         primary("signalbox.no-trains"),
         buttons,
         names("signalbox.button.to-auto"),
         names("signalbox.button.to-manual"),
+        names("signalbox.button.cancel-auto-pass"),
         replies,
         notices,
-        primary("signalbox.notice.route-blocked-by"));
+        primary("signalbox.notice.route-blocked-by"),
+        primary("signalbox.delegated"));
   }
 
   /** 信号员模块未就绪（或控制区查不到）时控制台写的说明。 */

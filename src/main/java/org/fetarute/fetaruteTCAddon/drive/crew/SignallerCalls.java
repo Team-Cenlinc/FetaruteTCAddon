@@ -32,7 +32,7 @@ public final class SignallerCalls {
   public record Outcome(boolean reached, boolean repeated) {}
 
   /** 最近一次转给信号员的呼叫。 */
-  private record LastCall(long at, boolean reached) {}
+  private record LastCall(long at, boolean reached, CallReason reason) {}
 
   private final Consumer<String> warn;
   private final Map<UUID, BuzzerPress> presses = new HashMap<>();
@@ -95,19 +95,32 @@ public final class SignallerCalls {
    * @param nowMillis 此刻（毫秒，单调时钟）
    */
   public Outcome call(UUID driver, String trainName, long nowMillis, SignallerLink link) {
+    return call(driver, trainName, CallReason.GENERAL, nowMillis, link);
+  }
+
+  /**
+   * 带原因的呼叫；冷却期内不再转，沿用上一次的结果。
+   *
+   * @param reason 原因（两短铃呼叫为一般联系）
+   */
+  public Outcome call(
+      UUID driver, String trainName, CallReason reason, long nowMillis, SignallerLink link) {
     Objects.requireNonNull(driver, "driver");
     LastCall last = lastCalls.get(driver);
-    if (last != null && cooling(last, nowMillis)) {
+    CallReason given = reason == null ? CallReason.GENERAL : reason;
+    // 冷却期内写明了别的原因：照转（信号员那边替换先前的原因）
+    boolean newReason = given != CallReason.GENERAL && last != null && last.reason() != given;
+    if (last != null && cooling(last, nowMillis) && !newReason) {
       return new Outcome(last.reached(), true);
     }
     boolean reached;
     try {
-      reached = (link != null ? link : SignallerLink.NONE).call(driver, trainName);
+      reached = (link != null ? link : SignallerLink.NONE).call(driver, trainName, given);
     } catch (RuntimeException ex) {
       warn.accept("转给信号员的呼叫处理失败: " + trainName + " " + ex);
       reached = false;
     }
-    lastCalls.put(driver, new LastCall(nowMillis, reached));
+    lastCalls.put(driver, new LastCall(nowMillis, reached, given));
     return new Outcome(reached, false);
   }
 

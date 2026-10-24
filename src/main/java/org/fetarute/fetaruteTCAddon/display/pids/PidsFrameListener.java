@@ -186,7 +186,7 @@ public final class PidsFrameListener implements Listener {
     }
     PidsStickMenu menu = new PidsStickMenu(locale);
     if (player.isSneaking()) {
-      menu.promptRemove(player, screen.get());
+      menu.promptRemove(player, service, screen.get());
     } else {
       menu.info(player, service, screen.get());
     }
@@ -228,6 +228,22 @@ public final class PidsFrameListener implements Listener {
   private void announceInstalled(
       Player player, PidsService service, PidsScreen screen, PidsLayout layout) {
     LocaleManager locale = plugin.getLocaleManager();
+    if (layout.signalbox()) {
+      // 信号员控制台不按车站显示：下一步是绑定运营商与控制区
+      String id = PidsComposer.shortId(screen.id());
+      player.sendMessage(
+          locale.component(
+              "pids.install.console-success",
+              Map.of(
+                  "layout",
+                  layout.name(),
+                  "size",
+                  screen.tileRows() + "×" + screen.tileCols(),
+                  "id",
+                  id)));
+      player.sendMessage(locale.component("pids.install.console-next", Map.of("id", id)));
+      return;
+    }
     player.sendMessage(
         locale.component(
             "pids.install.success",

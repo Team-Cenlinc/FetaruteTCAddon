@@ -17,7 +17,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
  * 信号员班次结算：算成绩、写记录、发奖励，并把成绩告诉在线的信号员。
  *
  * <p>没经手任何车的班次不结算：不写记录、不发奖励，只告诉信号员本班次未经手列车。奖励按经手的车数发（超时代排的不计），ATO 折扣与同车加成都不适用；记录与车掌记录一样在后台写库。
- * 只在主线程调用，不抛异常。
+ * 信号员考试的这一班写记录、不发奖励，也不另报这一班的成绩（考官按考试标准讲评）；练习的这一班不写记录也不发奖励。只在主线程调用，不抛异常。
  */
 final class SignallerSettlement implements SignallerShift.Settlement {
 
@@ -65,19 +65,27 @@ final class SignallerSettlement implements SignallerShift.Settlement {
   }
 
   private void settleNow(SignallerShift shift) {
+    if (shift.practiced()) {
+      return;
+    }
     if (shift.trainsHandled() <= 0) {
-      host.tell(shift.player(), "drive.signaller.result.no-trains", Map.of("zone", shift.zone()));
+      if (!shift.examined()) {
+        host.tell(shift.player(), "drive.signaller.result.no-trains", Map.of("zone", shift.zone()));
+      }
       return;
     }
     ScoreRules.Result result = SignallerScore.evaluate(shift);
     host.saveRecord(
         SignallerRecordCodec.record(UUID.randomUUID(), host.serverId(), shift, result, zone));
+    if (shift.examined()) {
+      return;
+    }
     DriveRewardConfig rewards = host.rewards();
     DriveRewards.Reward reward =
         DriveRewards.signaller(
             rewards,
             rewards.signallerTrainRatio(),
-            SignallerScore.rewardedTrains(shift),
+            SignallerScore.rewardUnits(shift),
             result.grade());
     DriveRewardPayer.Paid paid =
         reward.empty()
@@ -97,6 +105,22 @@ final class SignallerSettlement implements SignallerShift.Settlement {
             String.valueOf(shift.trainsHandled()),
             "auto",
             String.valueOf(shift.autoRouted())));
+    host.tell(
+        shift.player(),
+        "drive.signaller.result.detail",
+        Map.of(
+            "pre",
+            String.valueOf(shift.preRouted()),
+            "kept",
+            String.valueOf(shift.keptTime()),
+            "lost",
+            String.valueOf(shift.lostTime()),
+            "good",
+            String.valueOf(shift.conflictsGood()),
+            "bad",
+            String.valueOf(shift.conflictsBad()),
+            "wrong",
+            String.valueOf(shift.callsWrong())));
     DriveSessionManager.rewardMessageKey(paid, false)
         .ifPresent(
             key ->

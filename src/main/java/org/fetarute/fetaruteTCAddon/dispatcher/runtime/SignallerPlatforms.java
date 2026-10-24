@@ -140,19 +140,19 @@ public final class SignallerPlatforms implements SignallerPlatformDesk {
   }
 
   @Override
-  public boolean choose(String trainName, NodeId platform) {
+  public Choice choose(String trainName, NodeId platform) {
     try {
       return chooseResolved(trainName, platform);
     } catch (RuntimeException ex) {
       debugLogger.accept("SIGNALLER_PLATFORM_CHOOSE_FAILED train=" + trainName + " error=" + ex);
-      return false;
+      return Choice.UNAVAILABLE;
     }
   }
 
-  private boolean chooseResolved(String trainName, NodeId platform) {
+  private Choice chooseResolved(String trainName, NodeId platform) {
     Optional<Target> resolved = resolve(trainName);
     if (platform == null || resolved.isEmpty() || !resolved.get().options().offers(platform)) {
-      return false;
+      return Choice.UNAVAILABLE;
     }
     Target target = resolved.get();
     Optional<NodeId> allocated = target.allocated();
@@ -168,7 +168,7 @@ public final class SignallerPlatforms implements SignallerPlatformDesk {
               + " allocated="
               + allocated.get().value()
               + " reason=route-locked");
-      return false;
+      return Choice.ROUTE_LOCKED;
     }
     Optional<NodeId> before = target.current();
     choices.put(target.key(), platform);
@@ -192,7 +192,7 @@ public final class SignallerPlatforms implements SignallerPlatformDesk {
             + " reselect="
             + reselect);
     wake.accept(target.trainName());
-    return true;
+    return Choice.CHOSEN;
   }
 
   @Override

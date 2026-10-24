@@ -10,7 +10,10 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.display.pids.fixtures.PidsFixtures;
 import org.junit.jupiter.api.Test;
 
-/** 信号员控制台布局：内置 {@code signalbox-3x5} 合法、排在内置布局末尾；列车表与操作按钮只放行在站场图屏里，点击区不得小于 16×16。 */
+/**
+ * 信号员控制台布局：内置 {@code signalbox-3x5} 与 {@code signalbox-4x8} 合法、排在内置布局末尾；列车表与操作按钮只放行在站场图屏里，点击区不得小于
+ * 16×16。
+ */
 class SignalboxLayoutTest {
 
   private static final String YARD =
@@ -53,11 +56,41 @@ class SignalboxLayoutTest {
     assertFalse(PidsFixtures.builtInLayout("yard-4x8").signalbox());
   }
 
+  /** 大控制台：站场图占满宽度，列车表多两行；按钮更大，回复呼叫时四条回复也放得下中英文两行。 */
   @Test
-  void theConsoleIsAppendedToTheBuiltInLayouts() {
+  void theLargeConsoleFitsMoreTrainsAndBiggerButtons() {
+    PidsLayout layout = PidsFixtures.builtInLayout("signalbox-4x8");
+    assertEquals(1024, layout.width());
+    assertEquals(512, layout.height());
+    assertTrue(layout.signalbox());
+    PidsLayout.Yard yard = layout.yard().orElseThrow();
+    assertEquals(
+        List.of(4, 34, 1016, 300), List.of(yard.x(), yard.y(), yard.width(), yard.height()));
+    PidsLayout.TrainList list = layout.trainList().orElseThrow();
+    assertEquals(6, list.rows());
+    assertTrue(list.y() >= yard.y() + yard.height(), "列车表在站场图下面");
+    assertTrue(list.y() + list.height() <= 512);
+    PidsLayout.SignalButtons buttons = layout.signalButtons().orElseThrow();
+    assertTrue(buttons.x() >= list.x() + list.width(), "按钮在列车表右边");
+    assertTrue(buttons.y() >= yard.y() + yard.height());
+    assertTrue(buttons.y() + buttons.height() <= 512);
+    assertTrue(buttons.x() + buttons.width() <= 1024);
+    PidsLayout.TextStyle label = buttons.label();
+    int bilingual = label.size() + label.gap() + label.secondarySize();
+    // 上下各留 4 像素：字的下伸部分不压到框线
+    assertTrue(buttons.buttonHeight() >= bilingual + 8, "按钮放得下中英文两行");
+    assertTrue(buttons.replyHeight() >= bilingual + 8, "回复呼叫时每条回复也放得下中英文两行");
+  }
+
+  @Test
+  void theConsolesAreAppendedToTheBuiltInLayouts() {
     List<String> builtIn = PidsLayoutRegistry.BUILT_IN;
-    assertEquals("signalbox-3x5", builtIn.get(builtIn.size() - 1), "新布局追加在末尾，同尺寸退回时仍先取车站统屏");
+    assertEquals(
+        List.of("signalbox-3x5", "signalbox-4x8"),
+        builtIn.subList(builtIn.size() - 2, builtIn.size()),
+        "新布局追加在末尾，同尺寸退回时仍先取车站统屏与只读站场图");
     assertTrue(builtIn.indexOf("station-3x5") < builtIn.indexOf("signalbox-3x5"));
+    assertTrue(builtIn.indexOf("yard-4x8") < builtIn.indexOf("signalbox-4x8"));
   }
 
   @Test

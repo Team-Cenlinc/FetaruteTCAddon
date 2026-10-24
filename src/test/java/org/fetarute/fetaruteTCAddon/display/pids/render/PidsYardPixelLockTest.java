@@ -68,11 +68,11 @@ class PidsYardPixelLockTest {
             Optional.empty());
 
     assertEquals(
-        "4fa7ea43db81e61b950271b6cf2aa8ea62adb6702a36a5aa952412ed2930e4c1",
+        "8542bd71d04988d314fb26fc3a145b19d12daf367549e7c0569ddcb1d02fa007",
         digest(renderer.renderYard(layout, view(PidsTheme.DARK, picture, Optional.empty()))),
         "yard-3x5 深色：轨道、占用、车身与车次窗");
     assertEquals(
-        "689bfcd2e80d13fc3b612499890fdff28c5d2aa6a9dfdbb4e1ba2e302b375bda",
+        "ad573c888812320991ba5c7ddfdded3ec220ec61defbe2353e48650146ab0426",
         digest(renderer.renderYard(layout, view(PidsTheme.LIGHT, picture, Optional.empty()))),
         "yard-3x5 浅色");
   }

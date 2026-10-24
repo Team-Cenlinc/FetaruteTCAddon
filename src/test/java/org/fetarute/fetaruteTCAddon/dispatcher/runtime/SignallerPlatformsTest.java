@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -27,6 +26,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk.Choice;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
@@ -229,7 +229,7 @@ class SignallerPlatformsTest {
     fixture.timetablePlans(PPK3);
     fixture.stops.setPinnedPlatforms((train, routeId, index) -> Optional.of(PPK1.value()));
 
-    assertTrue(fixture.platforms.choose(TRAIN, PPK2));
+    assertEquals(Choice.CHOSEN, fixture.platforms.choose(TRAIN, PPK2));
 
     assertEquals(Optional.of(PPK2), fixture.stops.plannedPlatform(TRAIN, ROUTE, 2), "信号员先于时刻表与叫车");
     assertEquals(Optional.of(PPK2), fixture.stops.displayPlatform(TRAIN, ROUTE, 2), "站牌显示车会去的那条");
@@ -265,10 +265,10 @@ class SignallerPlatformsTest {
   void nonCandidateIsRejected() {
     Fixture fixture = new Fixture();
 
-    assertFalse(fixture.platforms.choose(TRAIN, NodeId.of("SURC:S:PPK:4")));
-    assertFalse(fixture.platforms.choose(TRAIN, NodeId.of("SURC:S:BBB:1")));
-    assertFalse(fixture.platforms.choose(TRAIN, null));
-    assertFalse(fixture.platforms.choose("unknown-train", PPK2));
+    assertEquals(Choice.UNAVAILABLE, fixture.platforms.choose(TRAIN, NodeId.of("SURC:S:PPK:4")));
+    assertEquals(Choice.UNAVAILABLE, fixture.platforms.choose(TRAIN, NodeId.of("SURC:S:BBB:1")));
+    assertEquals(Choice.UNAVAILABLE, fixture.platforms.choose(TRAIN, null));
+    assertEquals(Choice.UNAVAILABLE, fixture.platforms.choose("unknown-train", PPK2));
     assertEquals(Optional.empty(), fixture.stops.plannedPlatform(TRAIN, ROUTE, 2));
     assertTrue(fixture.woken.isEmpty());
   }
@@ -279,7 +279,7 @@ class SignallerPlatformsTest {
     fixture.at(2);
 
     assertTrue(fixture.platforms.options(TRAIN).isEmpty(), "正在这一站停着：不能再改");
-    assertFalse(fixture.platforms.choose(TRAIN, PPK2));
+    assertEquals(Choice.UNAVAILABLE, fixture.platforms.choose(TRAIN, PPK2));
   }
 
   @Test
@@ -289,7 +289,7 @@ class SignallerPlatformsTest {
     assertEquals(Optional.of(PPK3), fixture.allocation());
     assertEquals(Optional.of(PPK3), fixture.platforms.options(TRAIN).orElseThrow().current());
 
-    assertTrue(fixture.platforms.choose(TRAIN, PPK2));
+    assertEquals(Choice.CHOSEN, fixture.platforms.choose(TRAIN, PPK2));
 
     assertEquals(Optional.empty(), fixture.allocation(), "撤掉选台器里这一站的缓存");
     assertTrue(fixture.overrides.isEmpty(), "撤掉运行时的有效节点覆盖，下一拍重新选台");
@@ -300,7 +300,7 @@ class SignallerPlatformsTest {
   void reselectionAnnouncesAPlatformChangeFromTheDisplacedPlatform() {
     Fixture fixture = new Fixture();
     fixture.materialize(PPK3);
-    assertTrue(fixture.platforms.choose(TRAIN, PPK2));
+    assertEquals(Choice.CHOSEN, fixture.platforms.choose(TRAIN, PPK2));
 
     // 下一拍选台按新偏好落定：上一次的覆盖已被撤掉，previous 为空
     fixture.stops.platformRecorded(TRAIN, ROUTE, 2, Optional.empty(), PPK2);
@@ -331,10 +331,10 @@ class SignallerPlatformsTest {
                     Map.of()))
             .allowed());
 
-    assertFalse(fixture.platforms.choose(TRAIN, PPK2), "进了咽喉再换股道不安全");
+    assertEquals(Choice.ROUTE_LOCKED, fixture.platforms.choose(TRAIN, PPK2), "进了咽喉再换股道不安全");
     assertEquals(Optional.of(PPK3), fixture.allocation());
     assertEquals(Optional.empty(), fixture.platforms.options(TRAIN).orElseThrow().chosen());
-    assertTrue(fixture.platforms.choose(TRAIN, PPK3), "选的就是已锁闭的那条：照收");
+    assertEquals(Choice.CHOSEN, fixture.platforms.choose(TRAIN, PPK3), "选的就是已锁闭的那条：照收");
   }
 
   /** 授权只到共用进路（还没到分岔道岔）：改选照收，下一拍按新股道申请进路、改写 destination，车在分岔前停得住。 */
@@ -348,7 +348,8 @@ class SignallerPlatformsTest {
         OccupancyResource.forConflict("switcher:" + S1.value()),
         OccupancyResource.forEdge(EdgeId.undirected(S1, S2)));
 
-    assertTrue(fixture.platforms.choose(TRAIN, PPK2), "PPK:2 与 PPK:3 在 S2 才分岔，授权还没越过 S2");
+    assertEquals(
+        Choice.CHOSEN, fixture.platforms.choose(TRAIN, PPK2), "PPK:2 与 PPK:3 在 S2 才分岔，授权还没越过 S2");
     assertEquals(Optional.empty(), fixture.allocation());
   }
 
@@ -364,8 +365,9 @@ class SignallerPlatformsTest {
         OccupancyResource.forEdge(EdgeId.undirected(S1, S2)),
         OccupancyResource.forConflict("switcher:" + S2.value()));
 
-    assertFalse(fixture.platforms.choose(TRAIN, PPK2), "S2 的道岔已锁闭向 PPK:3");
-    assertFalse(fixture.platforms.choose(TRAIN, PPK1), "PPK:1 在 S1 就分岔，S1→S2 已锁闭");
+    assertEquals(Choice.ROUTE_LOCKED, fixture.platforms.choose(TRAIN, PPK2), "S2 的道岔已锁闭向 PPK:3");
+    assertEquals(
+        Choice.ROUTE_LOCKED, fixture.platforms.choose(TRAIN, PPK1), "PPK:1 在 S1 就分岔，S1→S2 已锁闭");
     assertEquals(Optional.of(PPK3), fixture.allocation());
   }
 
@@ -377,9 +379,10 @@ class SignallerPlatformsTest {
     fixture.holds(
         ResourceIntent.MOVEMENT_REQUIRED, OccupancyResource.forEdge(EdgeId.undirected(S1, S2)));
 
-    assertTrue(fixture.platforms.choose(TRAIN, PPK2), "PPK:2 在 S2 分岔，S1→S2 是共用进路");
+    assertEquals(Choice.CHOSEN, fixture.platforms.choose(TRAIN, PPK2), "PPK:2 在 S2 分岔，S1→S2 是共用进路");
     fixture.materialize(PPK3);
-    assertFalse(fixture.platforms.choose(TRAIN, PPK1), "PPK:1 在 S1 分岔，S1→S2 已在原股道一侧");
+    assertEquals(
+        Choice.ROUTE_LOCKED, fixture.platforms.choose(TRAIN, PPK1), "PPK:1 在 S1 分岔，S1→S2 已在原股道一侧");
   }
 
   /** 车身停在分岔之后（停车保持、车身占用都算），或最后经过的节点已在原股道一侧：拒绝。 */
@@ -388,19 +391,19 @@ class SignallerPlatformsTest {
     Fixture holding = new Fixture();
     holding.materialize(PPK3);
     holding.holds(ResourceIntent.HOLD_ONLY, OccupancyResource.forEdge(EdgeId.undirected(S2, PPK3)));
-    assertFalse(holding.platforms.choose(TRAIN, PPK2));
+    assertEquals(Choice.ROUTE_LOCKED, holding.platforms.choose(TRAIN, PPK2));
 
     Fixture passed = new Fixture();
     passed.materialize(PPK3);
     passed.progress.updateLastPassedGraphNode(TRAIN, S2, Instant.now());
-    assertFalse(passed.platforms.choose(TRAIN, PPK2), "最后经过的是分岔道岔");
+    assertEquals(Choice.ROUTE_LOCKED, passed.platforms.choose(TRAIN, PPK2), "最后经过的是分岔道岔");
   }
 
   @Test
   void forgetDropsChoicesRevokesTheirAllocationAndWakes() {
     Fixture fixture = new Fixture();
     fixture.timetablePlans(PPK3);
-    assertTrue(fixture.platforms.choose(TRAIN, PPK2));
+    assertEquals(Choice.CHOSEN, fixture.platforms.choose(TRAIN, PPK2));
     fixture.materialize(PPK2);
     fixture.woken.clear();
 
@@ -419,7 +422,7 @@ class SignallerPlatformsTest {
   @Test
   void choicesFollowARenameAndAreDiscardedWithTheTrain() {
     Fixture fixture = new Fixture();
-    assertTrue(fixture.platforms.choose(TRAIN, PPK2));
+    assertEquals(Choice.CHOSEN, fixture.platforms.choose(TRAIN, PPK2));
 
     fixture.platforms.renamed(TRAIN, "SURC-WS-A-0002");
 
@@ -435,7 +438,7 @@ class SignallerPlatformsTest {
     SignallerPlatforms detached = SignallerPlatforms.detached();
 
     assertTrue(detached.options(TRAIN).isEmpty());
-    assertFalse(detached.choose(TRAIN, PPK2));
+    assertEquals(Choice.UNAVAILABLE, detached.choose(TRAIN, PPK2));
     detached.forget(TRAIN);
   }
 }

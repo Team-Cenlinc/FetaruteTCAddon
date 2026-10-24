@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.junit.jupiter.api.Test;
 
@@ -173,6 +174,94 @@ class YardGeometryTest {
     assertOutside(YardFixtures.twoPlatforms(8), 8);
     assertOutside(YardFixtures.twoPlatforms(4), 4);
     assertOutside(YardFixtures.twoPlatforms(2), 2);
+  }
+
+  /**
+   * 四条股道相隔 4、8、4 格、都没写开门方向：中间两条按间距各自要把侧式站台放进它俩之间那 8 格（外侧都只隔 4 格），两块会叠在一起，
+   * 所以画成两线共用的一块岛式站台；最外两条的站台在外侧。
+   */
+  @Test
+  void sidePlatformsThatWouldShareOneGapBecomeAnIsland() {
+    YardGeometry geometry = geometry(YardFixtures.stationTracks(0, 4, 12, 16));
+
+    List<List<String>> tracks =
+        geometry.platforms().stream().map(YardGeometry.Platform::tracks).toList();
+    assertEquals(
+        List.of(List.of("1"), List.of("2", "3"), List.of("4")),
+        tracks,
+        () -> "站台块: " + geometry.platforms());
+    assertNoPlatformsOverlap(geometry);
+  }
+
+  /** 一条线上挨着的两个车站、画面又窄：两站之间留够两块站台的宽度（按里程只分到四十来像素），站台块在中间分界，不叠在一起。 */
+  @Test
+  void neighbouringStationsDoNotShareTheirPlatformBlocks() {
+    SimpleRailGraph graph = YardFixtures.closeStations();
+    YardArea area =
+        YardArea.of(
+                graph,
+                "SURC",
+                List.of(
+                    YardArea.Member.station("ABC"),
+                    YardArea.Member.station("DEF"),
+                    YardArea.Member.station("XYZ")))
+            .orElseThrow();
+    YardGeometry geometry =
+        YardGeometry.of(
+            graph,
+            area,
+            graph.interlockingState().footprintCellsByEdge(),
+            new YardGeometry.Rect(0, 0, 200, 80),
+            code -> code);
+
+    assertEquals(3, geometry.platforms().size(), () -> "站台块: " + geometry.platforms());
+    assertNoPlatformsOverlap(geometry);
+    int abc = geometry.nodeAt(P1).orElseThrow().x();
+    int def = geometry.nodeAt(YardFixtures.Q1).orElseThrow().x();
+    assertTrue(def - abc >= 2 * YardGeometry.PLATFORM_ROOM, () -> "两站相隔 " + (def - abc));
+  }
+
+  /** 挨着的两站都是岛式站台、两条股道的站台节点错开：岛式站台取两条股道的并集，但不越过与邻站的中线分界。 */
+  @Test
+  void neighbouringIslandsWithStaggeredTracksDoNotOverlap() {
+    SimpleRailGraph graph = YardFixtures.closeIslands();
+    YardArea area =
+        YardArea.of(
+                graph,
+                "SURC",
+                List.of(
+                    YardArea.Member.station("ABC"),
+                    YardArea.Member.station("DEF"),
+                    YardArea.Member.station("XYZ")))
+            .orElseThrow();
+    YardGeometry geometry =
+        YardGeometry.of(
+            graph,
+            area,
+            graph.interlockingState().footprintCellsByEdge(),
+            new YardGeometry.Rect(0, 0, 220, 80),
+            code -> code);
+
+    assertTrue(
+        geometry.platforms().stream().anyMatch(p -> p.tracks().size() == 2),
+        () -> "两站都应是岛式站台: " + geometry.platforms());
+    assertNoPlatformsOverlap(geometry);
+  }
+
+  private static void assertNoPlatformsOverlap(YardGeometry geometry) {
+    List<YardGeometry.Platform> blocks = geometry.platforms();
+    for (int i = 0; i < blocks.size(); i++) {
+      for (int j = i + 1; j < blocks.size(); j++) {
+        YardGeometry.Platform a = blocks.get(i);
+        YardGeometry.Platform b = blocks.get(j);
+        assertFalse(
+            a.left() < b.right()
+                && b.left() < a.right()
+                && a.top() < b.bottom()
+                && b.top() < a.bottom(),
+            () -> "站台块叠在一起: " + a + " " + b);
+      }
+    }
   }
 
   /** 开门相对：岛式站台，哪怕只隔 4 格。只有一条写了、朝着对方开也算；写了两侧都开的也算。 */
@@ -524,6 +613,203 @@ class YardGeometryTest {
     }
   }
 
+  /** 线路分叉不分主次：岔出去的两股都不画成来路那一行的直线延续，各占一层，从分叉处朝同一方向分开——哪怕其中一股在实地是顺着来路直着走的。 */
+  @Test
+  void junctionBranchesAreDrawnAsEqualsLeavingTheSameWay() {
+    for (boolean straightOn : List.of(false, true)) {
+      YardGeometry geometry =
+          zone(
+              YardFixtures.fork(straightOn),
+              YardArea.Member.station("ABC"),
+              YardArea.Member.station("DEF"),
+              YardArea.Member.station("XYZ"));
+      YardGeometry.Point stem = geometry.nodeAt(P1).orElseThrow();
+      YardGeometry.Point fork = geometry.nodeAt(YardFixtures.FORK).orElseThrow();
+      YardGeometry.Point def = geometry.nodeAt(YardFixtures.Q1).orElseThrow();
+      YardGeometry.Point xyz = geometry.nodeAt(YardFixtures.X1).orElseThrow();
+      String label = straightOn ? "一股顺着来路直走" : "两股对称斜出";
+
+      assertEquals(stem.y(), fork.y(), () -> label + ": 分叉道岔在来路那一行");
+      assertTrue(def.y() != stem.y(), () -> label + ": 去 DEF 的一股另起一层 " + def + " " + stem);
+      assertTrue(xyz.y() != stem.y(), () -> label + ": 去 XYZ 的一股另起一层 " + xyz + " " + stem);
+      assertTrue(def.y() != xyz.y(), () -> label + ": 两股不在同一层 " + def + " " + xyz);
+      assertTrue(
+          def.x() > fork.x() && xyz.x() > fork.x(),
+          () -> label + ": 两股都从分叉处往同一边分开 " + fork + " " + def + " " + xyz);
+    }
+  }
+
+  /**
+   * 三角线按实地位置排：来路在一边、岔出去的两股都在另一边，往北拐的一股在上、直着往东的一股在下，来路夹在中间；和来路垂直的 XYZ 站按它自己的走向分出 1、2
+   * 道的上下；联络线两头的站台留在本站（与同站的 1 道相邻）。联络线从两站靠分叉的一头出站（U 形），所以从站台往分叉一侧伸出去再拐上去，不从站台上横穿。
+   */
+  @Test
+  void triangleFollowsTheGround() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.triangle(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.station("XYZ"));
+    YardGeometry.Point stem = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point fork = geometry.nodeAt(YardFixtures.FORK).orElseThrow();
+    YardGeometry.Point q1 = geometry.nodeAt(YardFixtures.Q1).orElseThrow();
+    YardGeometry.Point q2 = geometry.nodeAt(YardFixtures.Q2).orElseThrow();
+    YardGeometry.Point x1 = geometry.nodeAt(YardFixtures.X1).orElseThrow();
+    YardGeometry.Point x2 = geometry.nodeAt(YardFixtures.X2).orElseThrow();
+    String where =
+        "ABC " + stem + " 分叉 " + fork + " DEF " + q1 + " " + q2 + " XYZ " + x1 + " " + x2;
+
+    assertTrue(stem.x() < fork.x(), () -> "来路在分叉左边: " + where);
+    assertTrue(q1.x() > fork.x() && x1.x() > fork.x(), () -> "两股都在分叉右边: " + where);
+    assertTrue(x1.y() < x2.y(), () -> "XYZ 1 道在西，往北走时在左、画在上: " + where);
+    assertTrue(x2.y() < q2.y(), () -> "往北拐的一股整个在直着往东的一股上面，不互相穿插: " + where);
+    assertTrue(q2.y() < q1.y(), () -> "DEF 2 道在北、画在 1 道上面: " + where);
+    int first = geometry.nodeAt(YardFixtures.CHORD_1).orElseThrow().x();
+    int second = geometry.nodeAt(YardFixtures.CHORD_2).orElseThrow().x();
+    assertTrue(first < q2.x(), () -> "联络线从 DEF 2 道西头（靠分叉一头）伸出: x=" + first + " " + where);
+    assertTrue(second < x2.x(), () -> "联络线从 XYZ 2 道南头（靠分叉一头）进站: x=" + second + " " + where);
+  }
+
+  /** 三角线联络线折返处那条区间画成“⊂”形：从两头沿本行往外走到折返最远处，竖着连上下两行，拐角切成 45°；整段在两头外侧，不从两头之间斜穿过站台。 */
+  @Test
+  void theTurnOfAChordBendsOutsideBothEnds() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.triangle(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.station("XYZ"));
+    YardGeometry.Path turn =
+        geometry.paths().stream()
+            .filter(
+                path ->
+                    path.segments().stream().anyMatch(s -> s.x0() == s.x1() && s.y0() != s.y1()))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("没有竖着连两行的折返段: " + geometry.paths()));
+    int a = geometry.nodeAt(turn.edge().a()).orElseThrow().x();
+    int b = geometry.nodeAt(turn.edge().b()).orElseThrow().x();
+    int left = turn.segments().stream().mapToInt(s -> Math.min(s.x0(), s.x1())).min().orElseThrow();
+    int right =
+        turn.segments().stream().mapToInt(s -> Math.max(s.x0(), s.x1())).max().orElseThrow();
+
+    assertTrue(
+        left < Math.min(a, b) || right > Math.max(a, b),
+        () -> "折返段伸到两头外侧: " + turn + " 两头 x=" + a + "," + b);
+    for (YardGeometry.Segment s : turn.segments()) {
+      int dx = Math.abs(s.x1() - s.x0());
+      int dy = Math.abs(s.y1() - s.y0());
+      assertTrue(dx == 0 || dy == 0 || dx == dy, () -> "只有水平、竖直与 45° 拐角: " + s);
+      for (YardGeometry.Platform platform : geometry.platforms()) {
+        assertFalse(
+            Math.max(s.x0(), s.x1()) > platform.left()
+                && Math.min(s.x0(), s.x1()) < platform.right()
+                && Math.max(s.y0(), s.y1()) > platform.top()
+                && Math.min(s.y0(), s.y1()) < platform.bottom(),
+            () -> "折返段压到站台块: " + s + " " + platform);
+      }
+    }
+  }
+
+  /** 两头都接在已排好的线上、沿轨道又长得多的线（迂回线、三角线的联络线）在两头之间均摊，不从一头按轨道长度一直排出去、冲过下一站再折回来。 */
+  @Test
+  void lineAnchoredAtBothEndsStaysBetweenThem() {
+    YardGeometry geometry =
+        zone(YardFixtures.detour(), YardArea.Member.station("ABC"), YardArea.Member.station("DEF"));
+    int west = geometry.nodeAt(YardFixtures.DETOUR_WEST).orElseThrow().x();
+    int first = geometry.nodeAt(YardFixtures.DETOUR_1).orElseThrow().x();
+    int second = geometry.nodeAt(YardFixtures.DETOUR_2).orElseThrow().x();
+    int third = geometry.nodeAt(YardFixtures.DETOUR_3).orElseThrow().x();
+    int station = geometry.nodeAt(YardFixtures.Q1).orElseThrow().x();
+
+    assertTrue(
+        west < first && first < second && second < third,
+        () -> "依次往东: " + west + " " + first + " " + second + " " + third);
+    assertTrue(third < station, () -> "不冲过 DEF: " + third + " " + station);
+  }
+
+  /** 车厢落在自己那条区间画出的线上；同一条区间上相邻两节之间按 {@link YardGeometry#trace} 连，每一段都顺着画出的线（三角线 U 形联络线的拐弯处也不抄近路）。 */
+  @Test
+  void carsAndTheBodyBetweenThemStayOnTheDrawnTrack() {
+    List<SimpleRailGraph> graphs =
+        List.of(YardFixtures.graph(), YardFixtures.triangle(), YardFixtures.fork(true));
+    for (SimpleRailGraph graph : graphs) {
+      YardGeometry geometry =
+          zone(
+              graph,
+              YardArea.Member.station("ABC"),
+              YardArea.Member.station("DEF"),
+              YardArea.Member.station("XYZ"));
+      List<YardGeometry.Segment> drawn =
+          geometry.paths().stream().flatMap(path -> path.segments().stream()).toList();
+      graph
+          .interlockingState()
+          .footprintCellsByEdge()
+          .forEach(
+              (edge, cells) -> {
+                List<YardGeometry.Segment> own =
+                    geometry.paths().stream()
+                        .filter(path -> path.edge().equals(edge))
+                        .flatMap(path -> path.segments().stream())
+                        .toList();
+                List<RailFootprintCell> ordered =
+                    cells.stream()
+                        .filter(cell -> geometry.pointOf(cell).isPresent())
+                        .sorted(
+                            java.util.Comparator.comparingDouble(
+                                cell -> {
+                                  org.bukkit.util.Vector a =
+                                      graph.findNode(edge.a()).orElseThrow().worldPosition();
+                                  return Math.hypot(cell.x() - a.getX(), cell.z() - a.getZ());
+                                }))
+                        .toList();
+                for (RailFootprintCell cell : ordered) {
+                  YardGeometry.Point at = geometry.pointOf(cell).orElseThrow();
+                  assertTrue(
+                      drawn.stream().anyMatch(s -> near(at, s)),
+                      () -> edge + " 的车厢 " + cell + " 落在 " + at + "，不在任何画出的线上");
+                  if (!own.isEmpty() && cellOfOneEdge(graph, cell)) {
+                    assertTrue(
+                        own.stream().anyMatch(s -> near(at, s)),
+                        () -> edge + " 的车厢 " + cell + " 落在 " + at + "，不在这条区间的线上: " + own);
+                  }
+                }
+                for (int i = 1; i < ordered.size(); i++) {
+                  List<YardGeometry.Point> body =
+                      geometry.trace(ordered.get(i - 1), ordered.get(i));
+                  for (int k = 1; k < body.size(); k++) {
+                    YardGeometry.Point p = body.get(k - 1);
+                    YardGeometry.Point q = body.get(k);
+                    assertTrue(
+                        drawn.stream().anyMatch(s -> near(p, s) && near(q, s)),
+                        () -> edge + " 上相邻两节之间的车身 " + p + "→" + q + " 不顺着画出的线: " + body);
+                  }
+                }
+              });
+    }
+  }
+
+  /** 只属于一条区间的轨道方块（道岔那几格各股共用，落在哪一股都对）。 */
+  private static boolean cellOfOneEdge(SimpleRailGraph graph, RailFootprintCell cell) {
+    return graph.interlockingState().footprintCellsByEdge().values().stream()
+            .filter(cells -> cells.contains(cell))
+            .count()
+        == 1;
+  }
+
+  /** 点在线段上（容一像素取整误差）。 */
+  private static boolean near(YardGeometry.Point p, YardGeometry.Segment s) {
+    double dx = s.x1() - s.x0();
+    double dy = s.y1() - s.y0();
+    double length = dx * dx + dy * dy;
+    double t =
+        length == 0.0
+            ? 0.0
+            : Math.max(
+                0.0, Math.min(1.0, ((p.x() - s.x0()) * dx + (p.y() - s.y0()) * dy) / length));
+    return Math.hypot(s.x0() + t * dx - p.x(), s.y0() + t * dy - p.y()) <= 1.0;
+  }
+
   @Test
   void principalAngleSnapsToFortyFiveDegrees() {
     List<double[]> alongZ = List.of(new double[] {0, 0}, new double[] {1, 50});
@@ -565,6 +851,16 @@ class YardGeometryTest {
             YardArea.Member.station("ABC"),
             YardArea.Member.station("DEF")),
         zone(YardFixtures.depot(2), YardArea.Member.station("ABC"), YardArea.Member.depot("DEP")),
+        zone(
+            YardFixtures.fork(true),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.station("XYZ")),
+        zone(
+            YardFixtures.triangle(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"),
+            YardArea.Member.station("XYZ")),
         geometry(YardFixtures.perpendicularLink()),
         geometry(YardFixtures.scissors()));
   }

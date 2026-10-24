@@ -60,8 +60,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
  * ETA 的计算本体：单车 ETA、未发车票据 ETA 与站牌。
  *
  * <p>无状态：外部事实全部经由构造时给定的 {@link EtaSources} 读取，同一份来源、同一个 {@code now} 算出的结果相同。来源是实时的（{@link
- * EtaService} 的钩子）时在调用线程上用（钩子能容忍的线程，见 {@link EtaService}）；来源是 {@link EtaBoardInput} 的冻结副本时可以在后台线程用——这里读不到任何钩子、 TrainCarts
- * 对象或占用账本，只额外读调度图快照与限速覆盖（{@link RailGraphService} 的并发容器）。
+ * EtaService} 的钩子）时在调用线程上用（钩子能容忍的线程，见 {@link EtaService}）；来源是 {@link EtaBoardInput}
+ * 的冻结副本时可以在后台线程用——这里读不到任何钩子、 TrainCarts 对象或占用账本，只额外读调度图快照与限速覆盖（{@link RailGraphService} 的并发容器）。
  *
  * <p>走行模型见 {@link EtaService}。
  */
@@ -1573,13 +1573,11 @@ final class EtaCalculator {
         resolveRowEndOperation(route, stop.routeUuid(), stop.target(), terminal, terminalContext);
     DestinationInfo destInfo = resolveBoardDestination(route, endOperation);
     int index = stop.index();
-    OptionalInt ownEnd =
-        RouteTerminals.endOfOperationIndex(sources.routes().listStops(route.id()));
+    OptionalInt ownEnd = RouteTerminals.endOfOperationIndex(sources.routes().listStops(route.id()));
     Optional<BoardResult.Joining> joining = Optional.empty();
     if (ownEnd.isPresent() && index < ownEnd.getAsInt()) {
       // 联挂站之前：乘客留在车上，挂上主干后到主干的终点
-      Optional<EtaService.ThroughRoute> through =
-          sources.throughRoutes().apply(stop.routeUuid());
+      Optional<EtaService.ThroughRoute> through = sources.throughRoutes().apply(stop.routeUuid());
       Optional<RouteDefinition> trunk =
           through.map(EtaService.ThroughRoute::route).flatMap(sources.routes()::findById);
       if (trunk.isPresent()) {
@@ -2506,8 +2504,7 @@ final class EtaCalculator {
           sources
               .ticketTrainConfigs()
               .resolve(routeUuid, consist == null ? Optional.empty() : consist, config, now);
-      settings =
-          settings.withTrain(trainConfig.accelBps2(), trainConfig.decelBps2());
+      settings = settings.withTrain(trainConfig.accelBps2(), trainConfig.decelBps2());
       maxSpeed = trainConfig.maxSpeedBps();
     }
     return new TravelTimeModel(

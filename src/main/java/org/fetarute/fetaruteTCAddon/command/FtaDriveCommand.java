@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabFault;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 import org.fetarute.fetaruteTCAddon.drive.driver.CongestionProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveLeaderboardRow;
@@ -222,7 +223,18 @@ public final class FtaDriveCommand {
             .literal("drive")
             .literal("call")
             .permission(permissionOf("call"))
-            .handler(ctx -> handleCall(ctx.sender())));
+            .optional(
+                "reason",
+                StringParser.stringParser(),
+                SuggestionProvider.blockingStrings(
+                    (ctx, input) ->
+                        CommandUx.suggestions(
+                            java.util.Arrays.stream(CallReason.values())
+                                .map(CallReason::key)
+                                .toList(),
+                            input.lastRemainingToken())))
+            .handler(
+                ctx -> handleCall(ctx.sender(), ctx.optional("reason").map(String.class::cast))));
 
     manager.command(
         manager
@@ -568,8 +580,8 @@ public final class FtaDriveCommand {
     drive.chooseSplit(player, option, outcome -> sendStartOutcome(player, drive, outcome));
   }
 
-  /** 呼叫信号员：只有正在驾驶调度列车的驾驶员能用，不论车上有没有车掌。 */
-  private void handleCall(CommandSender sender) {
+  /** 呼叫信号员：只有正在驾驶调度列车的驾驶员能用，不论车上有没有车掌。可写原因（信号前等候、车门故障、线路异常），不写为一般联系。 */
+  private void handleCall(CommandSender sender, Optional<String> reasonArg) {
     Player player = requirePlayer(sender);
     if (player == null) {
       return;
@@ -578,7 +590,15 @@ public final class FtaDriveCommand {
     if (drive == null) {
       return;
     }
-    sender.sendMessage(plugin.getLocaleManager().component(drive.callSignaller(player)));
+    Optional<CallReason> reason = reasonArg.flatMap(CallReason::parse);
+    if (reasonArg.isPresent() && reason.isEmpty()) {
+      sender.sendMessage(plugin.getLocaleManager().component("drive.command.call.bad-reason"));
+      return;
+    }
+    sender.sendMessage(
+        plugin
+            .getLocaleManager()
+            .component(drive.callSignaller(player, reason.orElse(CallReason.GENERAL))));
   }
 
   private void handleReverser(CommandSender sender, String direction) {

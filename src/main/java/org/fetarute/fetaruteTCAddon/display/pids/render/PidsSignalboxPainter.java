@@ -1,11 +1,13 @@
 package org.fetarute.fetaruteTCAddon.display.pids.render;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.display.Lateness;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
@@ -107,7 +109,18 @@ final class PidsSignalboxPainter {
     return new PidsYardPainter.Overlay() {
       @Override
       public void routes(YardGeometry geometry) {
+        drawDelegated(geometry, state);
         drawRoutes(yard, geometry, state);
+      }
+
+      @Override
+      public List<int[]> reserved(YardGeometry geometry) {
+        List<int[]> out = new ArrayList<>();
+        for (PidsSignalboxPlan.SignalSpot spot : plan.signals()) {
+          out.add(around(spot.square()));
+          spot.letter().ifPresent(letter -> out.add(around(letter)));
+        }
+        return out;
       }
 
       @Override
@@ -117,6 +130,83 @@ final class PidsSignalboxPainter {
         drawSelection(state, describers);
       }
     };
+  }
+
+  /** 让出去的小区围框离小区里的线与站台块多远（像素）。 */
+  private static final int DELEGATED_MARGIN = 4;
+
+  /**
+   * 让给小区（车站控制）的那几片：围着小区里的节点、两端都在小区里的线与小区站台的站台块画一圈虚线框，框的上沿外写“小区名 ·
+   * 车站控制（信号员）”。画在轨道之后、占用之前，车与占用照常盖在上面。
+   */
+  private void drawDelegated(YardGeometry geometry, SignalboxState state) {
+    int size = plan.yard().map(PidsLayout.Yard::labelSize).orElse(10);
+    String template = plan.view().labels().delegated();
+    PidsTheme theme = p.theme();
+    for (SignalboxState.Delegated area : state.delegated()) {
+      int[] bounds = {Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE};
+      List<YardGeometry.Point> points = new ArrayList<>();
+      for (NodeId node : area.nodes()) {
+        geometry.nodeAt(node).ifPresent(points::add);
+      }
+      points.forEach(at -> widen(bounds, at.x(), at.y(), at.x(), at.y()));
+      for (YardGeometry.Path path : geometry.paths()) {
+        if (area.nodes().contains(path.edge().a()) && area.nodes().contains(path.edge().b())) {
+          path.segments().forEach(s -> widen(bounds, s.x0(), s.y0(), s.x1(), s.y1()));
+        }
+      }
+      // 小区站台的站台块：块横向罩着小区里的节点、纵向挨着它那一行
+      for (YardGeometry.Platform block : geometry.platforms()) {
+        for (YardGeometry.Point at : points) {
+          if (block.left() <= at.x()
+              && at.x() <= block.right()
+              && block.top() - YardGeometry.ROW_GAP <= at.y()
+              && at.y() <= block.bottom() + YardGeometry.ROW_GAP) {
+            widen(bounds, block.left(), block.top(), block.right(), block.bottom());
+            break;
+          }
+        }
+      }
+      if (bounds[0] > bounds[2]) {
+        continue;
+      }
+      int left = bounds[0] - DELEGATED_MARGIN;
+      int top = bounds[1] - DELEGATED_MARGIN;
+      int right = bounds[2] + DELEGATED_MARGIN;
+      int bottom = bounds[3] + DELEGATED_MARGIN;
+      dashedFrame(left, top, right, bottom, theme.amber());
+      String text = template.replace("<zone>", area.zone()).replace("<name>", area.signaller());
+      int width = p.width(text, size);
+      p.fill(left, top - size - 3, width + 4, size + 2, theme.background());
+      p.text(text, size, left + 2, top - size - 2, theme.amber());
+    }
+  }
+
+  /** 把矩形 {左, 上, 右, 下} 扩到包住这两点。 */
+  private static void widen(int[] bounds, int x0, int y0, int x1, int y1) {
+    bounds[0] = Math.min(bounds[0], Math.min(x0, x1));
+    bounds[1] = Math.min(bounds[1], Math.min(y0, y1));
+    bounds[2] = Math.max(bounds[2], Math.max(x0, x1));
+    bounds[3] = Math.max(bounds[3], Math.max(y0, y1));
+  }
+
+  /** 1 像素虚线框：每 7 像素画 4 像素。 */
+  private void dashedFrame(int left, int top, int right, int bottom, int rgb) {
+    for (int x = left; x <= right; x += 7) {
+      int run = Math.min(4, right - x + 1);
+      p.fill(x, top, run, 1, rgb);
+      p.fill(x, bottom, run, 1, rgb);
+    }
+    for (int y = top; y <= bottom; y += 7) {
+      int run = Math.min(4, bottom - y + 1);
+      p.fill(left, y, 1, run, rgb);
+      p.fill(right, y, 1, run, rgb);
+    }
+  }
+
+  /** 方框外扩一像素的 {左, 上, 右, 下}。 */
+  private static int[] around(PidsSignalboxPlan.Box box) {
+    return new int[] {box.x() - 1, box.y() - 1, box.right() + 1, box.y() + box.height() + 1};
   }
 
   /** 选中车的计划进路画浅蓝实线，已给许可、内核还没放行的进路画白色虚线；锁闭与占用随后照常盖在上面。 */
@@ -206,7 +296,7 @@ final class PidsSignalboxPainter {
 
   // ─── 列车表 ───────────────────────────────────────────────────────────────
 
-  /** 表头、各行（选中行铺高亮底；等许可的行底画琥珀色进度条）；没有控制台数据时写说明。 */
+  /** 表头（画不下的车数写在右端 “+N”）、各行（选中行铺高亮底；等许可、扣车的行底画琥珀色进度条）；没有控制台数据时写说明。 */
   void drawTrainList(PidsLayout.TrainList list) {
     PidsTheme theme = p.theme();
     SignalboxView view = plan.view();
@@ -238,6 +328,16 @@ final class PidsSignalboxPainter {
       return;
     }
     SignalboxState state = view.state().get();
+    int hidden = state.rows().size() - plan.rows().size();
+    if (hidden > 0) {
+      String more = "+" + hidden;
+      p.text(
+          more,
+          list.headerSize(),
+          list.x() + list.width() - CELL_INSET - p.width(more, list.headerSize()),
+          headerTop,
+          theme.amber());
+    }
     if (plan.rows().isEmpty()) {
       p.text(
           labels.noTrains(),
@@ -298,12 +398,15 @@ final class PidsSignalboxPainter {
                     box.x() + list.destinationX(),
                     top,
                     theme.text()));
-    // 状态（等许可、扣车带秒数）
+    // 状态（等许可、扣车带秒数；系统代排的另行标明）
     String status =
         labels
             .statuses()
             .getOrDefault(row.status(), row.status().name())
             .replace("<seconds>", Long.toString(Math.max(0L, row.seconds())));
+    if (row.autoRouted()) {
+      status = labels.autoRouted().replace("<status>", status);
+    }
     p.text(
         p.ellipsize(status, size, list.delayX() - list.statusX() - 6),
         size,
@@ -318,8 +421,9 @@ final class PidsSignalboxPainter {
         box.x() + list.delayX(),
         top,
         delay.color());
-    // 离超时自动排列的进度
-    if (row.status() == SignalboxState.RowStatus.WAITING) {
+    // 离超时自动排列、离扣车上限的进度
+    if (row.status() == SignalboxState.RowStatus.WAITING
+        || row.status() == SignalboxState.RowStatus.HELD) {
       double progress = Math.max(0.0, Math.min(1.0, row.autoProgress()));
       int length = (int) Math.round(box.width() * progress);
       p.fill(box.x(), box.bottom() - PROGRESS, length, PROGRESS, theme.amber());

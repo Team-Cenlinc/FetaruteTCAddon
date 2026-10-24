@@ -26,12 +26,15 @@ import org.incendo.cloud.permission.Permission;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
- * {@code /fta license}：驾驶证。玩家查看自己的驾驶证、报名考试、补发；管理员发证、吊销、查询。
+ * {@code /fta license}：操作许可证（驾驶、车掌、信号员）。玩家查看自己的许可证、报名考试与练习、补发；管理员发证、吊销、查询。
  *
  * <ul>
- *   <li>{@code /fta license}：我的驾驶证与可报名的考试
- *   <li>{@code /fta license exam <等级> [车站]}：报名考试（路考可指定接班站，默认附近的车站）
- *   <li>{@code /fta license reissue}：补发驾驶证
+ *   <li>{@code /fta license}：我的操作许可证与可报名的考试
+ *   <li>{@code /fta license exam <资格> [车站]}：报名考试（路考与车掌考试可指定接班站，默认附近的车站）
+ *   <li>{@code /fta license practice <资格>}：报名练习
+ *   <li>{@code /fta license abandon}：放弃还没上岗的信号员考试或练习
+ *   <li>{@code /fta license reissue}：补发操作许可证
+ *   <li>{@code /fta handbook driver|guard|signaller}：领一本手册
  *   <li>{@code /fta license grant|revoke <玩家> <等级>}、{@code /fta license list <玩家>}：管理
  * </ul>
  */
@@ -109,6 +112,20 @@ public final class FtaLicenseCommand {
             .literal("guard")
             .permission(player)
             .handler(ctx -> handleGuardHandbook(ctx.sender())));
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("handbook")
+            .literal("signaller")
+            .permission(player)
+            .handler(ctx -> handleSignallerHandbook(ctx.sender())));
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("license")
+            .literal("abandon")
+            .permission(player)
+            .handler(ctx -> handleAbandon(ctx.sender())));
     manager.command(
         manager
             .commandBuilder("fta")
@@ -190,7 +207,7 @@ public final class FtaLicenseCommand {
     return names.stream().limit(30).toList();
   }
 
-  /** 我的驾驶证：按级别从低到高列出整条阶梯——已取得、考试或练习中、须先练习、可报名（带按钮）、尚未解锁。 */
+  /** 我的操作许可证：先列驾驶各级（从低到高），再列车掌、信号员——已取得、考试或练习中、须先练习、可报名（带按钮）、尚未解锁。 */
   private void handleInfo(CommandSender sender) {
     Player player = requirePlayer(sender);
     LicenseService licenses = requireService(sender);
@@ -215,16 +232,11 @@ public final class FtaLicenseCommand {
       held.put(record.classId(), record);
     }
     Optional<LicenseService.Exam> examining = licenses.exam(id);
-    // 先列准驾等级的阶梯，再单列“附注”（车掌）。
-    boolean endorsementHeader = false;
-    for (boolean endorsements : new boolean[] {false, true}) {
+    // 三个岗位并列：先列驾驶的阶梯，再列车掌、信号员（各按配置先后）。
+    for (boolean graded : new boolean[] {true, false}) {
       for (LicenseClass license : licenses.config().classes()) {
-        if (license.endorsement() != endorsements) {
+        if (license.graded() != graded) {
           continue;
-        }
-        if (endorsements && !endorsementHeader) {
-          sender.sendMessage(locale.component("drive.license.info.endorsement.header"));
-          endorsementHeader = true;
         }
         sender.sendMessage(
             locale.component(
@@ -235,7 +247,7 @@ public final class FtaLicenseCommand {
     sender.sendMessage(locale.component("drive.license.info.footer"));
   }
 
-  /** /fta license 里一级（或一项附注）的那一行：已取得、关闭、考试或练习中、未解锁、须先练习、可报名。 */
+  /** /fta license 里一项资格的那一行：已取得、关闭、考试或练习中、未解锁、须先练习、可报名。信号员的练习与报名说法另写。 */
   private static String infoKey(
       LicenseService licenses,
       LicenseClass license,
@@ -243,7 +255,8 @@ public final class FtaLicenseCommand {
       Map<String, LicenseRecord> held,
       Optional<LicenseService.Exam> examining) {
     String prefix =
-        license.endorsement() ? "drive.license.info.endorsement." : "drive.license.info.level-";
+        license.graded() ? "drive.license.info.level-" : "drive.license.info.endorsement.";
+    boolean signaller = license.exam() == LicenseClass.Exam.SIGNALLER;
     LicenseRecord record = held.get(license.id());
     if (record != null) {
       return prefix + ("exam".equals(record.grantedBy()) ? "held-exam" : "held-admin");
@@ -263,12 +276,15 @@ public final class FtaLicenseCommand {
       return prefix + "open-tutorial";
     }
     if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
-      return prefix + "need-practice";
+      return signaller ? "drive.license.info.signaller.need-practice" : prefix + "need-practice";
     }
-    return prefix + (license.endorsement() ? "open" : "open-road-test");
+    if (signaller) {
+      return "drive.license.info.signaller.open";
+    }
+    return prefix + (license.graded() ? "open-road-test" : "open");
   }
 
-  /** 那一行的占位符：附注单列在“附注”下，只写名字（如“车掌”）。 */
+  /** 那一行的占位符：驾驶写级别与名称，车掌、信号员只写名称。 */
   private static Map<String, String> infoValues(
       LicenseService licenses, LicenseClass license, UUID id, Map<String, LicenseRecord> held) {
     Map<String, String> values = new java.util.HashMap<>();
@@ -277,6 +293,7 @@ public final class FtaLicenseCommand {
     values.put("class", license.id());
     values.put("description", license.description());
     values.put("stops", String.valueOf(license.examStops()));
+    values.put("trains", String.valueOf(license.examStops()));
     values.put("min", String.valueOf(license.minPoints()));
     values.put("done", String.valueOf(licenses.trainingRuns(id, license.id())));
     values.put("required", String.valueOf(license.trainingRuns()));
@@ -317,6 +334,26 @@ public final class FtaLicenseCommand {
     }
     licenses.guardHandbook().give(player, plugin.getLocaleManager(), false);
     sender.sendMessage(plugin.getLocaleManager().component("drive.handbook.guard.given"));
+  }
+
+  /** 领一本《FTCA 信号员手册》。 */
+  private void handleSignallerHandbook(CommandSender sender) {
+    Player player = requirePlayer(sender);
+    LicenseService licenses = requireService(sender);
+    if (player == null || licenses == null) {
+      return;
+    }
+    licenses.signallerHandbook().give(player, plugin.getLocaleManager(), false);
+    sender.sendMessage(plugin.getLocaleManager().component("drive.handbook.signaller.given"));
+  }
+
+  private void handleAbandon(CommandSender sender) {
+    Player player = requirePlayer(sender);
+    LicenseService licenses = requireService(sender);
+    if (player == null || licenses == null) {
+      return;
+    }
+    send(sender, licenses.abandon(player));
   }
 
   private void handleExam(CommandSender sender, String classId, Optional<String> station) {

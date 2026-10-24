@@ -17,6 +17,7 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
@@ -68,10 +69,13 @@ public final class TrainCartsYardTrains implements Function<UUID, List<YardTrain
   private YardTrain.Details details(String name, TrainProperties properties) {
     Optional<TimetableService> timetable = timetables.get();
     return new YardTrain.Details(
-        timetable
-            .flatMap(service -> service.assignmentOf(name))
-            .map(TimetableAssignment::tripCode)
-            .filter(code -> code != null && !code.isBlank())
+        TrainNameFormatter.sequence(name)
+            .or(
+                () ->
+                    timetable
+                        .flatMap(service -> service.assignmentOf(name))
+                        .map(TimetableAssignment::tripCode)
+                        .filter(code -> code != null && !code.isBlank()))
             .orElse(name),
         lineColor(properties),
         timetable.map(service -> service.currentDelaySeconds(name).orElse(0L)).orElse(0L));

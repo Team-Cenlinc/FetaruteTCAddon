@@ -141,6 +141,68 @@ public final class YardFixtures {
         nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
   }
 
+  /**
+   * ABC 站几条平行的站台股道，各自通向东头的终点，都没写开门方向：按给定的南北坐标从北往南排，股道号依次为 1、2、3……
+   *
+   * @param zs 各条股道的南北坐标
+   */
+  public static SimpleRailGraph stationTracks(int... zs) {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    for (int i = 0; i < zs.length; i++) {
+      NodeId track = NodeId.of("SURC:S:ABC:" + (i + 1));
+      NodeId end = NodeId.of("END-" + (i + 1));
+      node(nodes, track, NodeType.STATION, 0, zs[i], false);
+      node(nodes, end, NodeType.DESTINATION, 40, zs[i], false);
+      edge(edges, footprints, Set.of(), track, end, straight(0, 40, zs[i]), false);
+    }
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  /** 一条东西向的线：ABC 1 道与 DEF 1 道只隔 30 格，XYZ 1 道在 400 格外（按里程分宽度时两站分到的很少）。 */
+  public static SimpleRailGraph closeStations() {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, Q1, NodeType.STATION, 30, 0, false);
+    node(nodes, X1, NodeType.STATION, 430, 0, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, Q1, straight(0, 30, 0), false);
+    edge(edges, footprints, Set.of(), Q1, X1, straight(30, 430, 0), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  /**
+   * 两条平行的线上挨着的两个车站，都是岛式站台（两条股道相隔 10 格），站台节点在两条线上错开 6 格：ABC 1 道 x=0、2 道 x=6，DEF 1 道 x=30、2 道 x=36；1
+   * 道一线再往东 400 格到 XYZ（按里程分宽度时两站分到的很少），2 道一线两头各伸到站外。
+   */
+  public static SimpleRailGraph closeIslands() {
+    NodeId abc2 = NodeId.of("SURC:S:ABC:2");
+    NodeId def2 = NodeId.of("SURC:S:DEF:2");
+    NodeId west2 = NodeId.of("WEST-2");
+    NodeId end2 = NodeId.of("END-2");
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, abc2, NodeType.STATION, 6, 10, false);
+    node(nodes, Q1, NodeType.STATION, 30, 0, false);
+    node(nodes, def2, NodeType.STATION, 36, 10, false);
+    node(nodes, X1, NodeType.STATION, 430, 0, false);
+    node(nodes, west2, NodeType.DESTINATION, -40, 10, false);
+    node(nodes, end2, NodeType.DESTINATION, 80, 10, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, Q1, straight(0, 30, 0), false);
+    edge(edges, footprints, Set.of(), Q1, X1, straight(30, 430, 0), false);
+    edge(edges, footprints, Set.of(), west2, abc2, straight(-40, 6, 10), false);
+    edge(edges, footprints, Set.of(), abc2, def2, straight(6, 36, 10), false);
+    edge(edges, footprints, Set.of(), def2, end2, straight(36, 80, 10), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
   /** 同 {@link #twoPlatforms(int)}，两条站台股道正中间另有一条不进站的正线穿过（与站场不相连）。 */
   public static SimpleRailGraph twoPlatformsAroundAThroughTrack(int gap) {
     NodeId end1 = NodeId.of("END-1");
@@ -249,6 +311,153 @@ public final class YardFixtures {
     edge(edges, footprints, Set.of(), DEF_TO_XYZ, MERGE, line(60, 20, 100, 10), false);
     edge(edges, footprints, Set.of(), MERGE, TO_XYZ_FAR, straight(100, 160, 10), false);
     edge(edges, footprints, Set.of(), TO_XYZ_FAR, X1, straight(160, 220, 10), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  public static final NodeId FORK = NodeId.of("SWITCHER:world:200:64:0");
+  public static final NodeId FORK_STEM = NodeId.of("SURC:ABC:DEF:1:02");
+  public static final NodeId FORK_TO_DEF = NodeId.of("SURC:ABC:DEF:1:03");
+
+  /**
+   * ABC 往东到 FORK 分成两股，一股去 DEF、一股去 XYZ，三站都在控制区里。
+   *
+   * <pre>
+   *                                              ╱── FORK_TO_DEF ── Q1(DEF 1道)
+   *  P1(ABC 1道) ── FORK_STEM ── FORK ──────────<
+   *                                              ╲── TO_XYZ ── X1(XYZ 1道)
+   * </pre>
+   *
+   * @param straightOn 去 DEF 的一股顺着来路直着往东（否则往东北斜出，与去 XYZ 的一股对称）
+   */
+  public static SimpleRailGraph fork(boolean straightOn) {
+    int defZ = straightOn ? 0 : -20;
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, FORK_STEM, NodeType.WAYPOINT, 100, 0, false);
+    node(nodes, FORK, NodeType.SWITCHER, 200, 0, false);
+    node(nodes, FORK_TO_DEF, NodeType.WAYPOINT, 240, defZ, false);
+    node(nodes, Q1, NodeType.STATION, 300, 2 * defZ, false);
+    node(nodes, TO_XYZ, NodeType.WAYPOINT, 240, 20, false);
+    node(nodes, X1, NodeType.STATION, 300, 40, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, FORK_STEM, straight(0, 100, 0), false);
+    edge(edges, footprints, Set.of(), FORK_STEM, FORK, straight(100, 200, 0), false);
+    edge(edges, footprints, Set.of(), FORK, FORK_TO_DEF, line(200, 0, 240, defZ), false);
+    edge(edges, footprints, Set.of(), FORK_TO_DEF, Q1, line(240, defZ, 300, 2 * defZ), false);
+    edge(edges, footprints, Set.of(), FORK, TO_XYZ, line(200, 0, 240, 20), false);
+    edge(edges, footprints, Set.of(), TO_XYZ, X1, line(240, 20, 300, 40), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  public static final NodeId Q2 = NodeId.of("SURC:S:DEF:2");
+  public static final NodeId X2 = NodeId.of("SURC:S:XYZ:2");
+  public static final NodeId DEF_EAST = NodeId.of("SWITCHER:world:400:64:0");
+  public static final NodeId XYZ_NORTH = NodeId.of("SWITCHER:world:250:64:-280");
+  public static final NodeId TO_XYZ_2 = NodeId.of("SURC:ABC:XYZ:1:02");
+  public static final NodeId CHORD_1 = NodeId.of("SURC:DEF:XYZ:1:01");
+  public static final NodeId CHORD_2 = NodeId.of("SURC:DEF:XYZ:1:02");
+
+  /**
+   * 三角线：ABC 往东到 FORK 分成两股，一股直着往东到 DEF，一股往北拐到 XYZ（XYZ 是南北向的站，和来路垂直）；DEF 2 道西头与 XYZ 2 道南头之间有一条联络线，
+   * 两站的 2 道另一头各在站外的道岔并入 1 道。
+   *
+   * <pre>
+   *                       XYZ_NORTH（往北出站）
+   *                        │      ╲
+   *                       X1      X2
+   *                        │        ╲
+   *                    TO_XYZ_2     CHORD_2
+   *                       ╱            │
+   *                  TO_XYZ         CHORD_1
+   *                   ╱                 ╲
+   *  P1 ── FORK_STEM ── FORK ── FORK_TO_DEF ── Q1 ── DEF_EAST（往东出站）
+   *                                            Q2 ─╯
+   * </pre>
+   */
+  public static SimpleRailGraph triangle() {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, FORK_STEM, NodeType.WAYPOINT, 100, 0, false);
+    node(nodes, FORK, NodeType.SWITCHER, 200, 0, false);
+    node(nodes, FORK_TO_DEF, NodeType.WAYPOINT, 260, 0, false);
+    node(nodes, Q1, NodeType.STATION, 340, 0, false);
+    node(nodes, Q2, NodeType.STATION, 340, -4, false);
+    node(nodes, DEF_EAST, NodeType.SWITCHER, 400, 0, false);
+    node(nodes, TO_GHI, NodeType.WAYPOINT, 460, 0, false);
+    node(nodes, TO_XYZ, NodeType.WAYPOINT, 230, -60, false);
+    node(nodes, TO_XYZ_2, NodeType.WAYPOINT, 250, -150, false);
+    node(nodes, X1, NodeType.STATION, 250, -220, false);
+    node(nodes, X2, NodeType.STATION, 254, -220, false);
+    node(nodes, XYZ_NORTH, NodeType.SWITCHER, 250, -280, false);
+    node(nodes, TO_JKL, NodeType.WAYPOINT, 250, -340, false);
+    node(nodes, CHORD_1, NodeType.WAYPOINT, 300, -40, false);
+    node(nodes, CHORD_2, NodeType.WAYPOINT, 280, -150, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, FORK_STEM, straight(0, 100, 0), false);
+    edge(edges, footprints, Set.of(), FORK_STEM, FORK, straight(100, 200, 0), false);
+    edge(edges, footprints, Set.of(), FORK, FORK_TO_DEF, straight(200, 260, 0), false);
+    edge(edges, footprints, Set.of(), FORK_TO_DEF, Q1, straight(260, 340, 0), false);
+    edge(edges, footprints, Set.of(), Q1, DEF_EAST, straight(340, 400, 0), false);
+    edge(edges, footprints, Set.of(), DEF_EAST, TO_GHI, straight(400, 460, 0), false);
+    List<int[]> defTwo = new ArrayList<>(straight(340, 396, -4));
+    defTwo.addAll(line(396, -4, 400, 0));
+    edge(edges, footprints, Set.of(), Q2, DEF_EAST, defTwo, false);
+    edge(edges, footprints, Set.of(), FORK, TO_XYZ, line(200, 0, 230, -60), false);
+    edge(edges, footprints, Set.of(), TO_XYZ, TO_XYZ_2, line(230, -60, 250, -150), false);
+    edge(edges, footprints, Set.of(), TO_XYZ_2, X1, line(250, -150, 250, -220), false);
+    edge(edges, footprints, Set.of(), X1, XYZ_NORTH, line(250, -220, 250, -280), false);
+    edge(edges, footprints, Set.of(), XYZ_NORTH, TO_JKL, line(250, -280, 250, -340), false);
+    List<int[]> xyzTwo = new ArrayList<>(line(254, -220, 254, -276));
+    xyzTwo.addAll(line(254, -276, 250, -280));
+    edge(edges, footprints, Set.of(), X2, XYZ_NORTH, xyzTwo, false);
+    edge(edges, footprints, Set.of(), Q2, CHORD_1, line(340, -4, 300, -40), false);
+    edge(edges, footprints, Set.of(), CHORD_1, CHORD_2, line(300, -40, 280, -150), false);
+    edge(edges, footprints, Set.of(), CHORD_2, X2, line(280, -150, 254, -220), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  public static final NodeId TO_GHI = NodeId.of("SURC:DEF:GHI:1:01");
+  public static final NodeId TO_JKL = NodeId.of("SURC:XYZ:JKL:1:01");
+
+  public static final NodeId DETOUR_WEST = NodeId.of("SWITCHER:world:120:64:0");
+  public static final NodeId DETOUR_EAST = NodeId.of("SWITCHER:world:280:64:0");
+  public static final NodeId DETOUR_1 = NodeId.of("SURC:ABC:DEF:2:01");
+  public static final NodeId DETOUR_2 = NodeId.of("SURC:ABC:DEF:2:02");
+  public static final NodeId DETOUR_3 = NodeId.of("SURC:ABC:DEF:2:03");
+
+  /**
+   * ABC 与 DEF 之间的正线上两组道岔，中间另有一条往北绕出 100 格的迂回线：沿轨道比两组道岔之间的正线长得多，最后一段很短。
+   *
+   * <pre>
+   *            DETOUR_1 ─────────── DETOUR_2
+   *           ╱                          │
+   *          ╱                       DETOUR_3
+   *  P1 ── DETOUR_WEST ─────────── DETOUR_EAST ── Q1
+   * </pre>
+   */
+  public static SimpleRailGraph detour() {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, DETOUR_WEST, NodeType.SWITCHER, 120, 0, false);
+    node(nodes, DETOUR_EAST, NodeType.SWITCHER, 280, 0, false);
+    node(nodes, Q1, NodeType.STATION, 400, 0, false);
+    node(nodes, DETOUR_1, NodeType.WAYPOINT, 140, -100, false);
+    node(nodes, DETOUR_2, NodeType.WAYPOINT, 260, -100, false);
+    node(nodes, DETOUR_3, NodeType.WAYPOINT, 280, -10, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, DETOUR_WEST, straight(0, 120, 0), false);
+    edge(edges, footprints, Set.of(), DETOUR_WEST, DETOUR_EAST, straight(120, 280, 0), false);
+    edge(edges, footprints, Set.of(), DETOUR_EAST, Q1, straight(280, 400, 0), false);
+    edge(edges, footprints, Set.of(), DETOUR_WEST, DETOUR_1, line(120, 0, 140, -100), false);
+    edge(edges, footprints, Set.of(), DETOUR_1, DETOUR_2, straight(140, 260, -100), false);
+    edge(edges, footprints, Set.of(), DETOUR_2, DETOUR_3, line(260, -100, 280, -10), false);
+    edge(edges, footprints, Set.of(), DETOUR_3, DETOUR_EAST, line(280, -10, 280, 0), false);
     return new SimpleRailGraph(
         nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
   }

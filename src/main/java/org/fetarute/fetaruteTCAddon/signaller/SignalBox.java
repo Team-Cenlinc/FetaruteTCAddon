@@ -2,18 +2,23 @@ package org.fetarute.fetaruteTCAddon.signaller;
 
 import java.time.Instant;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
@@ -38,6 +43,12 @@ final class SignalBox {
   /** 选中的列车（键）。 */
   String selected;
 
+  /** 选中的车不再跟这座楼有关（出了区、不在列车表里）的起始时刻；还在时为空。 */
+  Instant selectedMissingSince;
+
+  /** 切换类按钮（人工与自动、自动通过）上一次生效的时刻：按住右键时客户端会连发，紧接着的重复按下不算。 */
+  final Map<SignalboxState.Button, Instant> toggled = new EnumMap<>(SignalboxState.Button.class);
+
   boolean replying;
   Notice notice;
 
@@ -58,6 +69,18 @@ final class SignalBox {
 
   /** 信号员改过停站股道的列车键（下岗时撤销；转为自动不撤：扣车与改停股道只经出站门控，与模式无关）。 */
   final Set<String> platformChoices = new HashSet<>();
+
+  /** 交汇排序：信号员排进来的车与另一个入口同时在等、区内要走的路有交汇的车，两车都出区后按合计多出的晚点计分。 */
+  final List<Pair> pairs = new ArrayList<>();
+
+  /**
+   * 接近锁闭过的入口（不分方向的入口区间 →
+   * 解锁时刻）：车已在接近时取消了它的进路，到时之前这个入口不再排进路。解锁后还记一阵，用来认出代排时限是不是在锁闭期间到的（那样的车锁一解除就放，不算代排）。
+   */
+  final Map<EdgeId, Instant> approachLocks = new HashMap<>();
+
+  /** 已提示过正在接近的列车键：一列车接近一次只响一声，进了区、离开接近就移出。 */
+  final Set<String> approaching = new HashSet<>();
 
   /** 推导控制区用的成员；控制区改了成员就重算。 */
   List<YardArea.Member> mapMembers;
@@ -84,7 +107,11 @@ final class SignalBox {
     autoPasses.clear();
     platformChoices.clear();
     selected = null;
+    selectedMissingSince = null;
+    toggled.clear();
     replying = false;
+    approachLocks.clear();
+    pairs.clear();
   }
 
   /**
@@ -107,7 +134,9 @@ final class SignalBox {
     /** 自动通过的进路。 */
     AUTO_PASS,
     /** 等许可超时，系统代排。 */
-    TIMEOUT
+    TIMEOUT,
+    /** 代排时限在接近锁闭期间就到了：锁一解除由系统放行，不算代排（等待照样有上限，信号员也不因取消进路受罚）。 */
+    RELEASED
   }
 
   /** 许可的状态。 */
@@ -134,6 +163,15 @@ final class SignalBox {
     final Optional<Instant> waitingSince;
     final Optional<Route> route;
     PermitState state = PermitState.PENDING;
+
+    /** 锁闭（驶入）时这列车的晚点（秒）；没有时刻表时为空。出区时与那时的晚点比，计正点放行或在区内丢了时间。 */
+    OptionalLong entryDelay = OptionalLong.empty();
+
+    /** 锁闭时晚点读数的版本：出区时版本没变（其间没停过站）就不比。 */
+    Optional<String> entryStamp = Optional.empty();
+
+    /** 在区内被扣车扣了多少秒：扣车是信号员有意的调整，比晚点时减掉。 */
+    long heldSeconds;
 
     Permit(
         String trainName,
@@ -163,11 +201,38 @@ final class SignalBox {
     Instant lastSeen;
     final Optional<Route> route;
 
+    /** 等满代排时限却好一阵没来问闸时，巡检最近一次唤醒它的时刻。 */
+    Instant wokenAt;
+
+    /** 等到代排时限一半时已提醒过信号员。 */
+    boolean halfAlerted;
+
     Waiting(String trainName, Instant since, Optional<Route> route) {
       this.trainName = trainName;
       this.since = since;
       this.lastSeen = since;
       this.route = route == null ? Optional.empty() : route;
+    }
+  }
+
+  /**
+   * 一对交汇的列车：先放的与在另一个入口等着的。两车各自出区时记下在区内多出的晚点（秒），都有了就结算。
+   *
+   * @param first 信号员先放进来的车（键）
+   * @param second 另一个入口等着的车（键）
+   * @param since 记下的时刻（太久没结算就作废）
+   */
+  static final class Pair {
+    String first;
+    String second;
+    final Instant since;
+    Long firstGrowth;
+    Long secondGrowth;
+
+    Pair(String first, String second, Instant since) {
+      this.first = first;
+      this.second = second;
+      this.since = since;
     }
   }
 
@@ -183,11 +248,23 @@ final class SignalBox {
    * 驾驶员的呼叫。
    *
    * @param trainName 列车名
-   * @param driver 驾驶员
+   * @param driver 驾驶员；模拟呼叫时为空
    * @param driverName 驾驶员名字
    * @param since 呼叫时刻
+   * @param reason 原因
+   * @param drill 是模拟呼叫（操作许可证的练习与考试）：回复与漏接不发给任何驾驶员
    */
-  record Call(String trainName, UUID driver, String driverName, Instant since) {}
+  record Call(
+      String trainName,
+      UUID driver,
+      String driverName,
+      Instant since,
+      CallReason reason,
+      boolean drill) {
+    Call {
+      reason = reason == null ? CallReason.GENERAL : reason;
+    }
+  }
 
   /**
    * 临时提示。
@@ -208,6 +285,12 @@ final class SignalBox {
     /** 离开控制台范围的起始时刻；在范围内时为空。 */
     Instant awaySince;
 
+    /** 最近一次操作以来由系统代排的车次：连续几列都没人管就转为自动。 */
+    int autoRoutedIdle;
+
+    /** 上岗时已在接近的车已记下（不为它们响）：之后新接近的才提示。 */
+    boolean approachSeeded;
+
     /** 拿着许可驶入控制区的车次（按锁闭计，同一列车往返两次算两次）。 */
     int trainsHandled;
 
@@ -218,6 +301,20 @@ final class SignalBox {
     int holds;
     int callsAnswered;
     int callsMissed;
+
+    /** 回复与呼叫原因不符（也计在回复了的呼叫里）。 */
+    int callsWrong;
+
+    /** 亲手排进来、出区时没丢时间的车。 */
+    int keptTime;
+
+    /** 拿着许可驶入、在区内丢了时间的车。 */
+    int lostTime;
+
+    /** 交汇排序得当、不当的次数。 */
+    int conflictsGood;
+
+    int conflictsBad;
 
     Duty(UUID player, String playerName, Instant start, ConsoleSpot console) {
       this.player = player;

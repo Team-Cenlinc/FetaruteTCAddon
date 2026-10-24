@@ -93,6 +93,39 @@ class ControlZoneServiceTest {
         service.removeMember(zone, Kind.STATION, "PPK", companyId -> false).status());
   }
 
+  /** 控制区只能嵌套：同一运营商的两片要么不相交、要么一片整个包含另一片。加成员或移成员后会部分重叠、或两片一模一样的，拒绝并指出冲突的那片；没改库。 */
+  @Test
+  void zonesMayNestButNeverPartlyOverlap() {
+    storage.station(operator, "RVS", "河滨适");
+    storage.station(operator, "PTK", "蒲塘桥");
+    storage.station(operator, "SPB", "主城湾");
+    ControlZone big = create("A");
+    for (String code : List.of("PPK", "RVS", "PTK")) {
+      assertEquals(Status.ADDED, service.addMember(big, Kind.STATION, code, ANYONE).status());
+    }
+    ControlZone small = create("A1");
+    assertEquals(Status.ADDED, service.addMember(small, Kind.STATION, "RVS", ANYONE).status());
+    assertEquals(
+        Status.ADDED, service.addMember(small, Kind.STATION, "PPK", ANYONE).status(), "小区整个在大区里");
+    ControlZone apart = create("B");
+    assertEquals(
+        Status.ADDED, service.addMember(apart, Kind.STATION, "SPB", ANYONE).status(), "与别的区不相交");
+
+    ControlZoneService.Result partly = service.addMember(apart, Kind.STATION, "PTK", ANYONE);
+    assertEquals(Status.OVERLAP, partly.status(), "B 会一半在 A 里");
+    assertEquals(Optional.of(big.id()), partly.conflict().map(ControlZone::id));
+    ControlZoneService.Result shrink = service.removeMember(big, Kind.STATION, "RVS", ANYONE);
+    assertEquals(Status.OVERLAP, shrink.status(), "A 移走 RVS 后 A1 会露出一半");
+    assertEquals(Optional.of(small.id()), shrink.conflict().map(ControlZone::id));
+    ControlZone same = create("C");
+    service.addMember(same, Kind.STATION, "RVS", ANYONE);
+    assertEquals(
+        Status.OVERLAP,
+        service.addMember(same, Kind.STATION, "PPK", ANYONE).status(),
+        "与 A1 范围一模一样");
+    assertEquals(3, storage.provider().controlZones().listMembers(big.id()).size(), "被拒的改动没写库");
+  }
+
   /** 两家公司有同代码的运营商：按代码只认先到的那家（与车站目录同一规则），按运营商 ID 各查各的。 */
   @Test
   void directoryResolvesSharedOperatorCodesLikeTheStationDirectory() {

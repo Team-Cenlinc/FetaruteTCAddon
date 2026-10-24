@@ -4,6 +4,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
@@ -37,20 +38,24 @@ public record SignalboxView(
    * @param auto 模式牌：自动
    * @param signaller 值守者，含 {@code <name>}
    * @param unattended 没人值守
-   * @param call 呼叫牌，含 {@code <train>}
+   * @param call 呼叫牌，含 {@code <train>} 与 {@code <reason>}（呼叫原因）
+   * @param callReasons 呼叫原因的写法
    * @param headerTrain 表头：车次
    * @param headerDestination 表头：去向
    * @param headerStatus 表头：状态
    * @param headerDelay 表头：晚点
    * @param statuses 列车表各状态；等许可与扣车含 {@code <seconds>}
+   * @param autoRouted 由系统代排的车的状态写法，含 {@code <status>}（上面那个状态）
    * @param onTime 正点
    * @param noTrains 列车表空着时的说明
    * @param buttons 操作按钮（中英文上下叠放）；人工、自动切换按钮另见 {@code toAuto}、{@code toManual}
    * @param toAuto 模式按钮在人工模式下：转为自动
    * @param toManual 模式按钮在自动模式下：转为人工
+   * @param cancelAutoPass 自动通过按钮在选中车的进路已设自动通过时：取消自动通过
    * @param replies 四条固定回复
-   * @param notices 临时提示；进路被占用另见 {@code routeBlockedBy}
+   * @param notices 临时提示；带列车的含 {@code <train>}，进路被占用另见 {@code routeBlockedBy}
    * @param routeBlockedBy 进路被某列车占用，含 {@code <train>}
+   * @param delegated 站场图上让给小区（车站控制）的那一片的标注，含 {@code <zone>}（小区名）与 {@code <name>}（小区的信号员）
    */
   public record Labels(
       String manual,
@@ -58,21 +63,26 @@ public record SignalboxView(
       String signaller,
       String unattended,
       String call,
+      Map<CallReason, String> callReasons,
       String headerTrain,
       String headerDestination,
       String headerStatus,
       String headerDelay,
       Map<SignalboxState.RowStatus, String> statuses,
+      String autoRouted,
       String onTime,
       String noTrains,
       Map<SignalboxState.Button, Names> buttons,
       Names toAuto,
       Names toManual,
+      Names cancelAutoPass,
       Map<SignalboxState.Reply, Names> replies,
       Map<SignalboxState.NoticeKind, String> notices,
-      String routeBlockedBy) {
+      String routeBlockedBy,
+      String delegated) {
 
     public Labels {
+      callReasons = Map.copyOf(callReasons);
       statuses = Map.copyOf(statuses);
       buttons = Map.copyOf(buttons);
       replies = Map.copyOf(replies);

@@ -128,6 +128,7 @@ public final class SignalboxFixtures {
                 18,
                 OptionalLong.of(80),
                 0.6,
+                false,
                 false),
             new SignalboxState.TrainRow(
                 TRAIN_A,
@@ -138,6 +139,7 @@ public final class SignalboxFixtures {
                 0,
                 OptionalLong.of(-30),
                 0.0,
+                false,
                 false),
             new SignalboxState.TrainRow(
                 TRAIN_B,
@@ -148,7 +150,8 @@ public final class SignalboxFixtures {
                 0,
                 OptionalLong.of(0),
                 0.0,
-                true),
+                true,
+                false),
             new SignalboxState.TrainRow(
                 "train-c",
                 "G9001",
@@ -158,6 +161,7 @@ public final class SignalboxFixtures {
                 0,
                 OptionalLong.empty(),
                 0.0,
+                false,
                 false)),
         Map.of(
             SignalboxState.Button.SET_ROUTE, true,

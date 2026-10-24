@@ -97,6 +97,44 @@ class PidsSignalboxPainterTest {
     assertNotEquals(theme.amber(), rgb(image, other.x() - 2, other.y() + 2), "没选中的不加框");
   }
 
+  /** 让给小区（车站控制）的那一片围一圈琥珀色虚线框，没有让出时不画。 */
+  @Test
+  void delegatedAreasAreFramedInAmber() {
+    SignalboxState base = SignalboxFixtures.state();
+    SignalboxState delegated =
+        new SignalboxState(
+            base.mode(),
+            base.signaller(),
+            base.selected(),
+            base.rows(),
+            base.buttons(),
+            base.call(),
+            base.replying(),
+            base.notice(),
+            base.preview(),
+            base.pending(),
+            base.signals(),
+            base.platforms(),
+            List.of(
+                new SignalboxState.Delegated(
+                    "示例站 1 道", "Station", Set.of(YardFixtures.P1, YardFixtures.P2))));
+    PidsLayout.Yard yard = layout.yard().orElseThrow();
+
+    BufferedImage framed = renderer.renderSignalbox(layout, view(delegated));
+    BufferedImage plain = renderer.renderSignalbox(layout, view(base));
+
+    int framedAmber = 0;
+    int plainAmber = 0;
+    for (int x = yard.x(); x < yard.x() + yard.width(); x++) {
+      for (int y = yard.y(); y < yard.y() + yard.height(); y++) {
+        framedAmber += rgb(framed, x, y) == PidsTheme.DARK.amber() ? 1 : 0;
+        plainAmber += rgb(plain, x, y) == PidsTheme.DARK.amber() ? 1 : 0;
+      }
+    }
+    assertTrue(
+        framedAmber - plainAmber >= 60, "多出一圈琥珀色虚线框与标注: " + plainAmber + " → " + framedAmber);
+  }
+
   @Test
   void previewAndPendingRoutesAreDrawnUnderLockedRoutes() {
     SignalboxState base = SignalboxFixtures.state();
@@ -232,6 +270,7 @@ class PidsSignalboxPainterTest {
               123456,
               OptionalLong.of(-99999),
               2.5,
+              true,
               true));
     }
     out.add(with(base, false, Optional.empty(), rows));

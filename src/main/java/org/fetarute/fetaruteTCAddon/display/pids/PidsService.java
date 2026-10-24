@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
-import java.awt.image.BufferedImage;
 import java.time.Instant;
 import java.time.InstantSource;
 import java.time.ZoneId;
@@ -16,6 +15,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import org.bukkit.Bukkit;
@@ -38,6 +38,7 @@ import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainPlatformAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.company.api.ControlZoneDirectory;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.GraphWorker;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
@@ -48,8 +49,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrameCache;
+import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrameSource;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrames;
-import org.fetarute.fetaruteTCAddon.display.pids.map.PidsMapPalette;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsBulletinTypesetter;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsFonts;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsRenderer;
@@ -148,8 +149,8 @@ public final class PidsService {
   private final PidsAccess access;
   private final PidsAnnouncer announcer;
 
-  /** 换算好的调色板帧，各屏共享；上限约等于 65 块 3×5 统屏或 340 块 1×3 站台屏的整帧。 */
-  private final PidsFrameCache frameCache = new PidsFrameCache(16L * 1024 * 1024);
+  /** 调色板帧：能复用的进共享缓存（上限约等于 65 块 3×5 统屏或 340 块 1×3 站台屏的整帧），缓存里没有的交渲染线程画；渲染线程随服务一起关闭。 */
+  private final PidsFrameSource frameSource;
 
   private final Listener cancellationListener = new CancellationListener();
 
@@ -178,6 +179,12 @@ public final class PidsService {
     this.settings = Objects.requireNonNull(settings, "settings");
     this.layouts = Objects.requireNonNull(layouts, "layouts");
     this.logger = Objects.requireNonNull(logger, "logger");
+    this.frameSource =
+        new PidsFrameSource(
+            new PidsFrameCache(16L * 1024 * 1024),
+            PidsService::shared,
+            () -> GraphWorker.start("FTA-PIDS-Render", logger::warn),
+            logger::warn);
     this.storage = storage.orElse(null);
     this.api = Objects.requireNonNull(api, "api");
     this.directory =
@@ -355,6 +362,7 @@ public final class PidsService {
       directoryTask = null;
     }
     announcer.stop();
+    frameSource.stop();
     HandlerList.unregisterAll(cancellationListener);
   }
 
@@ -390,23 +398,17 @@ public final class PidsService {
    * @return 只读的帧，长度为 {@code width × height}；渲染尺寸不符时为空数组
    */
   public byte[] frame(PidsContent content, int width, int height) {
-    // 站场图车一动就是新帧、以后不会再用：不进共享缓存，免得把各站台屏可复用的帧挤掉。
-    // 控制台的选中与按钮状态随点击当拍变化，也不进共享缓存，免得串屏或滞后
-    if (content.key() instanceof PidsComposer.YardKey
-        || content.key() instanceof PidsComposer.SignalboxKey) {
-      return convert(content, width, height);
-    }
-    return frameCache.frame(content.key(), width, height, () -> convert(content, width, height));
+    return frameSource.frame(content, width, height);
   }
 
-  private static byte[] convert(PidsContent content, int width, int height) {
-    BufferedImage image = content.image().get();
-    if (image.getWidth() != width || image.getHeight() != height) {
-      return new byte[0];
-    }
-    byte[] out = new byte[width * height];
-    PidsMapPalette.minecraft().convert(image, out);
-    return out;
+  /** 同 {@link #frame}，但缓存里没有的帧交给站台屏的渲染线程画、换算，不占主线程（见 {@link PidsFrameSource#frameLater}）。 */
+  public CompletableFuture<byte[]> frameLater(PidsContent content, int width, int height) {
+    return frameSource.frameLater(content, width, height);
+  }
+
+  /** 进共享帧缓存的内容。站场图车一动就是新帧、以后不会再用：不进共享缓存，免得把各站台屏可复用的帧挤掉； 控制台的选中与按钮状态随点击当拍变化，也不进共享缓存，免得串屏或滞后。 */
+  private static boolean shared(Object key) {
+    return !(key instanceof PidsComposer.YardKey || key instanceof PidsComposer.SignalboxKey);
   }
 
   public PidsItems items() {

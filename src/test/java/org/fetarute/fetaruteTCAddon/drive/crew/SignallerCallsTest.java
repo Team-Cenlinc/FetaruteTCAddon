@@ -18,6 +18,17 @@ class SignallerCallsTest {
   private static final int DOUBLE_TICKS = 20;
 
   /** 记下每次转给信号员的呼叫，按设定回答有没有人接。 */
+  /** 冷却期内写明了别的原因照样转给信号员：两短铃之后马上用命令说明车门故障，不会被吞掉。 */
+  @Test
+  void anExplicitNewReasonIsForwardedEvenWhileCooling() {
+    SignallerCalls calls = new SignallerCalls(message -> {});
+    FakeLink link = new FakeLink();
+    calls.call(DRIVER, "T1", CallReason.GENERAL, 0L, link);
+    assertTrue(calls.call(DRIVER, "T1", CallReason.GENERAL, 1_000L, link).repeated());
+    assertFalse(calls.call(DRIVER, "T1", CallReason.DOORS, 2_000L, link).repeated());
+    assertTrue(calls.call(DRIVER, "T1", CallReason.DOORS, 3_000L, link).repeated());
+  }
+
   private static final class FakeLink implements SignallerLink {
     final List<String> calls = new ArrayList<>();
     boolean answer = true;

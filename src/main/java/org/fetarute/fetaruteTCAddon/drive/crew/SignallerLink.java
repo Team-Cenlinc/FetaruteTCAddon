@@ -20,4 +20,13 @@ public interface SignallerLink {
    * @return 有信号员值守的控制区收到了呼叫时为 true；没人值守时为 false，调用方据此提示驾驶员
    */
   boolean call(UUID driver, String trainName);
+
+  /**
+   * 带原因的呼叫：信号员要按原因选对回复。没实现原因的一方当作一般联系。
+   *
+   * @param reason 原因
+   */
+  default boolean call(UUID driver, String trainName, CallReason reason) {
+    return call(driver, trainName);
+  }
 }

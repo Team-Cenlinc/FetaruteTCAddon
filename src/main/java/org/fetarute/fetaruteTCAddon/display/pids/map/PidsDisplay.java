@@ -20,12 +20,12 @@ import org.fetarute.fetaruteTCAddon.signaller.console.ConsoleTarget;
  * <ul>
  *   <li>{@link MapSessionMode#VIEWING}：没人看时 BKC 结束会话，不占任何开销；有人走近再重新创建。
  *   <li>每隔 {@code render.check-interval-ticks} 问一次服务该显示什么；内容标识与上次相同就什么都不做。
- *   <li>内容变了才取帧：换算好的调色板帧按内容标识在各屏间共享（{@link PidsFrameCache}），缓存里没有才渲染整帧、换算；
- *       再与已写入画布的帧比对，按地图块得出变化的矩形（{@link PidsFrameDiff}）。 集中的一次写完；散在各处的每 tick 写一块，免得 BKC
- *       把它们合成一个大矩形、连中间没变的地图一起重发。
+ *   <li>内容变了才取帧：换算好的调色板帧按内容标识在各屏间共享（{@link PidsFrameCache}），缓存里有就当拍用上；没有的交站台屏的渲染线程 渲染整帧、换算，完成后在下一个
+ *       tick 用上（{@link PidsFrameQueue}，同一时间只取一帧，期间又变了只取最新的）。 再与已写入画布的帧比对，按地图块得出变化的矩形（{@link
+ *       PidsFrameDiff}）。 集中的一次写完；散在各处的每 tick 写一块，免得 BKC 把它们合成一个大矩形、连中间没变的地图一起重发。
  *   <li>服务每次现取：{@code /fta reload} 会换掉服务实例（字体、配置都可能变），换了就整帧重画。取不到服务时保持原画面。
  *   <li>点击：只有正显示信号员控制台（{@code signalbox-*}）时响应。右键按画面上的版面认出点到的东西，左键一律是取消选择； 同一玩家同一 tick
- *       只认一次，手持配置棍的玩家照旧交给配置棍处理。交给信号员模块后当拍重画这一块屏，不等下一次检查。
+ *       只认一次，手持配置棍的玩家照旧交给配置棍处理。交给信号员模块后当拍取新的一帧，不等下一次检查；点击按的是正显示的那一帧。
  * </ul>
  *
  * <p>BKC 通过反射创建实例，必须保留公开的无参构造器。
@@ -41,7 +41,7 @@ public class PidsDisplay extends MapDisplay {
   private byte[] target;
 
   private final ArrayDeque<PidsFrameDiff.Region> pending = new ArrayDeque<>();
-  private Object shownKey;
+  private PidsFrameQueue frames;
   private PidsService shownBy;
   private int ticks;
   private final PidsClickDedupe clicks = new PidsClickDedupe();
@@ -61,7 +61,13 @@ public class PidsDisplay extends MapDisplay {
 
   @Override
   public void onTick() {
-    writeNext();
+    // 这一拍用上了后台画好的帧时，它的第一块已在 show 里写过；不再另写一块，免得两块零散区域被 BKC 合成一个大矩形重发
+    Optional<PidsFrameQueue.Ready> ready = frames().poll();
+    if (ready.isPresent()) {
+      show(ready.get());
+    } else {
+      writeNext();
+    }
     int interval = service().map(PidsService::checkIntervalTicks).orElse(DEFAULT_INTERVAL_TICKS);
     if (++ticks < interval) {
       return;
@@ -74,9 +80,17 @@ public class PidsDisplay extends MapDisplay {
     written = null;
     target = null;
     pending.clear();
-    shownKey = null;
+    // 分辨率变了 BKC 会对同一实例重新挂载：队列按挂载时的尺寸重建，在画的帧不要了
+    frames = null;
     shownBy = null;
     ticks = 0;
+  }
+
+  private PidsFrameQueue frames() {
+    if (frames == null) {
+      frames = new PidsFrameQueue(getWidth() * getHeight());
+    }
+    return frames;
   }
 
   @Override
@@ -91,7 +105,7 @@ public class PidsDisplay extends MapDisplay {
 
   /** 控制台上的一次点击：按正显示的那一帧认出点到的东西，交给信号员模块，当拍重画。 */
   private void click(MapClickEvent event, boolean right) {
-    if (!(shownKey instanceof PidsComposer.SignalboxKey key)) {
+    if (!(frames().shownKey().orElse(null) instanceof PidsComposer.SignalboxKey key)) {
       return;
     }
     Optional<PidsService> service = service();
@@ -130,29 +144,29 @@ public class PidsDisplay extends MapDisplay {
     }
     if (service.get() != shownBy) {
       shownBy = service.get();
-      shownKey = null;
+      frames().reset();
     }
+    int width = getWidth();
+    int height = getHeight();
     service
         .get()
         .content(
             PidsFrames.parse(properties.get(PidsFrames.SCREEN_PROPERTY, String.class)),
-            getWidth(),
-            getHeight())
-        .ifPresent(content -> show(service.get(), content));
+            width,
+            height)
+        .ifPresent(
+            content ->
+                frames().offer(content, next -> service.get().frameLater(next, width, height)));
+    // 缓存里有的帧当场就完成了，不必等下一个 tick
+    frames().poll().ifPresent(this::show);
   }
 
-  private void show(PidsService service, PidsContent content) {
-    if (content.key().equals(shownKey)) {
-      return;
-    }
+  /** 用上取好的一帧：与已写入画布的帧比对，写出变化的地图块。 */
+  private void show(PidsFrameQueue.Ready ready) {
     int width = getWidth();
     int height = getHeight();
-    byte[] next = service.frame(content, width, height);
-    if (next.length != width * height) {
-      return;
-    }
+    byte[] next = ready.frame();
     target = next;
-    shownKey = content.key();
     pending.clear();
     List<PidsFrameDiff.Region> regions = PidsFrameDiff.changed(written, next, width, height);
     if (written == null) {

@@ -169,6 +169,32 @@ class PidsYardPainterTest {
     }
   }
 
+  /** 车次窗放在车头上方会压住站台块（股道号写在里面）时改放下方；上下都压到时才压着站台块放在上方。 */
+  @Test
+  void describersKeepOffPlatformBlocksWhenTheyCan() {
+    YardGeometry geometry = geometry();
+    PidsLayout.Yard yard = layout.yard().orElseThrow();
+    YardGeometry.Platform block =
+        geometry.platforms().stream()
+            .filter(platform -> platform.tracks().equals(List.of("1")))
+            .findFirst()
+            .orElseThrow();
+    YardGeometry.Point head = point(geometry, 0);
+    YardPicture.TrainMark train =
+        new YardPicture.TrainMark(
+            "1234", Optional.of(LINE), Lateness.ON_TIME, List.of(List.of(head)));
+    PidsTextMeasure measure =
+        new PidsTextMeasure(PidsFonts.builtIn(PidsGlyphForm.ZH_HANS), layout.boldFrom());
+
+    assertTrue(block.bottom() <= head.y(), () -> "1 道的站台在上方: " + block);
+    PidsYardPainter.Describer free =
+        PidsYardPainter.describers(yard, List.of(train), List.of(), measure).get(0);
+    PidsYardPainter.Describer kept =
+        PidsYardPainter.describers(yard, List.of(train), geometry.platforms(), measure).get(0);
+    assertTrue(free.y() < head.y(), "没有站台块时放在车头上方");
+    assertTrue(kept.y() > head.y(), () -> "上方是站台块，改放下方: " + kept);
+  }
+
   @Test
   void aMissingYardShowsTheReasonInsteadOfTracks() {
     BufferedImage image =

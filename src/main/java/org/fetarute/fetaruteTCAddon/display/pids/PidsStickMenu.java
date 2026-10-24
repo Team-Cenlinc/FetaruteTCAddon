@@ -40,11 +40,27 @@ public final class PidsStickMenu {
     this.locale = Objects.requireNonNull(locale, "locale");
   }
 
-  /** 发送配置菜单。 */
-  public void open(CommandSender sender, PidsService service, PidsScreen screen) {
-    String set = "/fta pids set " + screen.id() + " ";
-    sender.sendMessage(locale.component("pids.menu.header", headerValues(service, screen)));
+  /** 管这块屏幕的命令：信号员控制台归 {@code /fta signal console}，其余站台屏归 {@code /fta pids}。 */
+  public static String command(PidsService service, PidsScreen screen) {
+    return service.isSignalbox(screen) ? "/fta signal console" : "/fta pids";
+  }
 
+  /**
+   * 发送配置菜单。信号员控制台只列它用得上的几行（运营商、控制区、布局、外观、模式与拆除），点了执行 {@code /fta signal console}
+   * 的命令；布局一行只列同一种屏幕（站台屏或控制台）的布局。
+   */
+  public void open(CommandSender sender, PidsService service, PidsScreen screen) {
+    boolean console = service.isSignalbox(screen);
+    String set = command(service, screen) + " set " + screen.id() + " ";
+    sender.sendMessage(locale.component("pids.menu.header", headerValues(service, screen)));
+    if (!console) {
+      stationRow(sender, service, screen, set);
+    }
+    rows(sender, service, screen, set, console);
+  }
+
+  private void stationRow(
+      CommandSender sender, PidsService service, PidsScreen screen, String set) {
     Component stations = label("pids.menu.station");
     List<PidsStationKey> candidates = new ArrayList<>();
     screen.station().ifPresent(candidates::add);
@@ -63,7 +79,10 @@ public final class PidsStickMenu {
     }
     stations = stations.append(suggest(locale.text("pids.menu.station-manual"), set + "station "));
     sender.sendMessage(stations);
+  }
 
+  private void rows(
+      CommandSender sender, PidsService service, PidsScreen screen, String set, boolean console) {
     boolean lineStatus = service.isLineStatus(screen);
     boolean yard = service.isYard(screen);
     if (lineStatus || yard) {
@@ -87,7 +106,9 @@ public final class PidsStickMenu {
           operators.append(suggest(locale.text("pids.menu.station-manual"), set + "operator "));
       sender.sendMessage(operators);
     }
-    rotationRow(service, screen, set).ifPresent(sender::sendMessage);
+    if (!console) {
+      rotationRow(service, screen, set).ifPresent(sender::sendMessage);
+    }
     if (yard) {
       sender.sendMessage(zoneRow(service, screen, set));
     } else if (screen.station().isPresent() && !lineStatus) {
@@ -105,7 +126,7 @@ public final class PidsStickMenu {
 
     Component layouts = label("pids.menu.layout");
     for (PidsLayout layout : service.layouts().all()) {
-      if (PidsScreenPages.fits(screen, layout)) {
+      if (layout.signalbox() == console && PidsScreenPages.fits(screen, layout)) {
         layouts =
             layouts.append(
                 button(
@@ -116,7 +137,9 @@ public final class PidsStickMenu {
       }
     }
     sender.sendMessage(layouts);
-    pageRow(service, screen, set).ifPresent(sender::sendMessage);
+    if (!console) {
+      pageRow(service, screen, set).ifPresent(sender::sendMessage);
+    }
 
     Component appearance = label("pids.menu.appearance");
     for (PidsScreen.Appearance value : PidsScreen.Appearance.values()) {
@@ -145,11 +168,11 @@ public final class PidsStickMenu {
                         locale.text("pids.menu.remove"),
                         false,
                         null,
-                        "/fta pids remove " + screen.id())
+                        command(service, screen) + " remove " + screen.id())
                     .color(NamedTextColor.RED)));
   }
 
-  /** 发送屏幕信息（配置棍左键、{@code /fta pids info}）。 */
+  /** 发送屏幕信息（配置棍左键、{@code /fta pids info}、{@code /fta signal console info}）。 */
   public void info(CommandSender sender, PidsService service, PidsScreen screen) {
     sender.sendMessage(locale.component("pids.info.header", headerValues(service, screen)));
     sender.sendMessage(
@@ -206,8 +229,8 @@ public final class PidsStickMenu {
   }
 
   /** 拆除前确认。 */
-  public void promptRemove(CommandSender sender, PidsScreen screen) {
-    String command = "/fta pids remove " + screen.id() + " confirm";
+  public void promptRemove(CommandSender sender, PidsService service, PidsScreen screen) {
+    String command = command(service, screen) + " remove " + screen.id() + " confirm";
     sender.sendMessage(
         locale
             .component("pids.remove.confirm", Map.of("id", PidsComposer.shortId(screen.id())))

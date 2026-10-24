@@ -28,8 +28,8 @@ import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
  */
 final class SignalboxStates {
 
-  /** 列车表最多给几行（布局画几行由布局定）。 */
-  static final int MAX_ROWS = 12;
+  /** 列车表最多给几行（布局画几行由布局定，画不下的在表头写 “+N”）。 */
+  static final int MAX_ROWS = 32;
 
   private final SignallerService service;
   private final SignalBox box;
@@ -80,14 +80,23 @@ final class SignalboxStates {
         staffed && !box.calls.isEmpty()
             ? Optional.of(
                 new SignalboxState.Call(
-                    box.calls.peekFirst().trainName(), box.calls.peekFirst().driverName()))
+                    box.calls.peekFirst().trainName(),
+                    box.calls.peekFirst().driverName(),
+                    box.calls.peekFirst().reason()))
             : Optional.empty();
     Optional<SignalboxState.Notice> notice =
         box.notice != null && now.isBefore(box.notice.until())
             ? Optional.of(new SignalboxState.Notice(box.notice.kind(), box.notice.train()))
             : Optional.empty();
+    if (notice.isEmpty() && staffed && map == null) {
+      // 图没就绪时闸对这片一律放行：常驻说明，免得信号员以为自己在控制
+      notice =
+          Optional.of(
+              new SignalboxState.Notice(
+                  SignalboxState.NoticeKind.GRAPH_NOT_READY_AUTO, Optional.empty()));
+    }
     return new SignalboxState(
-        box.manual() ? SignalboxState.Mode.MANUAL : SignalboxState.Mode.AUTO,
+        box.manual() && map != null ? SignalboxState.Mode.MANUAL : SignalboxState.Mode.AUTO,
         staffed ? Optional.of(box.duty.playerName) : Optional.empty(),
         selected.map(row -> row.row().trainName()),
         rows.stream().limit(MAX_ROWS).map(Row::row).toList(),
@@ -98,7 +107,8 @@ final class SignalboxStates {
         preview,
         pending,
         signals(),
-        selected.map(row -> platforms(row.row().trainName())).orElse(List.of()));
+        selected.map(row -> platforms(row.row().trainName())).orElse(List.of()),
+        service.delegatedFrom(box));
   }
 
   /** 列车表一行，连同它的键与排序用的量。 */
@@ -118,8 +128,8 @@ final class SignalboxStates {
     for (Map.Entry<String, RouteProgressRegistry.RouteProgressEntry> entry : byKey.entrySet()) {
       RouteProgressRegistry.RouteProgressEntry value = entry.getValue();
       if (value.lastPassedGraphNode().filter(map::inside).isPresent()
-          || value.nextTarget().filter(map::inside).isPresent()
-          || service.presence(box, entry.getKey()).isPresent()) {
+          || service.presence(box, entry.getKey()).isPresent()
+          || service.approaching(map, value)) {
         keys.add(entry.getKey());
       }
     }
@@ -145,12 +155,15 @@ final class SignalboxStates {
                   .flatMap((RouteDefinition route) -> RouteAhead.destination(graph, route));
       Status status = status(key, entry, name, settings);
       SignalBox.Permit permit = box.permits.get(key);
-      boolean autoPass =
-          (permit != null && permit.source == SignalBox.Source.AUTO_PASS)
-              || Optional.ofNullable(box.waiting.get(key))
-                  .flatMap(waiting -> waiting.route)
-                  .filter(box.autoPasses::contains)
-                  .isPresent();
+      // 走的是设了自动通过的进路：选中的车还按前方的路认（按钮据此写“取消自动通过”）
+      Optional<SignalBox.Route> route =
+          Optional.ofNullable(permit)
+              .flatMap(p -> p.route)
+              .or(() -> Optional.ofNullable(box.waiting.get(key)).flatMap(w -> w.route))
+              .or(
+                  () ->
+                      key.equals(box.selected) ? service.routeAhead(map, name) : Optional.empty());
+      boolean autoPass = route.filter(box.autoPasses::contains).isPresent();
       rows.add(
           new Row(
               key,
@@ -163,7 +176,8 @@ final class SignalboxStates {
                   status.seconds(),
                   info.delaySeconds(),
                   status.progress(),
-                  autoPass),
+                  autoPass,
+                  permit != null && permit.source == SignalBox.Source.TIMEOUT),
               order(status.status()),
               status.since()));
     }
@@ -201,7 +215,15 @@ final class SignalboxStates {
       SignallerConfig settings) {
     SignalBox.Hold hold = box.holds.get(key);
     if (hold != null) {
-      return new Status(SignalboxState.RowStatus.HELD, seconds(hold.since()), 0.0, hold.since());
+      double progress =
+          settings.maxHoldSeconds() <= 0
+              ? 0.0
+              : Math.min(
+                  1.0,
+                  Duration.between(hold.since(), now).toMillis()
+                      / (settings.maxHoldSeconds() * 1000.0));
+      return new Status(
+          SignalboxState.RowStatus.HELD, seconds(hold.since()), progress, hold.since());
     }
     SignalBox.Permit permit = box.permits.get(key);
     SignalBox.Waiting waiting = box.waiting.get(key);
@@ -238,13 +260,14 @@ final class SignalboxStates {
     return Math.max(0L, Duration.between(since, now).getSeconds());
   }
 
+  /** 列车表的先后：要信号员动手的在前（在等的、排列中的、扣着的，扣车有上限），再是接近的与区内的。 */
   private static int order(SignalboxState.RowStatus status) {
     return switch (status) {
       case WAITING -> 0;
       case ROUTE_PENDING -> 1;
-      case APPROACHING -> 2;
-      case ROUTE_SET -> 3;
-      case HELD -> 4;
+      case HELD -> 2;
+      case APPROACHING -> 3;
+      case ROUTE_SET -> 4;
       case DWELLING -> 5;
       case IN_ZONE -> 6;
     };

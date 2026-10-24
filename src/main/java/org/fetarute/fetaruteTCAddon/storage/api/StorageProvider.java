@@ -69,7 +69,7 @@ public interface StorageProvider extends AutoCloseable {
   /** 驾驶任务记录。 */
   DriveTaskRecordRepository driveTaskRecords();
 
-  /** 驾驶证（等级与证号）。 */
+  /** 操作许可证（等级与证号）。 */
   LicenseRepository licenses();
 
   /** 传送门连接。 */

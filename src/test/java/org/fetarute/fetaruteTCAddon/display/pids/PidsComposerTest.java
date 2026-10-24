@@ -1072,7 +1072,7 @@ class PidsComposerTest {
             composer.content(Optional.of(unbound.id()), 640, 384).orElseThrow().key());
     assertTrue(noZone.view().state().isEmpty());
     assertEquals(
-        "未绑定控制区，请以 /fta pids set <屏幕> zone <控制区> 绑定",
+        "未绑定控制区，请以 /fta signal console set <控制台> zone <控制区> 绑定",
         noZone.view().placeholder().orElseThrow().primary());
 
     PidsScreen bound = unbound.withZone(Optional.of("north"), NOW);
@@ -1121,6 +1121,7 @@ class PidsComposerTest {
                 12,
                 OptionalLong.of(70),
                 0.5,
+                false,
                 false)),
         java.util.Map.of(SignalboxState.Button.SET_ROUTE, true),
         Optional.empty(),

@@ -146,6 +146,12 @@ final class TripDelayLedger {
     return OptionalLong.of(trip.marks().get(trip.marks().size() - 1).delaySeconds());
   }
 
+  /** 当前车次已记了几次到发：两次读晚点之间条数没变，说明其间没有新的到发、读数没更新。没有这趟车的账时为 0。 */
+  int marks(String key, UUID tripId) {
+    Trip trip = key == null ? null : trips.get(key);
+    return trip == null || !trip.tripId().equals(tripId) ? 0 : trip.marks().size();
+  }
+
   /** 结账并移除；没有账时为空。 */
   Optional<Summary> close(String key) {
     Trip trip = key == null ? null : trips.remove(key);

@@ -16,6 +16,8 @@ import org.bukkit.configuration.ConfigurationSection;
  *     到站后过了一阵才扣的车可能被发车锁提前放走
  * @param callTimeoutSeconds 驾驶员的呼叫多少秒没回复算漏接
  * @param noticeSeconds 控制台临时提示显示多少秒
+ * @param approachLockSeconds 接近锁闭：车已在接近或停在入口时取消它的进路，这个入口要过多少秒才能再排进路；0 为不锁，限 0–{@value
+ *     #MAX_APPROACH_LOCK_SECONDS} 秒
  */
 public record SignallerConfig(
     boolean enabled,
@@ -24,7 +26,8 @@ public record SignallerConfig(
     int graceSeconds,
     int maxHoldSeconds,
     int callTimeoutSeconds,
-    int noticeSeconds) {
+    int noticeSeconds,
+    int approachLockSeconds) {
 
   /** 扣车上限的上限：与按表扣车的上限相同（发车锁从到站起最长 180 秒，留出到站后的停站时间）。 */
   public static final int HOLD_CEILING_SECONDS = 150;
@@ -35,6 +38,9 @@ public record SignallerConfig(
   /** 代排等待的上限（秒）。 */
   public static final int MAX_AUTO_ROUTE_SECONDS = 300;
 
+  /** 接近锁闭的上限（秒）。 */
+  public static final int MAX_APPROACH_LOCK_SECONDS = 180;
+
   public SignallerConfig {
     autoRouteSeconds =
         Math.max(MIN_AUTO_ROUTE_SECONDS, Math.min(MAX_AUTO_ROUTE_SECONDS, autoRouteSeconds));
@@ -43,10 +49,11 @@ public record SignallerConfig(
     maxHoldSeconds = Math.max(1, Math.min(HOLD_CEILING_SECONDS, maxHoldSeconds));
     callTimeoutSeconds = Math.max(1, callTimeoutSeconds);
     noticeSeconds = Math.max(1, noticeSeconds);
+    approachLockSeconds = Math.max(0, Math.min(MAX_APPROACH_LOCK_SECONDS, approachLockSeconds));
   }
 
   public static SignallerConfig defaults() {
-    return new SignallerConfig(true, 20, 32, 30, 150, 60, 3);
+    return new SignallerConfig(true, 20, 32, 30, 150, 60, 3, 30);
   }
 
   /** 代排等待时长。 */
@@ -81,6 +88,7 @@ public record SignallerConfig(
         section.getInt("grace-seconds", defaults.graceSeconds()),
         maxHold,
         section.getInt("call-timeout-seconds", defaults.callTimeoutSeconds()),
-        section.getInt("notice-seconds", defaults.noticeSeconds()));
+        section.getInt("notice-seconds", defaults.noticeSeconds()),
+        section.getInt("approach-lock-seconds", defaults.approachLockSeconds()));
   }
 }

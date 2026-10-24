@@ -35,7 +35,7 @@ public record YardTrain(String name, List<RailFootprintCell> cars, Supplier<Deta
   /**
    * 车次窗信息。
    *
-   * @param label 车次窗文字：车次号，没有时为列车名
+   * @param label 车次窗文字：自动生成的列车名取末尾 4 位序号（{@code TrainNameFormatter#sequence}），别的名字取车次号，都没有时为列车名
    * @param lineColor 线路色；查不到时为空
    * @param delaySeconds 晚点秒数（早到为负）；不按表运行时为 0
    */

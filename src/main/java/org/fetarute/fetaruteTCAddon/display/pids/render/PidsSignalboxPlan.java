@@ -192,7 +192,8 @@ final class PidsSignalboxPlan {
     Optional<YardGeometry> geometry = view.yard().picture().geometry();
     List<PidsYardPainter.Describer> describers =
         yard.isPresent() && geometry.isPresent()
-            ? PidsYardPainter.describers(yard.get(), view.yard().picture().trains(), measure)
+            ? PidsYardPainter.describers(
+                yard.get(), view.yard().picture().trains(), geometry.get().platforms(), measure)
             : List.of();
     Optional<SignalboxState> found = view.state();
     if (found.isEmpty()) {
@@ -268,7 +269,14 @@ final class PidsSignalboxPlan {
         new Box(left, top, measure.width(modeText, HEADER_TEXT) + 2 * BADGE_PADDING, BADGE_HEIGHT);
     int x = modeBox.right() + HEADER_GAP;
     Optional<String> callText =
-        state.call().map(c -> labels.call().replace("<train>", trainLabel(state, c.trainName())));
+        state
+            .call()
+            .map(
+                c ->
+                    labels
+                        .call()
+                        .replace("<train>", trainLabel(state, c.trainName()))
+                        .replace("<reason>", labels.callReasons().getOrDefault(c.reason(), "")));
     int callSpace =
         callText
             .map(text -> measure.width(text, HEADER_TEXT) + 2 * BADGE_PADDING + HEADER_GAP)
@@ -338,13 +346,15 @@ final class PidsSignalboxPlan {
         .orElse(trainName);
   }
 
-  /** 临时提示的文字：进路被某列车占用时写出是哪列车。 */
+  /** 临时提示的文字：进路被某列车占用时写出是哪列车；其余带列车的提示把 {@code <train>} 换成车次。 */
   static String noticeText(
       SignalboxView.Labels labels, SignalboxState state, SignalboxState.Notice notice) {
     if (notice.kind() == SignalboxState.NoticeKind.ROUTE_BLOCKED && notice.train().isPresent()) {
       return labels.routeBlockedBy().replace("<train>", trainLabel(state, notice.train().get()));
     }
-    return labels.notices().getOrDefault(notice.kind(), notice.kind().name());
+    String text = labels.notices().getOrDefault(notice.kind(), notice.kind().name());
+    return text.replace(
+        "<train>", notice.train().map(train -> trainLabel(state, train)).orElse(""));
   }
 
   /**
@@ -440,11 +450,19 @@ final class PidsSignalboxPlan {
     return out;
   }
 
+  /** 列车表画得下的几行；选中的车排在画不下的地方时顶替最后一行，按钮作用的那列车总在表上看得见。 */
   private static List<RowSpot> rows(PidsLayout.TrainList list, SignalboxState state) {
     List<RowSpot> out = new ArrayList<>();
     int count = Math.min(list.rows(), state.rows().size());
+    List<SignalboxState.TrainRow> shown = new ArrayList<>(state.rows().subList(0, count));
+    if (count > 0 && shown.stream().noneMatch(row -> isSelected(state, row.trainName()))) {
+      state.rows().stream()
+          .filter(row -> isSelected(state, row.trainName()))
+          .findFirst()
+          .ifPresent(row -> shown.set(count - 1, row));
+    }
     for (int i = 0; i < count; i++) {
-      SignalboxState.TrainRow row = state.rows().get(i);
+      SignalboxState.TrainRow row = shown.get(i);
       out.add(
           new RowSpot(
               row,
@@ -484,7 +502,9 @@ final class PidsSignalboxPlan {
       Names label =
           button == SignalboxState.Button.MODE
               ? (state.mode() == SignalboxState.Mode.MANUAL ? labels.toAuto() : labels.toManual())
-              : labels.buttons().getOrDefault(button, new Names(button.name(), ""));
+              : button == SignalboxState.Button.AUTO_PASS && selectedAutoPass(state)
+                  ? labels.cancelAutoPass()
+                  : labels.buttons().getOrDefault(button, new Names(button.name(), ""));
       out.add(
           new ButtonSpot(
               new ConsoleTarget.Press(button),
@@ -499,8 +519,14 @@ final class PidsSignalboxPlan {
     return out;
   }
 
+  /** 选中的车要走的进路此刻设了自动通过（自动通过按钮这时写“取消自动通过”）。 */
+  private static boolean selectedAutoPass(SignalboxState state) {
+    return state.rows().stream()
+        .anyMatch(row -> isSelected(state, row.trainName()) && row.autoPass());
+  }
+
   /**
-   * 点在 ({@code x}, {@code y}) 上是什么（右键）。先看标题栏的呼叫牌与操作区，再看列车表，最后看站场图（可改停的股道、有车在等的入口信号、车次窗）；
+   * 点在 ({@code x}, {@code y}) 上是什么（右键）。先看标题栏的呼叫牌与操作区，再看列车表，最后看站场图（可改停的股道、有车在等或设了自动通过的入口信号、车次窗）；
    * 其余地方、没有控制台数据时都是取消选择。
    */
   ConsoleTarget target(int x, int y) {
@@ -529,8 +555,15 @@ final class PidsSignalboxPlan {
       }
     }
     for (SignalSpot signal : signals) {
-      if (signal.signal().waitingTrain().isPresent() && signal.hit().contains(x, y)) {
+      if (!signal.hit().contains(x, y)) {
+        continue;
+      }
+      if (signal.signal().waitingTrain().isPresent()) {
         return new ConsoleTarget.Train(signal.signal().waitingTrain().get());
+      }
+      if (signal.signal().autoPass()) {
+        // 没有车在等、旁边写着 “A”：撤掉这个入口的自动通过
+        return new ConsoleTarget.Signal(signal.signal().exit());
       }
     }
     // 后画的车次窗压在先画的上面：倒着找
@@ -571,6 +604,11 @@ final class PidsSignalboxPlan {
 
   SignalboxView view() {
     return view;
+  }
+
+  /** 站场图组件；布局里没有时为空。 */
+  Optional<PidsLayout.Yard> yard() {
+    return yard;
   }
 
   Optional<Item> mode() {

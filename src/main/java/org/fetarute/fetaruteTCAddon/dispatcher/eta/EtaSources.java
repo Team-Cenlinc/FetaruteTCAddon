@@ -29,8 +29,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 /**
  * {@link EtaCalculator} 读取的外部事实。
  *
- * <p>两种来源：实时来源由 {@link EtaService} 直接接到它的钩子上，钩子背后是调度、时刻表、待命等运行时注册表，由调用线程现读（站台屏在主线程，web-api 在后台线程）； 冻结来源是 {@link
- * EtaBoardInput} 在调用线程上拷好的副本，可以交给后台线程。计算只经由这里读运行时状态；调度图快照与限速覆盖由 {@link
+ * <p>两种来源：实时来源由 {@link EtaService} 直接接到它的钩子上，钩子背后是调度、时刻表、待命等运行时注册表，由调用线程现读（站台屏在主线程，web-api 在后台线程）；
+ * 冻结来源是 {@link EtaBoardInput} 在调用线程上拷好的副本，可以交给后台线程。计算只经由这里读运行时状态；调度图快照与限速覆盖由 {@link
  * org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService} 直接读（并发容器，图快照不可变）。
  *
  * @param routes 交路定义、停靠表与归属

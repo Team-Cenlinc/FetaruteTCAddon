@@ -134,12 +134,13 @@ public final class DriveRewards {
    * @param trains 计奖励的车数：经手的车里去掉超时代排的（调用方算好）
    */
   public static Reward signaller(
-      DriveRewardConfig config, double trainRatio, int trains, ScoreRules.Grade grade) {
+      DriveRewardConfig config, double trainRatio, double trains, ScoreRules.Grade grade) {
     if (config == null || !config.enabled()) {
       return Reward.NONE;
     }
     double ratio = Double.isFinite(trainRatio) ? Math.max(0.0, trainRatio) : 0.0;
-    double units = Math.max(0, trains) * ratio * config.gradeMultiplier(grade);
+    double count = Double.isFinite(trains) ? Math.max(0.0, trains) : 0.0;
+    double units = count * ratio * config.gradeMultiplier(grade);
     return rounded(units * config.experiencePerStop(), units * config.moneyPerStop(), 0.0, 0.0);
   }
 

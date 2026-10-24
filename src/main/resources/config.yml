@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 48
+config-version: 49
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -379,6 +379,9 @@ signaller:
   call-timeout-seconds: 60
   # 控制台临时提示（例如“进路被某车占用”）显示的秒数
   notice-seconds: 3
+  # 接近锁闭：车已在接近（或已停在入口）时取消它的进路，这个入口要过该秒数才能再排进路（系统代排与自动通过也等它）；
+  # 现实的时间锁闭，防止信号在车头前反复变化。0 为不锁；限 0–180 秒
+  approach-lock-seconds: 30
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

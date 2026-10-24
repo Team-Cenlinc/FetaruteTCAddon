@@ -46,7 +46,8 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  * </ul>
  *
  * <p>站场图屏用 {@code /fta pids set <屏幕> zone <控制区>}
- * 绑定控制区，把区内各车站与车库连同它们之间的线路画在一张图上。改库之后刷新控制区目录，站场图屏下一次检查即生效。
+ * 绑定控制区，把区内各车站与车库连同它们之间的线路画在一张图上。改库之后刷新控制区目录，站场图屏下一次检查即生效。信号员控制台不是站台屏， 安装、绑定控制区与拆除在 {@code /fta
+ * signal console} 下（见 {@link FtaPidsCommand.Scope#CONSOLE}）。
  */
 public final class FtaSignalCommand {
 
@@ -151,7 +152,9 @@ public final class FtaSignalCommand {
   private void help(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     for (String key :
-        List.of("header", "create", "list", "info", "rename", "add", "delete", "bind", "duty")) {
+        List.of(
+            "header", "create", "list", "info", "rename", "add", "delete", "bind", "console",
+            "duty")) {
       sender.sendMessage(locale.component("command.signal.help." + key));
     }
   }
@@ -385,12 +388,17 @@ public final class FtaSignalCommand {
                     case NOT_MEMBER -> "command.signal.zone.member.not-member";
                     case NOT_FOUND -> "command.signal.zone.member.station-not-found";
                     case INVALID -> "command.signal.zone.member.invalid";
+                    case OVERLAP -> "command.signal.zone.member.overlap";
                     default -> "error.no-permission";
                   };
               if (result.status().changed()) {
                 plugin.refreshControlZones();
               }
-              sender.sendMessage(locale.component(key, values));
+              Map<String, String> shown = new HashMap<>(values);
+              result
+                  .conflict()
+                  .ifPresent(other -> shown.put("other", other.code() + "（" + other.name() + "）"));
+              sender.sendMessage(locale.component(key, shown));
             });
   }
 

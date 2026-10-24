@@ -69,15 +69,20 @@ interface SignallerWorld {
   }
 
   /**
-   * @param label 车次号；没有时为列车名
+   * @param label 控制台上的车次：自动生成的列车名取末尾 4 位序号，别的名字取车次号，都没有时为列车名
    * @param lineColor 线路色
    * @param delaySeconds 晚点秒数（早到为负）；不按表运行时为空
    */
-  record TrainInfo(String label, Optional<Integer> lineColor, OptionalLong delaySeconds) {
+  record TrainInfo(
+      String label,
+      Optional<Integer> lineColor,
+      OptionalLong delaySeconds,
+      Optional<String> delayStamp) {
     public TrainInfo {
       Objects.requireNonNull(label, "label");
       lineColor = lineColor == null ? Optional.empty() : lineColor;
       delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
+      delayStamp = delayStamp == null ? Optional.empty() : delayStamp;
     }
   }
 

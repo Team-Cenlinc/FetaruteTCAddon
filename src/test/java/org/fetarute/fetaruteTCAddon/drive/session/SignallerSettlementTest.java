@@ -80,14 +80,15 @@ class SignallerSettlementTest {
         "WSD",
         START,
         START.plusSeconds(1800),
-        handled,
-        5,
-        autoRouted,
-        3,
-        1,
-        0,
-        2,
-        missed,
+        SignallerShift.Counts.builder()
+            .trainsHandled(handled)
+            .routesSet(5)
+            .autoRouted(autoRouted)
+            .autoPassed(3)
+            .preRouted(1)
+            .callsAnswered(2)
+            .callsMissed(missed)
+            .build(),
         SignallerShift.EndReason.LEFT_CONSOLE);
   }
 
@@ -119,20 +120,27 @@ class SignallerSettlementTest {
     assertEquals(85, record.points());
     assertEquals("A", record.grade());
 
-    // 计奖励只算信号员亲手排的：10 − 2（代排）− 3（自动通过）= 5 列：经验 1.2 × 5 × 2 = 12，钱币 1.2 × 5 × 5 = 30
+    // 计奖励只算信号员亲手排的：10 − 2（代排）− 3（自动通过）= 5 列，预排命中 1 列加半列，共 5.5 列：
+    // 经验 1.2 × 5.5 × 2 = 13.2 → 13，钱币 1.2 × 5.5 × 5 = 33
     assertEquals(1, host.paid.size());
-    assertEquals(12, host.paid.get(0).experience());
-    assertEquals(30.0, host.paid.get(0).money(), 1e-9);
+    assertEquals(13, host.paid.get(0).experience());
+    assertEquals(33.0, host.paid.get(0).money(), 1e-9);
     assertFalse(host.paid.get(0).crewBonus());
 
-    assertEquals(List.of("drive.signaller.result.summary", "drive.task.reward.both"), host.told);
+    assertEquals(
+        List.of(
+            "drive.signaller.result.summary",
+            "drive.signaller.result.detail",
+            "drive.task.reward.both"),
+        host.told);
     Map<String, String> summary = host.values.get(0);
     assertEquals("85", summary.get("points"));
     assertEquals("A", summary.get("grade"));
     assertEquals("10", summary.get("trains"));
     assertEquals("2", summary.get("auto"));
-    assertEquals("12", host.values.get(1).get("experience"));
-    assertEquals("30", host.values.get(1).get("money"));
+    assertEquals("1", host.values.get(1).get("pre"));
+    assertEquals("13", host.values.get(2).get("experience"));
+    assertEquals("33", host.values.get(2).get("money"));
   }
 
   @Test
@@ -143,13 +151,53 @@ class SignallerSettlementTest {
     settlement(off).settle(shift(10, 0, 0));
     assertEquals(1, off.records.size());
     assertTrue(off.paid.isEmpty());
-    assertEquals(List.of("drive.signaller.result.summary"), off.told);
+    assertEquals(
+        List.of("drive.signaller.result.summary", "drive.signaller.result.detail"), off.told);
 
     FakeHost allAuto = new FakeHost();
     settlement(allAuto).settle(shift(3, 3, 0));
     assertEquals(1, allAuto.records.size());
     assertEquals(85, allAuto.records.get(0).points());
     assertTrue(allAuto.paid.isEmpty());
+  }
+
+  @Test
+  @DisplayName("信号员考试的这一班写记录、不发奖励、不另报成绩；练习的这一班什么都不做")
+  void examAndPracticeShifts() {
+    SignallerShift plain = shift(10, 2, 1);
+    SignallerShift exam = withExam(plain, true, false);
+    FakeHost examHost = new FakeHost();
+    settlement(examHost).settle(exam);
+    assertEquals(1, examHost.records.size());
+    assertTrue(examHost.paid.isEmpty());
+    assertTrue(examHost.told.isEmpty(), "考官按考试标准讲评，这里不再报一遍");
+
+    FakeHost practiceHost = new FakeHost();
+    settlement(practiceHost).settle(withExam(plain, false, true));
+    assertTrue(practiceHost.records.isEmpty());
+    assertTrue(practiceHost.paid.isEmpty());
+    assertTrue(practiceHost.told.isEmpty());
+
+    FakeHost emptyExam = new FakeHost();
+    settlement(emptyExam).settle(withExam(shift(0, 0, 0), true, false));
+    assertTrue(emptyExam.told.isEmpty(), "考试中没经手车也不报“未经手列车”");
+  }
+
+  private static SignallerShift withExam(SignallerShift s, boolean examined, boolean practiced) {
+    SignallerShift marked =
+        new SignallerShift(
+            s.player(),
+            s.playerName(),
+            s.operator(),
+            s.zone(),
+            s.start(),
+            s.end(),
+            s.counts(),
+            s.endReason(),
+            examined,
+            practiced);
+    assertTrue(marked.examined(), "练习也算考官在场");
+    return marked;
   }
 
   @Test

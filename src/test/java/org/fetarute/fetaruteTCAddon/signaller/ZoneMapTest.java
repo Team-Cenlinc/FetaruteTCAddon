@@ -48,6 +48,23 @@ class ZoneMapTest {
     assertEquals(2, map.exits().size());
   }
 
+  /** 区内起步的车（车库出车、区内折返）没有入口：以申请里第一条区内区间代替。 */
+  @Test
+  void aStartInsideTheZoneIsItsFirstZoneEdge() {
+    ZoneMap map = map();
+    EdgeId first = EdgeId.undirected(YardFixtures.T1, YardFixtures.P1);
+    List<OccupancyResource> requested =
+        List.of(
+            OccupancyResource.forNode(YardFixtures.P1),
+            OccupancyResource.forEdge(EdgeId.undirected(YardFixtures.P1, YardFixtures.T1)),
+            OccupancyResource.forNode(YardFixtures.T1),
+            OccupancyResource.forEdge(EdgeId.undirected(YardFixtures.T1, YardFixtures.SW1)));
+
+    assertEquals(Optional.empty(), map.entryOf(requested));
+    assertEquals(Optional.of(first), map.startOf(requested));
+    assertEquals(Optional.empty(), map.startOf(List.of(OccupancyResource.forEdge(WEST))));
+  }
+
   @Test
   void entryIsTheExitEdgeInTheRequestOrTheOnlyExitIntoItsFirstNode() {
     ZoneMap map = map();

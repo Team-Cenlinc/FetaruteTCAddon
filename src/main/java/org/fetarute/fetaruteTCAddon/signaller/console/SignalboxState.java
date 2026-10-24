@@ -8,6 +8,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 
 /**
  * 控制台一帧的数据（纯数据、按值比较）：站台屏据此画标题栏的模式牌与值守者、站场图上的进路与信号、列车表、操作区，并推出点击区。
@@ -26,6 +27,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  * @param pending 已给许可、内核还没放行的进路（白色虚线）
  * @param signals 控制区入口的信号
  * @param platforms 选中车在区内的 {@code DYNAMIC:} 停站可以改停的股道
+ * @param delegated 让给小区（车站控制）的那几片
  */
 public record SignalboxState(
     Mode mode,
@@ -39,10 +41,46 @@ public record SignalboxState(
     Set<EdgeId> preview,
     Set<EdgeId> pending,
     List<EntrySignal> signals,
-    List<PlatformChoice> platforms) {
+    List<PlatformChoice> platforms,
+    List<Delegated> delegated) {
+
+  /** 没有让出去的小区。 */
+  public SignalboxState(
+      Mode mode,
+      Optional<String> signaller,
+      Optional<String> selected,
+      List<TrainRow> rows,
+      Map<Button, Boolean> buttons,
+      Optional<Call> call,
+      boolean replying,
+      Optional<Notice> notice,
+      Set<EdgeId> preview,
+      Set<EdgeId> pending,
+      List<EntrySignal> signals,
+      List<PlatformChoice> platforms) {
+    this(
+        mode, signaller, selected, rows, buttons, call, replying, notice, preview, pending, signals,
+        platforms, List.of());
+  }
+
+  /**
+   * 嵌在这片控制区里、正由别的信号员值守的小区：这一片让给了小区（车站控制），站场图上围出来，这里的车不进本控制台的列车表。
+   *
+   * @param zone 小区名
+   * @param signaller 小区的信号员
+   * @param nodes 小区里的节点（站场图据此围出范围）
+   */
+  public record Delegated(String zone, String signaller, Set<NodeId> nodes) {
+    public Delegated {
+      Objects.requireNonNull(zone, "zone");
+      Objects.requireNonNull(signaller, "signaller");
+      nodes = Set.copyOf(nodes);
+    }
+  }
 
   public SignalboxState {
     Objects.requireNonNull(mode, "mode");
+    delegated = delegated == null ? List.of() : List.copyOf(delegated);
     signaller = signaller == null ? Optional.empty() : signaller;
     selected = selected == null ? Optional.empty() : selected;
     rows = rows == null ? List.of() : List.copyOf(rows);
@@ -124,8 +162,9 @@ public record SignalboxState(
    * @param status 状态
    * @param seconds 处在这个状态多少秒（等许可、扣车时显示；其余为 0）
    * @param delaySeconds 晚点秒数（负为早点）；没有时刻表时为空
-   * @param autoProgress 离超时自动排列还有多远：0 刚开始等，1 马上自动排列；不在等时为 0
-   * @param autoPass 这列车走的是一条自动通过的进路
+   * @param autoProgress 等许可时离超时自动排列还有多远、扣车时离扣车上限还有多远：0 刚开始，1 马上到；其余为 0
+   * @param autoPass 这列车要走的进路此刻设了自动通过（选中车的这一项决定自动通过按钮写“设置”还是“取消”）
+   * @param autoRouted 这列车的许可是等候超时由系统代排的
    */
   public record TrainRow(
       String trainName,
@@ -136,7 +175,8 @@ public record SignalboxState(
       long seconds,
       OptionalLong delaySeconds,
       double autoProgress,
-      boolean autoPass) {
+      boolean autoPass,
+      boolean autoRouted) {
     public TrainRow {
       Objects.requireNonNull(trainName, "trainName");
       Objects.requireNonNull(label, "label");
@@ -151,12 +191,19 @@ public record SignalboxState(
    * 驾驶员的呼叫。
    *
    * @param trainName 呼叫的列车
-   * @param driver 驾驶员名
+   * @param driver 驾驶员名（模拟呼叫为空串）
+   * @param reason 原因（呼叫牌上写出来，回复要配得上）
    */
-  public record Call(String trainName, String driver) {
+  public record Call(String trainName, String driver, CallReason reason) {
     public Call {
       Objects.requireNonNull(trainName, "trainName");
       Objects.requireNonNull(driver, "driver");
+      reason = reason == null ? CallReason.GENERAL : reason;
+    }
+
+    /** 一般联系。 */
+    public Call(String trainName, String driver) {
+      this(trainName, driver, CallReason.GENERAL);
     }
   }
 
@@ -173,7 +220,7 @@ public record SignalboxState(
     }
   }
 
-  /** 临时提示的种类。 */
+  /** 临时提示的种类。带列车的提示，文案里的 {@code <train>} 换成车次。 */
   public enum NoticeKind {
     /** 进路被别的车占用，许可排列中。 */
     ROUTE_BLOCKED,
@@ -181,20 +228,52 @@ public record SignalboxState(
     ROUTE_LOCKED,
     /** 这列车不在站里停着，不能扣。 */
     NOT_DWELLING,
-    /** 这一站不是动态站台，不能改股道。 */
-    NOT_DYNAMIC,
+    /** 这一站已不能改停股道（停站已开始，或车已不在）。 */
+    PLATFORM_UNAVAILABLE,
+    /** 已锁闭通往原股道的进路，不能改停。 */
+    PLATFORM_LOCKED,
     /** 自动通过已设置。 */
     AUTO_PASS_ON,
     /** 自动通过已取消。 */
     AUTO_PASS_OFF,
     /** 回复已发给驾驶员。 */
     REPLY_SENT,
+    /** 回复与呼叫的原因不符（仍已发给驾驶员）。 */
+    REPLY_WRONG,
     /** 扣车到了上限，已自动放行。 */
     HOLD_EXPIRED,
+    /** 扣着的车已不在站里停着（已发车），扣车解除。 */
+    HOLD_ENDED,
     /** 认不出这列车从哪个入口进来，不能设自动通过。 */
     NO_ROUTE,
     /** 调度图未就绪，不能转为人工。 */
-    GRAPH_NOT_READY
+    GRAPH_NOT_READY,
+    /** 调度图未就绪，控制区暂为自动（常驻，直到图就绪）。 */
+    GRAPH_NOT_READY_AUTO,
+    /** 按钮要作用在选中的车上，还没选车。 */
+    NO_SELECTION,
+    /** 自动模式下由系统放行，这个操作不可用。 */
+    AUTO_MODE,
+    /** 这列车已有进路许可。 */
+    ALREADY_ROUTED,
+    /** 这列车已在控制区内，不用再排进路。 */
+    IN_ZONE,
+    /** 这列车没有可取消的进路。 */
+    NO_PERMIT,
+    /** 这列车已经扣着。 */
+    ALREADY_HELD,
+    /** 这列车没有被扣。 */
+    NOT_HELD,
+    /** 一列车等候超时，已由系统代排。 */
+    AUTO_ROUTED,
+    /** 取消的许可原来那段等待已过代排时限，车再来问闸时会立即代排。 */
+    AUTO_ROUTE_DUE,
+    /** 连续几列车都由系统代排、其间没有操作，控制区已转为自动。 */
+    IDLE_AUTO,
+    /** 取消的进路上车已在接近：这个入口接近锁闭，到时才能再排。 */
+    APPROACH_LOCKING,
+    /** 这列车的入口还在接近锁闭中，暂不能排进路。 */
+    APPROACH_LOCKED
   }
 
   /**

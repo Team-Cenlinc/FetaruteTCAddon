@@ -64,6 +64,14 @@ public final class PidsFrameCache {
     return rendered;
   }
 
+  /** 已缓存的帧；没有时为 {@code null}（不渲染，供主线程先查一眼、没有再交后台渲染）。 */
+  public byte[] peek(Object key, int width, int height) {
+    Key cacheKey = new Key(Objects.requireNonNull(key, "key"), width, height);
+    synchronized (frames) {
+      return frames.get(cacheKey);
+    }
+  }
+
   /** 缓存的帧数。 */
   public int size() {
     synchronized (frames) {

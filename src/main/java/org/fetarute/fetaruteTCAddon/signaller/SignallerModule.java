@@ -11,6 +11,7 @@ import java.util.function.Supplier;
 import org.bukkit.Bukkit;
 import org.bukkit.Sound;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.HandlerList;
@@ -20,7 +21,10 @@ import org.bukkit.event.player.PlayerGameModeChangeEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.api.event.SignallerDutyEndedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.SignallerDutyStartEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerPlatformDesk;
+import org.fetarute.fetaruteTCAddon.drive.crew.SignallerShift;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -70,6 +74,7 @@ public final class SignallerModule implements Listener {
 
   /** 开始巡检、监听事件。 */
   public void start() {
+    service.setDutyEvents(new ApiEvents());
     plugin.getServer().getPluginManager().registerEvents(this, plugin);
     task =
         plugin
@@ -116,6 +121,44 @@ public final class SignallerModule implements Listener {
     service.playerIncapacitated(event.getPlayer().getUniqueId());
   }
 
+  /** 上岗与下岗发成公开 API 事件（主线程当场发出）。 */
+  private final class ApiEvents implements SignallerService.DutyEvents {
+
+    @Override
+    public void started(
+        UUID player, String operator, String zone, String zoneName, boolean manual) {
+      call(new SignallerDutyStartEvent(player, operator, zone, zoneName, manual));
+    }
+
+    @Override
+    public void ended(SignallerShift shift, String zoneName) {
+      call(
+          new SignallerDutyEndedEvent(
+              shift.player(),
+              shift.operator(),
+              shift.zone(),
+              zoneName,
+              shift.start(),
+              shift.end(),
+              shift.endReason().name(),
+              shift.trainsHandled(),
+              shift.routesSet(),
+              shift.autoRouted(),
+              shift.autoPassed(),
+              shift.holds(),
+              shift.callsAnswered(),
+              shift.callsMissed()));
+    }
+
+    private void call(Event event) {
+      try {
+        plugin.getServer().getPluginManager().callEvent(event);
+      } catch (RuntimeException ex) {
+        plugin.getLogger().warning("信号员事件监听器出错：" + ex);
+      }
+    }
+  }
+
   /** 发语言文件里的消息；提醒另加动作栏与提示音。 */
   private static final class Messenger implements SignallerMessenger {
 
@@ -145,6 +188,25 @@ public final class SignallerModule implements Listener {
       online.sendMessage(manager.component(key, values));
       online.sendActionBar(manager.component(key + "-bar", values));
       online.playSound(online.getLocation(), Sound.BLOCK_NOTE_BLOCK_BELL, 0.8f, 1.4f);
+    }
+
+    @Override
+    public void cue(UUID player, Cue cue, Map<String, String> values) {
+      Player online = player == null ? null : Bukkit.getPlayer(player);
+      LocaleManager manager = locale.get();
+      if (online == null || manager == null) {
+        return;
+      }
+      online.sendActionBar(manager.component(cue.key(), values));
+      switch (cue) {
+          // 接近：一声轻的钟琴；到入口等候：低一些的两声，要信号员动手
+        case APPROACHING -> online.playSound(
+            online.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, 0.6f, 1.2f);
+        case WAITING -> {
+          online.playSound(online.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 0.7f, 0.9f);
+          online.playSound(online.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 0.7f, 0.7f);
+        }
+      }
     }
   }
 }

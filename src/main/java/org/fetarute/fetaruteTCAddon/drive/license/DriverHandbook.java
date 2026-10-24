@@ -12,10 +12,11 @@ import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 游戏内的《FTCA 驾驶员手册》：一本成书，讲 FTCA 的大致流程与开车流程（驾驶证、领任务与接班、驾驶台、信号与控速、进站与车门、发车与准点、终点与换端、出了状况）。
+ * 游戏内的《FTCA 驾驶员手册》：一本成书，讲 FTCA 的大致流程与开车流程（操作许可证、领任务与接班、驾驶台、信号与控速、进站与车门、发车与准点、终点与换端、出了状况）。
  * 每页一个语言键（{@code drive.handbook.driver.page-1} 起），完整版在 Fetarute Wiki。
  *
- * <p>《FTCA 车掌手册》（{@link #guard}）是同样的成书，语言键在 {@code drive.handbook.guard} 下。
+ * <p>《FTCA 车掌手册》（{@link #guard}）与《FTCA 信号员手册》（{@link #signaller}）是同样的成书，语言键在 {@code
+ * drive.handbook.guard}、{@code drive.handbook.signaller} 下。
  */
 public final class DriverHandbook {
 
@@ -24,6 +25,9 @@ public final class DriverHandbook {
 
   /** 车掌手册页数。 */
   public static final int GUARD_PAGES = 7;
+
+  /** 信号员手册页数。 */
+  public static final int SIGNALLER_PAGES = 9;
 
   private final NamespacedKey markKey;
   private final String prefix;
@@ -44,7 +48,16 @@ public final class DriverHandbook {
     return new DriverHandbook(plugin, "guard_handbook", "drive.handbook.guard", GUARD_PAGES);
   }
 
-  /** 语言键前缀（{@code drive.handbook.driver} 或 {@code drive.handbook.guard}）。 */
+  /** 《FTCA 信号员手册》：控制区与上岗、控制台、排列进路、扣车与改停股道、自动通过与模式、呼叫、成绩与奖励、练习与考试。 */
+  public static DriverHandbook signaller(Plugin plugin) {
+    return new DriverHandbook(
+        plugin, "signaller_handbook", "drive.handbook.signaller", SIGNALLER_PAGES);
+  }
+
+  /**
+   * 语言键前缀（{@code drive.handbook.driver}、{@code drive.handbook.guard} 或 {@code
+   * drive.handbook.signaller}）。
+   */
   public String prefix() {
     return prefix;
   }

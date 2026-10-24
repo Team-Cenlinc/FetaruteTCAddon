@@ -81,6 +81,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabVehicle;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCalls;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerLink;
@@ -1056,11 +1057,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /**
-   * {@code /fta drive call}：正在驾驶调度列车的驾驶员呼叫信号员（不论车上有没有车掌）。
+   * {@code /fta drive call [原因]}：正在驾驶调度列车的驾驶员呼叫信号员（不论车上有没有车掌）。
    *
+   * @param reason 原因；没写时为一般联系（车正在入口等候时信号员那边按“信号前等候”算）
    * @return 给驾驶员的提示语言键
    */
-  public String callSignaller(Player player) {
+  public String callSignaller(Player player, CallReason reason) {
     DriveSession session = active.get(player.getUniqueId());
     if (session == null) {
       return "drive.command.stop.not-driving";
@@ -1071,7 +1073,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     SignallerCalls.Outcome outcome =
         signallerCalls.call(
-            player.getUniqueId(), link.currentTrainName(), monotonicMillis(), signallerLink);
+            player.getUniqueId(),
+            link.currentTrainName(),
+            reason,
+            monotonicMillis(),
+            signallerLink);
     return outcome.reached() ? "drive.command.call.called" : "drive.command.call.none";
   }
 

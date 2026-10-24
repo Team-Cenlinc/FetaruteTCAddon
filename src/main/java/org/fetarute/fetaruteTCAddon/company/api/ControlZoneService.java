@@ -1,11 +1,14 @@
 package org.fetarute.fetaruteTCAddon.company.api;
 
 import java.time.Instant;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 import org.fetarute.fetaruteTCAddon.company.model.ControlZone;
@@ -151,6 +154,12 @@ public final class ControlZoneService {
     if (members.stream().anyMatch(m -> m.kind() == kind && m.code().equals(wanted))) {
       return Result.of(Status.ALREADY_MEMBER, zone);
     }
+    Set<String> after = keys(members);
+    after.add(key(kind, wanted));
+    Optional<ControlZone> conflict = overlapping(zone, after);
+    if (conflict.isPresent()) {
+      return Result.overlap(zone, conflict.get());
+    }
     int sortOrder = members.stream().mapToInt(ControlZoneMember::sortOrder).max().orElse(-1) + 1;
     provider.controlZones().saveMember(new ControlZoneMember(zone.id(), kind, wanted, sortOrder));
     return Result.of(Status.ADDED, zone);
@@ -172,11 +181,17 @@ public final class ControlZoneService {
       return Result.of(Status.NO_PERMISSION);
     }
     String wanted = code == null ? "" : code.trim().toUpperCase(Locale.ROOT);
-    boolean member =
-        provider.controlZones().listMembers(zone.id()).stream()
-            .anyMatch(m -> m.kind() == kind && m.code().equals(wanted));
+    List<ControlZoneMember> members = provider.controlZones().listMembers(zone.id());
+    boolean member = members.stream().anyMatch(m -> m.kind() == kind && m.code().equals(wanted));
     if (!member) {
       return Result.of(Status.NOT_MEMBER, zone);
+    }
+    // 大区移走一个成员可能让嵌在里面的小区露出一半，变成部分重叠
+    Set<String> after = keys(members);
+    after.remove(key(kind, wanted));
+    Optional<ControlZone> conflict = overlapping(zone, after);
+    if (conflict.isPresent()) {
+      return Result.overlap(zone, conflict.get());
     }
     provider.controlZones().removeMember(zone.id(), kind, wanted);
     return Result.of(Status.REMOVED, zone);
@@ -190,6 +205,42 @@ public final class ControlZoneService {
     }
     provider.controlZones().delete(zone.id());
     return Result.of(Status.DELETED, zone);
+  }
+
+  /**
+   * 成员改成 {@code members} 之后，与同一运营商的哪个控制区不再是“只嵌套”：两片要么不相交，要么一片整个包含另一片；部分重叠或范围一模一样都不行。
+   * 空的控制区（刚建、还没加成员）不算。
+   *
+   * @return 冲突的控制区；没有时为空
+   */
+  private Optional<ControlZone> overlapping(ControlZone zone, Set<String> members) {
+    if (members.isEmpty()) {
+      return Optional.empty();
+    }
+    for (ControlZone other : provider.controlZones().listByOperator(zone.operatorId())) {
+      if (other.id().equals(zone.id())) {
+        continue;
+      }
+      Set<String> theirs = keys(provider.controlZones().listMembers(other.id()));
+      if (theirs.isEmpty() || Collections.disjoint(members, theirs)) {
+        continue;
+      }
+      boolean nested = members.containsAll(theirs) || theirs.containsAll(members);
+      if (!nested || members.equals(theirs)) {
+        return Optional.of(other);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private static Set<String> keys(List<ControlZoneMember> members) {
+    Set<String> out = new HashSet<>();
+    members.forEach(member -> out.add(key(member.kind(), member.code())));
+    return out;
+  }
+
+  private static String key(ControlZoneMember.Kind kind, String code) {
+    return kind.name() + ":" + code;
   }
 
   private boolean canManage(ControlZone zone, Predicate<UUID> canManage) {
@@ -225,7 +276,9 @@ public final class ControlZoneService {
     /** 已在区内。 */
     ALREADY_MEMBER,
     /** 不在区内。 */
-    NOT_MEMBER;
+    NOT_MEMBER,
+    /** 改了以后会与同一运营商的另一个控制区部分重叠或范围相同（控制区只能嵌套，见 {@link Result#conflict()}）。 */
+    OVERLAP;
 
     /** 是否真的改了数据。 */
     public boolean changed() {
@@ -242,15 +295,20 @@ public final class ControlZoneService {
    *
    * @param status 状态
    * @param zone 相关控制区（改名后为新记录）
+   * @param conflict {@link Status#OVERLAP} 时与之冲突的控制区
    */
-  public record Result(Status status, Optional<ControlZone> zone) {
+  public record Result(Status status, Optional<ControlZone> zone, Optional<ControlZone> conflict) {
 
     static Result of(Status status) {
-      return new Result(status, Optional.empty());
+      return new Result(status, Optional.empty(), Optional.empty());
     }
 
     static Result of(Status status, ControlZone zone) {
-      return new Result(status, Optional.of(zone));
+      return new Result(status, Optional.of(zone), Optional.empty());
+    }
+
+    static Result overlap(ControlZone zone, ControlZone conflict) {
+      return new Result(Status.OVERLAP, Optional.of(zone), Optional.of(conflict));
     }
   }
 }

@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.signaller.console;
 
 import java.util.Objects;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /** 控制台上被点到的东西。 */
@@ -50,6 +51,17 @@ public sealed interface ConsoleTarget {
   record Platform(NodeId node) implements ConsoleTarget {
     public Platform {
       Objects.requireNonNull(node, "node");
+    }
+  }
+
+  /**
+   * 没有车在等、设了自动通过的入口信号：撤掉从这个入口进来的自动通过。
+   *
+   * @param exit 入口区间
+   */
+  record Signal(EdgeId exit) implements ConsoleTarget {
+    public Signal {
+      Objects.requireNonNull(exit, "exit");
     }
   }
 
