@@ -134,8 +134,11 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
   /** 中心工位分出去的临时小区。 */
   private final TransientZones transients = new TransientZones();
 
-  /** 模拟事件的随机数。 */
-  private java.util.random.RandomGenerator random = java.util.random.RandomGenerator.getDefault();
+  /**
+   * 模拟事件的随机数。用 {@code java.base} 里的 {@link java.util.SplittableRandom}：{@code
+   * RandomGenerator.getDefault()} 的算法在 {@code jdk.random} 模块里、要经服务查找，服务器的插件类加载器下找不到。
+   */
+  private java.util.random.RandomGenerator random = new java.util.SplittableRandom();
 
   private final RailGraphPathFinder finder = new RailGraphPathFinder();
 
@@ -1608,7 +1611,7 @@ public final class SignallerService implements SignallerGate, SignalboxConsole, 
 
   /** 给测试：换上固定的随机数。 */
   void setRandom(java.util.random.RandomGenerator next) {
-    this.random = next == null ? java.util.random.RandomGenerator.getDefault() : next;
+    this.random = next == null ? new java.util.SplittableRandom() : next;
   }
 
   /** 回了“进路正在排列”的呼叫：期限内亲手排了进路（或设了自动通过）算兑现；到期还没排，补记一次答错并告诉信号员。区转了自动时不再追究。 */

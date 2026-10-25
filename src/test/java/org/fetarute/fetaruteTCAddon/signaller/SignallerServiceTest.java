@@ -1939,6 +1939,17 @@ class SignallerServiceTest {
     service.tick();
   }
 
+  /**
+   * 模拟事件的随机数只用 {@code java.base} 里的实现：{@code RandomGenerator.getDefault()} 的算法在 {@code jdk.random}
+   * 模块里，要经服务查找，服务器的插件类加载器下找不到，信号员会在初始化时整个起不来。
+   */
+  @Test
+  void theDefaultRandomComesFromJavaBase() {
+    assertEquals("java.base", service.random().getClass().getModule().getName());
+    service.setRandom(null);
+    assertEquals("java.base", service.random().getClass().getModule().getName());
+  }
+
   /** 有真人乘务员的车不借来出题。 */
   @Test
   void aTrainWithRealCrewIsNotUsedForASimulatedCall() {

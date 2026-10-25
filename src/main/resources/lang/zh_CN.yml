@@ -2304,6 +2304,11 @@ pids:
     zone: "<gray>控制区</gray>"
     zone-none: "不绑定"
     appearance: "<gray>外观</gray>"
+    # 信号员控制台：设为中心工位
+    workstation: "<gray>中心工位</gray>"
+    workstation-on: "是"
+    workstation-off: "否"
+    workstation-hint: "<dark_gray>大区有人值守时，后来的人在此上岗，自动分到一片车站</dark_gray>"
     actions: "<gray>操作</gray>"
     station-manual: "手动指定…"
     all: "全部"
@@ -2330,6 +2335,7 @@ pids:
     binding: "<gray>车站：<white><station></white> · <platforms> · 线路：<white><lines></white> · 外观：<white><appearance></white></gray>"
     rotation: "<gray>轮播运营商：<white><operators></white></gray>"
     zone: "<gray>控制区：<white><zone></white></gray>"
+    workstation: "<gray>中心工位：<white>是</white>（大区有人值守时，后来的人在此上岗，自动分到一片车站）</gray>"
     location: "<gray>位置：<white><world></white> <white><x></white> <white><y></white> <white><z></white> · 朝 <white><facing></white></gray>"
   remove:
     confirm: "<prefix> <yellow>确认拆除站台屏 <white><id></white>？</yellow><gray>展示框将还原为空，并退回安装纸。</gray> "

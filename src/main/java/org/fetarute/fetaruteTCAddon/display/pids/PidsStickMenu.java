@@ -46,7 +46,7 @@ public final class PidsStickMenu {
   }
 
   /**
-   * 发送配置菜单。信号员控制台只列它用得上的几行（运营商、控制区、布局、外观、模式与拆除），点了执行 {@code /fta signal console}
+   * 发送配置菜单。信号员控制台只列它用得上的几行（运营商、控制区、布局、外观、中心工位、模式与拆除），点了执行 {@code /fta signal console}
    * 的命令；布局一行只列同一种屏幕（站台屏或控制台）的布局。
    */
   public void open(CommandSender sender, PidsService service, PidsScreen screen) {
@@ -154,6 +154,25 @@ public final class PidsStickMenu {
     }
     sender.sendMessage(appearance);
 
+    if (console) {
+      sender.sendMessage(
+          label("pids.menu.workstation")
+              .append(
+                  button(
+                      locale.text("pids.menu.workstation-on"),
+                      screen.workstation(),
+                      null,
+                      set + "workstation on"))
+              .append(
+                  button(
+                      locale.text("pids.menu.workstation-off"),
+                      !screen.workstation(),
+                      null,
+                      set + "workstation off"))
+              .append(Component.space())
+              .append(locale.component("pids.menu.workstation-hint")));
+    }
+
     boolean live = screen.mode() == PidsScreen.Mode.LIVE;
     sender.sendMessage(
         label("pids.menu.actions")
@@ -210,6 +229,9 @@ public final class PidsStickMenu {
                                 .flatMap(operator -> service.findZone(operator, code))
                                 .map(zone -> zone.zone().name() + "（" + code + "）")
                                 .orElse(code)))));
+    if (service.isSignalbox(screen) && screen.workstation()) {
+      sender.sendMessage(locale.component("pids.info.workstation"));
+    }
     sender.sendMessage(
         locale.component(
             "pids.info.location",
