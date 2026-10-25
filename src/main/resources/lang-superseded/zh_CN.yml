@@ -1,6 +1,13 @@
 # 内置文案改写前的旧值。服务器上的 lang/zh_CN.yml 里某个键仍是这里列出的旧值之一（没有改过）时，
 # 加载时换成新的内置文案；改过的保留。只列改写过的键：新增的键会自动补上，不用列。
 command:
+  signal:
+    console:
+      help:
+        set: ["<gray>/fta signal console set <white><控制台></white> layout|appearance|mode <white><取值></white></gray> <white>-</white> <dark_aqua>换布局、外观，启用显示或回到测试卡</dark_aqua>"]
+    zone:
+      create:
+        invalid: ["<prefix> <red>代码与名称不能为空，代码不能含冒号</red>"]
   route:
     set:
       batch-success: ["<prefix> <dark_aqua>已批量更新 <white><count></white> 条运营运行图：</dark_aqua><white><codes></white> <gray>（出库与回送运行图不在批量范围内）</gray>"]
@@ -670,6 +677,7 @@ graph:
     hint: ["<gray>请到该世界执行</gray> <click:suggest_command:'/fta graph build'><hover:show_text:'<gray>点击填入命令</gray>'><white>/fta graph build</white></hover></click><gray>；若属误删，在原位置按原文字手动放回牌子也可恢复。</gray>"]
 signaller:
   call:
+    wrong-signal: ["<prefix> <yellow>回复与呼叫不符：<white><train></white> 报的是信号前等候，应回复「进路正在排列」（马上给它排）或「前方有车，请等待」</yellow>"]
     incoming-signal: ["<prefix> <gold>列车 <white><train></white> 呼叫信号楼：信号前等候</gold> <gray>点控制台的呼叫牌回复「进路正在排列」或「前方有车，请等待」</gray>"]
     incoming-signal-bar: ["<gold>列车 <white><train></white> 呼叫：信号前等候</gold>"]
     incoming-doors: ["<prefix> <gold>列车 <white><train></white> 呼叫信号楼：车门故障</gold> <gray>点控制台的呼叫牌回复「已收到」</gray>"]

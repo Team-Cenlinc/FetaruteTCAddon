@@ -29,6 +29,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManag
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
+import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 
 /** 信号员模块看到的外部世界：从插件主类取控制区目录、调度图、占用、列车进度、时刻表与在线玩家。 */
@@ -209,6 +211,26 @@ final class DispatcherSignallerWorld implements SignallerWorld {
     }
     return drive.driverSide().driverOf(trainName).isPresent()
         || drive.guards().flatMap(guards -> guards.guardOfTrainName(trainName)).isPresent();
+  }
+
+  @Override
+  public List<Seat> workstations(String operator, String zone) {
+    if (operator == null || zone == null) {
+      return List.of();
+    }
+    return plugin.getPidsService().map(PidsService::screens).orElse(List.of()).stream()
+        .filter(PidsScreen::workstation)
+        .filter(screen -> screen.operatorCode().filter(operator::equalsIgnoreCase).isPresent())
+        .filter(screen -> screen.zone().filter(zone::equalsIgnoreCase).isPresent())
+        .map(
+            screen ->
+                new Seat(
+                    screen.id(),
+                    screen.worldId(),
+                    screen.anchor().x(),
+                    screen.anchor().y(),
+                    screen.anchor().z()))
+        .toList();
   }
 
   @Override

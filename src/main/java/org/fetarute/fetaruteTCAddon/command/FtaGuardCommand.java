@@ -106,13 +106,7 @@ public final class FtaGuardCommand {
             .literal("call")
             .permission(player)
             .optional(
-                "reason",
-                StringParser.stringParser(),
-                SuggestionProvider.blockingStrings(
-                    (ctx, input) ->
-                        CommandUx.suggestions(
-                            CallReason.crewReasons().stream().map(CallReason::key).toList(),
-                            input.lastRemainingToken())))
+                "reason", StringParser.stringParser(), FtaDriveCommand.callReasonSuggestions())
             .handler(
                 ctx -> handleCall(ctx.sender(), ctx.optional("reason").map(String.class::cast))));
     manager.command(

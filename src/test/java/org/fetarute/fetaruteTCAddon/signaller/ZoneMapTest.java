@@ -48,6 +48,49 @@ class ZoneMapTest {
     assertEquals(2, map.exits().size());
   }
 
+  /** 大区的站场推到节点上限被截断时，资源比不全：小区的资源有不在大区里的，改按成员判嵌套；没截断时仍只按资源判。 */
+  @Test
+  void aTruncatedOuterAreaNestsByMembers() {
+    RailGraph graph = YardFixtures.graph();
+    java.util.Set<NodeId> many = new java.util.HashSet<>();
+    for (int i = 0; i < YardArea.MAX_NODES; i++) {
+      many.add(NodeId.of("SURC:ABC:XYZ:9:" + i));
+    }
+    ZoneMap truncated =
+        ZoneMap.of(graph, new YardArea(many, java.util.Set.of(), List.of(), List.of(), List.of()));
+    ZoneMap small =
+        ZoneMap.of(
+            graph,
+            new YardArea(
+                java.util.Set.of(YardFixtures.P1),
+                java.util.Set.of(),
+                List.of(),
+                List.of(),
+                List.of()));
+    java.util.Set<YardArea.Member> outer =
+        java.util.Set.of(YardArea.Member.station("ABC"), YardArea.Member.station("DEF"));
+    java.util.Set<YardArea.Member> inner = java.util.Set.of(YardArea.Member.station("ABC"));
+
+    assertTrue(truncated.area().truncated());
+    assertTrue(truncated.nests(small, outer, inner));
+    assertFalse(truncated.nests(small, outer, outer), "成员一样多不算嵌套");
+    ZoneMap whole = map();
+    assertFalse(whole.area().truncated());
+    assertFalse(
+        whole.nests(
+            ZoneMap.of(
+                graph,
+                new YardArea(
+                    java.util.Set.of(NodeId.of("SURC:S:QQQ:1")),
+                    java.util.Set.of(),
+                    List.of(),
+                    List.of(),
+                    List.of())),
+            outer,
+            inner),
+        "没截断时仍按资源判");
+  }
+
   /** 区内起步的车（车库出车、区内折返）没有入口：以申请里第一条区内区间代替。 */
   @Test
   void aStartInsideTheZoneIsItsFirstZoneEdge() {

@@ -128,6 +128,10 @@ final class SignalboxActions {
       }
       case ConsoleTarget.Signal signal -> clearAutoPass(signal.exit());
     }
+    // 离开第二页（返回、改选、取消选择、去回复）就撤销“待确认”：再进来要重新按两下
+    if (!box.trainOps) {
+      box.cancelArm = null;
+    }
   }
 
   /** 按了灰显的按钮：说明为什么按不了。 */
@@ -210,8 +214,7 @@ final class SignalboxActions {
     }
     SignalBox.Waiting waiting = box.waiting.get(key);
     boolean waited = waiting != null && !service.stale(waiting, now);
-    Optional<SignalBox.Route> route =
-        waited && waiting.route.isPresent() ? waiting.route : service.routeAhead(map, trainName);
+    Optional<SignalBox.Route> route = routeOf(trainName, key);
     if (service.approachLocked(box, route, now)) {
       service.notice(box, SignalboxState.NoticeKind.APPROACH_LOCKED, Optional.of(trainName));
       return;
@@ -402,10 +405,14 @@ final class SignalboxActions {
     }
     box.restartSimHead(call, now);
     boolean fits = CallReplies.fits(call.reason(), reply, routable(call.trainName()));
-    if (fits && reply == SignalboxState.Reply.ROUTE_SETTING && box.manual()) {
-      box.promises.put(
-          SignallerService.key(call.trainName()),
-          new SignalBox.Promise(call, now.plus(SignallerService.PROMISE)));
+    String callKey = SignallerService.key(call.trainName());
+    // 已有许可（例如已被代排）或已在区内的车没有进路可排：不记承诺，免得代排之外再罚一次
+    if (fits
+        && reply == SignalboxState.Reply.ROUTE_SETTING
+        && box.manual()
+        && !box.permits.containsKey(callKey)
+        && service.presence(box, callKey).isEmpty()) {
+      box.promises.put(callKey, new SignalBox.Promise(call, now.plus(SignallerService.PROMISE)));
     }
     if (box.duty != null && call.sim()) {
       if (fits) {
@@ -459,10 +466,20 @@ final class SignalboxActions {
         Optional.of(call.trainName()));
   }
 
-  /** 此刻能给这列车排进路：车没被扣、没在停站，前方区内也没有别的车占着（信号前等候的回复按它判对错）。 */
+  /** 排列进路要用的进路：在入口等着的按它等的那条，否则按交路往前展开。 */
+  private Optional<SignalBox.Route> routeOf(String trainName, String key) {
+    SignalBox.Waiting waiting = box.waiting.get(key);
+    boolean waited = waiting != null && !service.stale(waiting, now);
+    return waited && waiting.route.isPresent() ? waiting.route : service.routeAhead(map, trainName);
+  }
+
+  /** 此刻能给这列车排进路：车没被扣、没在停站，入口没在接近锁闭中，前方区内也没有别的车占着（信号前等候的回复按它判对错，与“排列进路”按下去会不会被拒同一口径）。 */
   private boolean routable(String trainName) {
     String key = SignallerService.key(trainName);
     if (box.holds.containsKey(key)) {
+      return false;
+    }
+    if (map != null && service.approachLocked(box, routeOf(trainName, key), now)) {
       return false;
     }
     boolean stopped =
@@ -544,7 +561,18 @@ final class SignalboxActions {
     }
     SignallerTrainDesk desk = service.world().trains();
     Optional<SignallerTrainDesk.Skip> skip = desk.skip(train.get());
+    // 越站与撤销都只管本楼实际管着的车站：让给小区（或中心工位）的那一片归那边
+    ZoneMap owned = service.owned(box);
+    boolean ours = skip.isPresent() && owned != null && owned.inside(skip.get().station());
     if (skip.isPresent() && skip.get().ordered()) {
+      if (box.duty != null && service.examOnly(box.duty.player)) {
+        service.notice(box, SignalboxState.NoticeKind.SKIP_IN_EXAM, train);
+        return;
+      }
+      if (!ours) {
+        service.notice(box, SignalboxState.NoticeKind.SKIP_OUT_OF_ZONE, train);
+        return;
+      }
       Optional<SignallerTrainDesk.SkipRefusal> refusal = desk.revokeSkip(train.get());
       if (refusal.isPresent()) {
         service.notice(box, skipNotice(refusal.get()), train);
@@ -571,7 +599,7 @@ final class SignalboxActions {
       service.notice(box, SignalboxState.NoticeKind.SKIP_NO_STOP, train);
       return;
     }
-    if (map == null || !map.inside(skip.get().station())) {
+    if (!ours) {
       service.notice(box, SignalboxState.NoticeKind.SKIP_OUT_OF_ZONE, train);
       return;
     }

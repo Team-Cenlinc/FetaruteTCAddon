@@ -302,6 +302,7 @@ pids:
       call: ["<train> calling", "<train> calling: <reason>"]
 signaller:
   call:
+    wrong-signal: ["<prefix> <yellow>The reply did not fit: <white><train></white> reported waiting at the signal; reply \"Route is being set\" (and set it) or \"Train ahead, please wait\"</yellow>"]
     incoming-signal: ["<prefix> <gold>Train <white><train></white> is calling: waiting at the signal</gold> <gray>click the call badge on the console and reply \"Route is being set\" or \"Train ahead, please wait\"</gray>"]
     incoming-signal-bar: ["<gold>Train <white><train></white> calling: waiting at the signal</gold>"]
     incoming-doors: ["<prefix> <gold>Train <white><train></white> is calling: door fault</gold> <gray>click the call badge on the console and reply \"Acknowledged\"</gray>"]

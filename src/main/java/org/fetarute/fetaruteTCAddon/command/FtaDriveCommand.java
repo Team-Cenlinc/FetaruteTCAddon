@@ -223,14 +223,7 @@ public final class FtaDriveCommand {
             .literal("drive")
             .literal("call")
             .permission(permissionOf("call"))
-            .optional(
-                "reason",
-                StringParser.stringParser(),
-                SuggestionProvider.blockingStrings(
-                    (ctx, input) ->
-                        CommandUx.suggestions(
-                            CallReason.crewReasons().stream().map(CallReason::key).toList(),
-                            input.lastRemainingToken())))
+            .optional("reason", StringParser.stringParser(), callReasonSuggestions())
             .handler(
                 ctx -> handleCall(ctx.sender(), ctx.optional("reason").map(String.class::cast))));
 
@@ -576,6 +569,15 @@ public final class FtaDriveCommand {
       return;
     }
     drive.chooseSplit(player, option, outcome -> sendStartOutcome(player, drive, outcome));
+  }
+
+  /** 呼叫信号员的原因补全（驾驶员与车掌的 {@code call} 共用）：只列乘务员能写的原因。 */
+  static SuggestionProvider<CommandSender> callReasonSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) ->
+            CommandUx.suggestions(
+                CallReason.crewReasons().stream().map(CallReason::key).toList(),
+                input.lastRemainingToken()));
   }
 
   /** 呼叫信号员：只有正在驾驶调度列车的驾驶员能用，不论车上有没有车掌；列车要在有人值守的控制区内、正接近或在入口等候。可写原因（信号前等候、车门故障、线路异常），不写为一般联系。 */

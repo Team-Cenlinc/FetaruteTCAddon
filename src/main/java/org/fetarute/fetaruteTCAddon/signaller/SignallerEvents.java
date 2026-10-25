@@ -95,7 +95,9 @@ final class SignallerEvents {
     List<Pick> picks = new ArrayList<>();
     for (SignalboxState.TrainRow row : rows) {
       String train = row.trainName();
-      if (service.world().crewed(train)) {
+      // 正在取消倒计时的车马上就没了，不借来出题
+      if (service.world().crewed(train)
+          || box.cancelling.containsKey(SignallerService.key(train))) {
         continue;
       }
       switch (row.status()) {

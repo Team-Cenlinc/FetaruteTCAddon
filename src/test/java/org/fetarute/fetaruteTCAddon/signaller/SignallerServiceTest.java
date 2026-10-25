@@ -64,6 +64,9 @@ class SignallerServiceTest {
   /** 各语言键最近一次提醒带的占位符。 */
   private Map<String, Map<String, String>> alerted;
 
+  /** 各语言键最近一次发给玩家时带的占位符。 */
+  private Map<String, Map<String, String>> sent;
+
   private List<SignallerShift> shifts;
   private SignallerConfig settings;
   private SignallerService service;
@@ -75,6 +78,7 @@ class SignallerServiceTest {
     tick = 0;
     messages = new ArrayList<>();
     alerted = new HashMap<>();
+    sent = new HashMap<>();
     shifts = new ArrayList<>();
     settings = SignallerConfig.defaults();
     service =
@@ -87,6 +91,7 @@ class SignallerServiceTest {
               @Override
               public void send(UUID player, String key, Map<String, String> values) {
                 messages.add(player + " " + key);
+                sent.put(key, values);
               }
 
               @Override
@@ -97,7 +102,10 @@ class SignallerServiceTest {
 
               @Override
               public String text(String key) {
-                return key.substring(key.lastIndexOf('.') + 1);
+                // 分界的写法要看得出是哪两个站
+                return "signaller.workstation.boundary".equals(key)
+                    ? "<from>—<to>"
+                    : key.substring(key.lastIndexOf('.') + 1);
               }
             },
             message -> {});
@@ -535,6 +543,44 @@ class SignallerServiceTest {
 
     assertTrue(state().trainOps().isEmpty());
     assertNull(service.boxFor("SURC", "ABC").orElseThrow().cancelArm);
+  }
+
+  /** 翻回第一页再进来，“待确认”已撤销：要重新按两下。 */
+  @Test
+  void leavingTheSecondPageDisarmsTheCancellation() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.BACK));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    assertTrue(world.trains.cancelled.isEmpty());
+    assertTrue(state().trainOps().orElseThrow().cancelArmed());
+  }
+
+  /** 车上有人、倒计时期间车离开了站台：取消作罢，也不计一次取消。 */
+  @Test
+  void aCancellationCalledOffIsNotCounted() {
+    goOnDuty();
+    dwellAtPlatform("T1");
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(true, true, false));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+    now = now.plusSeconds(2);
+    press(new ConsoleTarget.Act(SignalboxState.TrainAction.CANCEL));
+
+    world.trains.scenes.put("T1", new SignallerTrainDesk.Scene(true, false, false));
+    now = now.plusSeconds(6);
+    service.tick();
+    service.endDuty(PLAYER, SignallerShift.EndReason.OFF_DUTY);
+
+    assertTrue(world.trains.cancelled.isEmpty());
+    assertEquals(0, shifts.get(0).tripsCancelled());
   }
 
   @Test
@@ -1991,6 +2037,42 @@ class SignallerServiceTest {
     assertEquals(2, shifts.get(0).simRight());
   }
 
+  /** 已被代排（有许可）的车没有进路可排：回“进路正在排列”不记承诺，不因此再罚。 */
+  @Test
+  void aTrainAlreadyRoutedCarriesNoPromise() {
+    goOnDuty();
+    service.admit("T1", entering(), now);
+    waitAndTick(21, "T1");
+    assertTrue(
+        service.boxFor("SURC", "ABC").orElseThrow().permits.containsKey(SignallerService.key("T1")),
+        "已代排");
+
+    service.call(DRIVER, CallerRole.DRIVER, "T1", CallReason.SIGNAL);
+    press(new ConsoleTarget.CallBadge());
+    press(new ConsoleTarget.Answer(SignalboxState.Reply.ROUTE_SETTING));
+    waitAndTick(21);
+    service.endDuty(PLAYER, SignallerShift.EndReason.OFF_DUTY);
+
+    assertEquals(0, shifts.get(0).callsWrong());
+  }
+
+  /** 正在取消倒计时的车马上就没了，不借来出题。 */
+  @Test
+  void aTrainBeingCancelledIsNotUsedForASimulatedCall() {
+    slowAutoRoute();
+    service.setRandom(fixedRandom(0.0, 0));
+    goOnDuty();
+    dwellAtPlatform("T1");
+    SignalBox box = service.boxFor("SURC", "ABC").orElseThrow();
+    String key = SignallerService.key("T1");
+    box.holds.put(key, new SignalBox.Hold("T1", now));
+    box.cancelling.put(key, new SignalBox.PendingCancel("T1", now.plusSeconds(3600)));
+
+    waitAndTick(61);
+
+    assertTrue(state().call().isEmpty());
+  }
+
   /** 超时没答记模拟事件超时；回了“进路正在排列”却没排记模拟事件答错；都不混进真呼叫。 */
   @Test
   void simulatedMissesAndBrokenPromisesAreCountedOnTheirOwn() {
@@ -2150,7 +2232,7 @@ class SignallerServiceTest {
 
     UUID third = UUID.fromString("00000000-0000-0000-0000-000000000033");
     pressWorkstation(third, SCREEN_B, new ConsoleTarget.Deselect());
-    assertTrue(messages.contains(third + " signaller.workstation.taken"));
+    assertTrue(messages.contains(third + " signaller.workstation.taken-full"), "没有别的空工位");
 
     now = now.plus(SignallerService.PROMPT_INTERVAL).plusSeconds(1);
     service.tick();
@@ -2216,6 +2298,41 @@ class SignallerServiceTest {
     assertEquals("BIG", shift.parentZone());
   }
 
+  /** 工位有人时指出同一世界里离这里最近的空工位；有人坐着的、别的世界的不算。 */
+  @Test
+  void aTakenWorkstationPointsToTheNearestFreeOne() {
+    useWorkstationZone();
+    world.seats.add(new SignallerWorld.Seat(SCREEN_A, YardFixtures.WORLD, 0, 64, 12));
+    world.seats.add(new SignallerWorld.Seat(SCREEN_B, YardFixtures.WORLD, 1, 64, 12));
+    world.seats.add(new SignallerWorld.Seat(SCREEN_C, YardFixtures.WORLD, 40, 64, 12));
+    world.seats.add(
+        new SignallerWorld.Seat(
+            UUID.fromString("00000000-0000-0000-0000-0000000000d4"), UUID.randomUUID(), 2, 64, 12));
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Deselect());
+    service.startDuty(PLAYER, "Sig", true);
+    pressWorkstation(SECOND, SCREEN_B, new ConsoleTarget.Deselect());
+    service.startDuty(SECOND, "Two", true);
+
+    UUID third = UUID.fromString("00000000-0000-0000-0000-000000000033");
+    pressWorkstation(third, SCREEN_B, new ConsoleTarget.Deselect());
+
+    assertTrue(messages.contains(third + " signaller.workstation.taken"));
+    assertEquals("40", sent.get("signaller.workstation.taken").get("x"));
+  }
+
+  /** 上岗提示写出与大区之间的分界区间（大区那头的站写在前）。 */
+  @Test
+  void theAssignmentNamesTheBoundary() {
+    useWorkstationZone();
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Deselect());
+    service.startDuty(PLAYER, "Sig", true);
+    pressWorkstation(SECOND, SCREEN_B, new ConsoleTarget.Deselect());
+    service.startDuty(SECOND, "Two", true);
+
+    assertEquals("DEF—ABC", sent.get("signaller.workstation.assigned").get("boundary"));
+    assertEquals("大区", sent.get("signaller.workstation.assigned").get("parent"));
+  }
+
   /** 两人先后点了同一块空工位：先确认的坐下，后确认的提示有人，不另切一片。 */
   @Test
   void twoPeopleRacingForOneWorkstationGetOneSeat() {
@@ -2275,6 +2392,63 @@ class SignallerServiceTest {
     assertEquals("BIG", shift.parentZone());
     assertTrue(service.boxFor("SURC", "BIG~2").isEmpty());
     assertFalse(messages.contains(SECOND + " signaller.workstation.returned"), "大区没了，不说交还");
+  }
+
+  /** 车停在工位那片的站里、下一个途经点在大区：乘务员的呼叫归工位，不归大区。 */
+  @Test
+  void aCallFromATrainInsideTheWorkstationGoesToTheWorkstation() {
+    useWorkstationZone();
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Deselect());
+    service.startDuty(PLAYER, "Sig", true);
+    pressWorkstation(SECOND, SCREEN_B, new ConsoleTarget.Deselect());
+    service.startDuty(SECOND, "Two", true);
+    dwellAtPlatform("T1");
+
+    assertEquals(
+        CallResult.Status.CALLED,
+        service.call(DRIVER, CallerRole.DRIVER, "T1", CallReason.GENERAL).status());
+
+    assertFalse(service.boxFor("SURC", "BIG~2").orElseThrow().calls.isEmpty());
+    assertTrue(service.boxFor("SURC", "BIG").orElseThrow().calls.isEmpty());
+  }
+
+  /** 切出一片时，车已在那一片里的：大区的扣车交给工位，大区不再管它。 */
+  @Test
+  void splittingHandsTheTrainsInsideTheSliceToTheWorkstation() {
+    useWorkstationZone();
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Deselect());
+    service.startDuty(PLAYER, "Sig", true);
+    dwellAtPlatform("T1");
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Train("T1"));
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Press(SignalboxState.Button.HOLD));
+    String key = SignallerService.key("T1");
+    assertTrue(service.boxFor("SURC", "BIG").orElseThrow().holds.containsKey(key));
+
+    pressWorkstation(SECOND, SCREEN_B, new ConsoleTarget.Deselect());
+    service.startDuty(SECOND, "Two", true);
+
+    assertFalse(service.boxFor("SURC", "BIG").orElseThrow().holds.containsKey(key));
+    assertTrue(service.boxFor("SURC", "BIG~2").orElseThrow().holds.containsKey(key), "扣车照扣");
+  }
+
+  /** 越站令下在工位那片的车站上：大区的人撤不了。 */
+  @Test
+  void theParentCannotRevokeASkipInsideTheWorkstation() {
+    useWorkstationZone();
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Deselect());
+    service.startDuty(PLAYER, "Sig", true);
+    pressWorkstation(SECOND, SCREEN_B, new ConsoleTarget.Deselect());
+    service.startDuty(SECOND, "Two", true);
+    world.progress.put("T1", progress("T1", YardFixtures.P1));
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P1, true, Optional.empty()));
+    tick++;
+
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Train("T1"));
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Press(SignalboxState.Button.TRAIN_OPS));
+    pressWorkstation(PLAYER, SCREEN_A, new ConsoleTarget.Act(SignalboxState.TrainAction.SKIP));
+
+    assertTrue(world.trains.revoked.isEmpty());
   }
 
   /** 信号楼概况里临时小区带所属大区，普通区不带。 */
@@ -2410,6 +2584,23 @@ class SignallerServiceTest {
     service.tick();
     assertTrue(heard.contains("DRILL_MISSED"));
     assertFalse(messages.stream().anyMatch(m -> m.contains("signaller.call.unanswered")));
+  }
+
+  /** 入口在接近锁闭中排不了进路：信号前等候应回“前方有车，请等待”，与“排列进路”按下去被拒同一口径。 */
+  @Test
+  void anApproachLockedEntryIsNotRoutableForASignalCall() {
+    goOnDuty();
+    service.admit("T1", entering(), now);
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.SET_ROUTE));
+    press(new ConsoleTarget.Press(SignalboxState.Button.CANCEL_ROUTE));
+    service.admit("T1", entering(), now);
+
+    service.call(DRIVER, CallerRole.DRIVER, "T1", CallReason.SIGNAL);
+    press(new ConsoleTarget.CallBadge());
+    press(new ConsoleTarget.Answer(SignalboxState.Reply.WAIT));
+
+    assertEquals(Optional.of(SignalboxState.NoticeKind.REPLY_SENT), noticeKind());
   }
 
   /** 接近锁闭：车已停在入口时取消它的进路，这个入口锁 30 秒：其间排不了，到了代排时限也不代排；锁一过照常代排。 */
@@ -2575,6 +2766,29 @@ class SignallerServiceTest {
     assertEquals(1, shift.lostTime(), "T2 多出 200 秒");
     assertEquals(0, shift.conflictsGood());
     assertEquals(1, shift.conflictsBad(), "两车合计多出 210 秒");
+  }
+
+  /** 在入口等着时就已令越站的车：之后排进来的许可照样不评正点放行。 */
+  @Test
+  void aSkipOrderedBeforeTheRouteIsSetLeavesTheTrainUnscored() {
+    goOnDuty();
+    world.delays.put("T1", 0L);
+    world.stamps.put("T1", "t1#1");
+    service.admit("T1", entering(), now);
+    world.trains.skips.put(
+        "T1", new SignallerTrainDesk.Skip(YardFixtures.P2, true, Optional.empty()));
+    press(new ConsoleTarget.Train("T1"));
+    press(new ConsoleTarget.Press(SignalboxState.Button.SET_ROUTE));
+    enterZone("T1");
+
+    world.delays.put("T1", 10L);
+    world.stamps.put("T1", "t1#3");
+    world.claims.clear();
+    tick++;
+    service.tick();
+    service.endDuty(PLAYER, SignallerShift.EndReason.OFF_DUTY);
+
+    assertEquals(0, shifts.get(0).keptTime(), "越站的车不算正点放行");
   }
 
   @Test
@@ -2881,6 +3095,14 @@ class SignallerServiceTest {
 
     /** 车上有真人驾驶员或车掌的车。 */
     final Set<String> crewed = new HashSet<>();
+
+    /** 设为中心工位的控制台。 */
+    final List<Seat> seats = new ArrayList<>();
+
+    @Override
+    public List<Seat> workstations(String operator, String zone) {
+      return List.copyOf(seats);
+    }
 
     /** 已发布的时刻表（估工位工作量用）。 */
     List<Timetable> timetables = List.of();

@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 
 /**
@@ -82,10 +83,13 @@ final class ZoneSplitter {
     for (int start : starts) {
       Set<Integer> chosen = new LinkedHashSet<>();
       double load = 0.0;
-      Integer next = keepsPieces(adjacent, remaining, chosen, start) ? start : null;
-      while (next != null && chosen.size() + 1 < remaining.size()) {
-        chosen.add(next);
-        load += units.get(next).load();
+      OptionalInt next =
+          keepsPieces(adjacent, remaining, chosen, start)
+              ? OptionalInt.of(start)
+              : OptionalInt.empty();
+      while (next.isPresent() && chosen.size() + 1 < remaining.size()) {
+        chosen.add(next.getAsInt());
+        load += units.get(next.getAsInt()).load();
         best = better(best, new Candidate(Set.copyOf(chosen), load, start), target);
         if (load + EPSILON >= target) {
           break;
@@ -116,7 +120,7 @@ final class ZoneSplitter {
   }
 
   /** 已选的单元旁边、加上后剩下的不会多出一段的单元里，编号最小的那个；没有时为空。 */
-  private static Integer nextUnit(
+  private static OptionalInt nextUnit(
       Map<Integer, Set<Integer>> adjacent, Set<Integer> remaining, Set<Integer> chosen) {
     Set<Integer> frontier = new java.util.TreeSet<>();
     for (int unit : chosen) {
@@ -128,10 +132,10 @@ final class ZoneSplitter {
     }
     for (int candidate : frontier) {
       if (keepsPieces(adjacent, remaining, chosen, candidate)) {
-        return candidate;
+        return OptionalInt.of(candidate);
       }
     }
-    return null;
+    return OptionalInt.empty();
   }
 
   /** 再切走 {@code candidate} 之后，剩下的单元不为空，段数也没变多。 */

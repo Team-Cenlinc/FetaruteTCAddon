@@ -127,4 +127,20 @@ interface SignallerWorld {
    * @param fit 活着（死亡算不在岗；换游戏模式由事件另行处理）
    */
   record PlayerSpot(String name, UUID world, double x, double y, double z, boolean fit) {}
+
+  /** 绑着这片控制区、设为中心工位的控制台（指空工位用）。 */
+  default List<Seat> workstations(String operator, String zone) {
+    return List.of();
+  }
+
+  /**
+   * 一块中心工位控制台。
+   *
+   * @param screen 屏幕
+   * @param world 所在世界
+   * @param x 屏幕锚点方块的位置
+   * @param y y
+   * @param z z
+   */
+  record Seat(UUID screen, UUID world, int x, int y, int z) {}
 }

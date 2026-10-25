@@ -86,6 +86,25 @@ record ZoneMap(
   }
 
   /**
+   * 同 {@link #nests(ZoneMap)}，但这一片的站场推到节点上限被截断时，资源比不全，改按成员判：同一张图上、小区的成员是这一片成员的真子集。
+   * 控制区目录建区时已按成员保证只能嵌套，中心工位的临时小区也是大区成员的子集。
+   *
+   * @param outerMembers 这一片的成员
+   * @param innerMembers 小区的成员
+   */
+  boolean nests(
+      ZoneMap inner, Set<YardArea.Member> outerMembers, Set<YardArea.Member> innerMembers) {
+    if (nests(inner)) {
+      return true;
+    }
+    return inner != null
+        && inner.graph() == graph
+        && area.truncated()
+        && innerMembers.size() < outerMembers.size()
+        && outerMembers.containsAll(innerMembers);
+  }
+
+  /**
    * 让出嵌在里面的小区之后剩下的那一片：资源与股道去掉小区的；与小区相接的区间（一端在小区里）记作这一片的出入口，
    * 从小区出来的车在那里等这一片的许可。这些区间仍算这一片的资源：在那里等着进小区的车已在这一片里，只由小区拦。
    *

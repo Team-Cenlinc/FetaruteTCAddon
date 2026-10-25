@@ -1738,10 +1738,16 @@ signaller:
     # 列出所辖车站时的分隔符；控制台上最多列三站，再多写成 more 的样子（<stations> 为前三站，<count> 为总站数，<more> 为没列出的站数）
     separator: "、"
     more: "<stations>等 <count> 站"
-    offer: "<prefix> <white><aqua><zone></aqua> 由 <white><signaller></white> 值守。可为你划出：<yellow><stations></yellow>（约占本区工作量 <white><share></white>%）</white> <click:run_command:'/fta signal on'><hover:show_text:'<gray>点击执行：</gray> <white>/fta signal on</white>'><green>[上岗]</green></hover></click>"
-    assigned: "<prefix> <green>你负责 <aqua><zone></aqua>：<white><stations></white>。</green> <gray>从大区驶入这些车站的列车须由你放行；下岗后这些车站交还大区</gray>"
-    returned: "<prefix> <gray><white><stations></white> 已交还大区</gray>"
-    taken: "<prefix> <yellow>这块工位由 <white><signaller></white> 使用中，请到别的工位上岗</yellow>"
+    offer: "<prefix> <white><aqua><zone></aqua> 由 <white><signaller></white> 值守。可划出：<yellow><stations></yellow>（约占本区工作量 <white><share></white>%）</white> <click:run_command:'/fta signal on'><hover:show_text:'<gray>点击执行：</gray> <white>/fta signal on</white>'><green>[上岗]</green></hover></click>"
+    # 上岗提示：<boundary> 为与大区之间的分界区间；与大区不直接相邻（隔着别人管的一片）时用 assigned-detached
+    assigned: "<prefix> <green>已在 <aqua><zone></aqua> 上岗：<white><stations></white>。</green> <gray>分界在 <white><boundary></white>；从 <white><parent></white> 驶入这些车站的列车须在本工位放行；下岗后这些车站交还 <white><parent></white></gray>"
+    assigned-detached: "<prefix> <green>已在 <aqua><zone></aqua> 上岗：<white><stations></white>。</green> <gray>驶入这些车站的列车须在本工位放行；下岗后这些车站交还 <white><parent></white></gray>"
+    # 一处分界：<from> 为大区那头的站，<to> 为本工位这头的站
+    boundary: "<from>—<to> 区间"
+    returned: "<prefix> <gray><white><stations></white> 已交还 <white><parent></white></gray>"
+    # 该工位有人：<x> <y> <z> 为同区最近的空工位的位置，<distance> 为离此处的格数
+    taken: "<prefix> <yellow>该工位已由 <white><signaller></white> 使用。最近的空工位在 <white><x> <y> <z></white>（约 <white><distance></white> 格）</yellow>"
+    taken-full: "<prefix> <yellow>该工位已由 <white><signaller></white> 使用，本区其他工位也均有人值守</yellow>"
     none-left: "<prefix> <yellow><white><zone></white> 已无可分的车站</yellow>"
     exam: "<prefix> <yellow><white><zone></white> 有人正在考试或练习，暂不分配工位</yellow>"
     parent-left: "<prefix> <gray>大区 <white><zone></white> 的信号员已下岗，大区其余部分转为自动；你负责的车站不变</gray>"
@@ -1759,16 +1765,16 @@ signaller:
     incoming-general: "<prefix> <gold>列车 <white><train></white>（<white><caller></white>）呼叫信号楼</gold> <gray>请在控制台点击呼叫牌回复</gray>"
     incoming-general-bar: "<gold>列车 <white><train></white>（<caller>）呼叫信号楼</gold>"
     # 值守中的模拟事件：停车询问前方情况、报告停妥（<station> 为站名，<track> 为股道号）
-    incoming-query: "<prefix> <gold>列车 <white><train></white>（<white><caller></white>）呼叫信号楼：停车等候，请问前方情况</gold> <gray>点控制台的呼叫牌回复：被扣着或前方有车时回复「前方有车，请等待」</gray>"
+    incoming-query: "<prefix> <gold>列车 <white><train></white>（<white><caller></white>）呼叫信号楼：停车等候，请问前方情况</gold> <gray>点控制台的呼叫牌回复：被扣车或前方有车时回复「前方有车，请等待」</gray>"
     incoming-query-bar: "<gold>列车 <white><train></white>（<caller>）询问：停车等候</gold>"
     incoming-report: "<prefix> <gold>列车 <white><train></white>（<white><caller></white>）报告：已在 <white><station></white> <white><track></white> 道停妥</gold> <gray>点控制台的呼叫牌回复「已收到」</gray>"
     incoming-report-bar: "<gold>列车 <white><train></white>（<caller>）报告：已在 <station> <track> 道停妥</gold>"
     wrong-signal: "<prefix> <yellow>回复与实况不符：<white><train></white> 在信号前等候。前方区内无车、可以排列进路时，应回复「进路正在排列」并随即排列；前方有车时，应回复「前方有车，请等待」</yellow>"
     # 回复「进路正在排列」后期限内未亲手排列进路
-    unfulfilled: "<prefix> <yellow>已回复 <white><train></white>「进路正在排列」，但 20 秒内未排列进路，记答错一次</yellow>"
+    unfulfilled: "<prefix> <yellow>已回复 <white><train></white>「进路正在排列」，但 <seconds> 秒内未排列进路，记答错一次</yellow>"
     wrong-doors: "<prefix> <yellow>回复与呼叫不符：<white><train></white> 报的是车门故障，应回复「已收到」</yellow>"
     wrong-obstruction: "<prefix> <yellow>回复与呼叫不符：<white><train></white> 报的是线路异常，应回复「请以注意速度运行」</yellow>"
-    wrong-query: "<prefix> <yellow>回复与实况不符：<white><train></white> 停车等候、询问前方情况。被扣着或前方有车时，应回复「前方有车，请等待」；前方无车、可以排列进路时，应回复「进路正在排列」并随即排列</yellow>"
+    wrong-query: "<prefix> <yellow>回复与实况不符：<white><train></white> 停车等候、询问前方情况。被扣车或前方有车时，应回复「前方有车，请等待」；前方无车、可以排列进路时，应回复「进路正在排列」并随即排列</yellow>"
     wrong-report: "<prefix> <yellow>回复与呼叫不符：<white><train></white> 报告停妥，应回复「已收到」</yellow>"
   # 值守时的被动提醒（聊天栏、动作栏加提示音）
   alert:

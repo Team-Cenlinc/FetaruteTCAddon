@@ -219,7 +219,7 @@ public final class StopSkips {
           refusal = Optional.of(Refusal.BRAKING);
         }
       }
-      boolean ordered = new Order(routeUuid, i).equals(live(trainName));
+      boolean ordered = live(trainName).filter(new Order(routeUuid, i)::equals).isPresent();
       return Optional.of(new Candidate(routeUuid, i, node, ordered, refusal));
     }
     return Optional.empty();
@@ -245,10 +245,11 @@ public final class StopSkips {
    * @param trainName 列车名
    */
   public Result revoke(String trainName) {
-    Order order = live(trainName);
-    if (order == null) {
+    Optional<Order> live = live(trainName);
+    if (live.isEmpty()) {
       return new Result(Outcome.REFUSED, Optional.empty());
     }
+    Order order = live.get();
     if (braking.started(trainName, order.routeUuid(), order.stopIndex())) {
       return new Result(Outcome.REFUSED, Optional.of(Refusal.BRAKING));
     }
@@ -264,8 +265,7 @@ public final class StopSkips {
    * @param stopIndex 停站下标
    */
   public boolean skipped(String trainName, UUID routeUuid, int stopIndex) {
-    Order order = live(trainName);
-    return order != null && order.equals(new Order(routeUuid, stopIndex));
+    return live(trainName).filter(new Order(routeUuid, stopIndex)::equals).isPresent();
   }
 
   /**
@@ -275,15 +275,17 @@ public final class StopSkips {
    * @return 没有有效的越站令时为空
    */
   public Optional<NodeId> orderedStation(String trainName) {
-    Order order = live(trainName);
-    if (order == null || routes == null) {
+    if (routes == null) {
       return Optional.empty();
     }
-    return routes
-        .findById(order.routeUuid())
-        .map(RouteDefinition::waypoints)
-        .filter(nodes -> order.stopIndex() < nodes.size())
-        .map(nodes -> nodes.get(order.stopIndex()));
+    return live(trainName)
+        .flatMap(
+            order ->
+                routes
+                    .findById(order.routeUuid())
+                    .map(RouteDefinition::waypoints)
+                    .filter(nodes -> order.stopIndex() < nodes.size())
+                    .map(nodes -> nodes.get(order.stopIndex())));
   }
 
   /**
@@ -312,24 +314,24 @@ public final class StopSkips {
    *
    * <p>查不到进度时只当没有令、不删：改名时进度先迁到新名、越站令随后才迁，站牌与站台屏可能在别的线程里按旧名来问。
    */
-  private Order live(String trainName) {
+  private Optional<Order> live(String trainName) {
     String key = key(trainName);
     Order order = orders.get(key);
     if (order == null || progress == null) {
-      return null;
+      return Optional.empty();
     }
     Optional<RouteProgressRegistry.RouteProgressEntry> entry = progress.get(trainName);
     if (entry.isEmpty()) {
-      return null;
+      return Optional.empty();
     }
     boolean past =
         !entry.get().routeUuid().equals(order.routeUuid())
             || entry.get().currentIndex() > order.stopIndex();
     if (past) {
       orders.remove(key, order);
-      return null;
+      return Optional.empty();
     }
-    return order;
+    return Optional.of(order);
   }
 
   /** 有交路在这一站终到：短交路的终点、折返站一律不越（中途折返没有指令可认，折返多半就在这些站）。 */

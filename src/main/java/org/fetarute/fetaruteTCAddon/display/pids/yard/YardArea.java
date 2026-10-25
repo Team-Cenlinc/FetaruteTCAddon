@@ -61,6 +61,11 @@ public record YardArea(
   /** 区内节点的上限。 */
   public static final int MAX_NODES = 512;
 
+  /** 推到 {@value #MAX_NODES} 个节点就停了：区内可能还有没推进来的部分。 */
+  public boolean truncated() {
+    return nodes.size() >= MAX_NODES;
+  }
+
   public YardArea {
     nodes = Set.copyOf(nodes);
     edges = Set.copyOf(edges);
