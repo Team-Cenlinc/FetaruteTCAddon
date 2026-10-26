@@ -269,7 +269,9 @@ public final class SmartPlannerCycle {
     long occupancyVersion = host.occupancyVersion();
     long progressVersion = host.progressVersion();
     CompletableFuture<SmartWaitForPlanner.PlanResult> result = submit(input);
-    if (result.isDone()) {
+    // 只有调用线程直接执行时才算「同一轮出结论」；后台执行器即使抢先算完，也按约定留到下一轮回收，
+    // 免得结论落在哪一轮取决于线程调度。
+    if (executor == CALLER_THREAD) {
       consume(
           new Job(input, config, occupancyVersion, progressVersion, Map.of(), result),
           true,

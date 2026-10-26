@@ -21,10 +21,10 @@ class ZoneSplitterTest {
     return units;
   }
 
-  private static List<int[]> chain(int count) {
-    List<int[]> links = new ArrayList<>();
+  private static List<ZoneUnits.Link> chain(int count) {
+    List<ZoneUnits.Link> links = new ArrayList<>();
     for (int i = 1; i < count; i++) {
-      links.add(new int[] {i - 1, i});
+      links.add(new ZoneUnits.Link(i - 1, i));
     }
     return links;
   }
@@ -81,7 +81,8 @@ class ZoneSplitterTest {
             new ZoneSplitter.Unit("B", 40, 100, 0),
             new ZoneSplitter.Unit("C", 40, 200, 0),
             new ZoneSplitter.Unit("D", 20, 100, 100));
-    List<int[]> links = List.of(new int[] {0, 1}, new int[] {1, 2}, new int[] {1, 3});
+    List<ZoneUnits.Link> links =
+        List.of(new ZoneUnits.Link(0, 1), new ZoneUnits.Link(1, 2), new ZoneUnits.Link(1, 3));
 
     assertEquals(
         Optional.of(Set.of(0)), ZoneSplitter.split(units, links, Set.of(0, 1, 2, 3), 2, 0, 0));
@@ -96,8 +97,12 @@ class ZoneSplitterTest {
             new ZoneSplitter.Unit("B", 25, 100, 0),
             new ZoneSplitter.Unit("C", 25, 100, 100),
             new ZoneSplitter.Unit("D", 25, 0, 100));
-    List<int[]> links =
-        List.of(new int[] {0, 1}, new int[] {1, 2}, new int[] {2, 3}, new int[] {3, 0});
+    List<ZoneUnits.Link> links =
+        List.of(
+            new ZoneUnits.Link(0, 1),
+            new ZoneUnits.Link(1, 2),
+            new ZoneUnits.Link(2, 3),
+            new ZoneUnits.Link(3, 0));
 
     Set<Integer> slice =
         ZoneSplitter.split(units, links, Set.of(0, 1, 2, 3), 2, 0, 0).orElseThrow();

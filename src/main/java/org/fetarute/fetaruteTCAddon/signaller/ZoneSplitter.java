@@ -61,7 +61,7 @@ final class ZoneSplitter {
    */
   static Optional<Set<Integer>> split(
       List<Unit> units,
-      List<int[]> links,
+      List<ZoneUnits.Link> links,
       Set<Integer> remaining,
       int people,
       double anchorX,
@@ -175,15 +175,16 @@ final class ZoneSplitter {
   }
 
   /** 剩余部分里的相邻关系。 */
-  private static Map<Integer, Set<Integer>> adjacency(List<int[]> links, Set<Integer> remaining) {
+  private static Map<Integer, Set<Integer>> adjacency(
+      List<ZoneUnits.Link> links, Set<Integer> remaining) {
     Map<Integer, Set<Integer>> out = new HashMap<>();
-    for (int[] link : links) {
-      if (link.length != 2 || link[0] == link[1]) {
+    for (ZoneUnits.Link link : links) {
+      if (link.from() == link.to()) {
         continue;
       }
-      if (remaining.contains(link[0]) && remaining.contains(link[1])) {
-        out.computeIfAbsent(link[0], ignored -> new HashSet<>()).add(link[1]);
-        out.computeIfAbsent(link[1], ignored -> new HashSet<>()).add(link[0]);
+      if (remaining.contains(link.from()) && remaining.contains(link.to())) {
+        out.computeIfAbsent(link.from(), ignored -> new HashSet<>()).add(link.to());
+        out.computeIfAbsent(link.to(), ignored -> new HashSet<>()).add(link.from());
       }
     }
     return out;

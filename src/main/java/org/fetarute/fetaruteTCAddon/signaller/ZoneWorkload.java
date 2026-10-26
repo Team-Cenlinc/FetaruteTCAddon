@@ -101,16 +101,17 @@ final class ZoneWorkload {
 
   /** 停靠点在不在单元里：按节点认；DYNAMIC 写法按写法里的车站、车库认。 */
   private static boolean matches(ZoneUnits.Unit unit, String operator, TimetableStop stop) {
-    String node = stop.nodeId().orElse(null);
-    if (node == null) {
+    Optional<String> node = stop.nodeId();
+    if (node.isEmpty()) {
       return false;
     }
+    String nodeId = node.get();
     Optional<DynamicStopMatcher.DynamicSpec> spec =
-        node.regionMatches(true, 0, "DYNAMIC:", 0, "DYNAMIC:".length())
-            ? DynamicStopMatcher.parseDynamicSpec(node)
+        nodeId.regionMatches(true, 0, "DYNAMIC:", 0, "DYNAMIC:".length())
+            ? DynamicStopMatcher.parseDynamicSpec(nodeId)
             : Optional.empty();
     if (spec.isEmpty()) {
-      return unit.nodes().contains(NodeId.of(node));
+      return unit.nodes().contains(NodeId.of(nodeId));
     }
     if (!spec.get().operatorCode().equalsIgnoreCase(operator)) {
       return false;

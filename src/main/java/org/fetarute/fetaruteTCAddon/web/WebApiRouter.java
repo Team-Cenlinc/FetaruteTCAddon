@@ -85,13 +85,12 @@ final class WebApiRouter {
     String path = trimSlash(request.path());
     switch (path) {
       case "/v1/meta":
+        // server-id 也是缓存键的一部分：重载改了它，下一次请求就换，既不用重启接口，也不在主线程上等缓存过期。
+        Optional<String> id = serverId.get();
         return cache.get(
-            path,
+            path + '\u0000' + id.orElse(""),
             META_MAX_AGE,
-            () ->
-                json(
-                    WebApiViews.meta(
-                        apiVersion, serverId.get(), now(), clock.getZone(), ENDPOINTS)));
+            () -> json(WebApiViews.meta(apiVersion, id, now(), clock.getZone(), ENDPOINTS)));
       case "/v1/operators":
         return cache.get(
             path, CATALOG_MAX_AGE, () -> json(WebApiViews.operators(now(), data.operators())));

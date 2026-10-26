@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -8,6 +9,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -51,9 +53,7 @@ public final class StopSkips {
      * @param names 列车的各个名字（含传进来的这个）
      * @param guard 按一个名字问的拦截
      */
-    static Guard acrossNames(
-        java.util.function.Function<String, ? extends java.util.Collection<String>> names,
-        Guard guard) {
+    static Guard acrossNames(Function<String, ? extends Collection<String>> names, Guard guard) {
       return (trainName, station) -> {
         for (String name : names.apply(trainName)) {
           Optional<Refusal> refusal = guard.refuse(name, station);

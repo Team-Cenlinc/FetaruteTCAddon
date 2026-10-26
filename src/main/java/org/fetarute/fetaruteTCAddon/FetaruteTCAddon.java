@@ -8,10 +8,12 @@ import com.bergerkiller.bukkit.tc.signactions.SignAction;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import org.bukkit.command.CommandSender;
@@ -2267,9 +2269,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return Optional.ofNullable(reclaimManager);
   }
 
-  /** 一列车的各个名字：传进来的名字、调度解析出的车名、TrainCarts 车名与调度逻辑名（叫车、乘务员任务各按自己的车名认车）。 */
-  private java.util.Set<String> trainNames(String train) {
-    java.util.Set<String> names = new java.util.LinkedHashSet<>();
+  /**
+   * 一列车的各个名字：传进来的名字、调度解析出的车名、TrainCarts 车名与调度逻辑名（叫车、乘务员任务各按自己的车名认车）。
+   *
+   * <p>供按不同车名认车的模块共用（越站拦截、模拟呼叫挑车等），改名过渡期名字可能对不上。
+   */
+  public Set<String> trainNames(String train) {
+    Set<String> names = new LinkedHashSet<>();
     names.add(train);
     RuntimeDispatchService dispatch = runtimeDispatchService;
     if (dispatch == null || train == null || train.isBlank()) {

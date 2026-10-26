@@ -209,8 +209,14 @@ final class DispatcherSignallerWorld implements SignallerWorld {
     if (drive == null || trainName == null) {
       return false;
     }
-    return drive.driverSide().driverOf(trainName).isPresent()
-        || drive.guards().flatMap(guards -> guards.guardOfTrainName(trainName)).isPresent();
+    // 乘务员各按自己的车名认车：改名、联挂过渡期名字可能对不上，逐个名字问一遍。
+    for (String name : plugin.trainNames(trainName)) {
+      if (drive.driverSide().driverOf(name).isPresent()
+          || drive.guards().flatMap(guards -> guards.guardOfTrainName(name)).isPresent()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @Override

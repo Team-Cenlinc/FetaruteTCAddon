@@ -95,6 +95,21 @@ class SmartPlannerCycleTest {
     assertEquals(1, asyncHost.executed.size());
   }
 
+  /** 后台执行器当轮就算完，结论也留到下一轮：落在哪一轮不取决于线程调度。 */
+  @Test
+  void backgroundResultThatFinishesInlineStillWaitsForTheNextRound() {
+    FakeHost host = deadlockedHost();
+    SmartPlannerCycle cycle = new SmartPlannerCycle(host, line -> {});
+    cycle.useExecutor(Runnable::run);
+
+    cycle.runRound(Set.of(), Map.of(), T0, List.of());
+
+    assertTrue(host.executed.isEmpty(), "提交的这一轮不得执行");
+    assertTrue(cycle.hasPendingPlan());
+    cycle.runRound(Set.of(), Map.of(), T0.plusSeconds(3), List.of());
+    assertEquals(1, host.executed.size(), "下一轮回收并执行");
+  }
+
   @Test
   void executionHappensOnlyOnTheCallingThreadAfterTheRecheckPasses() throws Exception {
     FakeHost host = deadlockedHost();

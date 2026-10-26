@@ -192,6 +192,21 @@ class WebApiRouterTest {
   }
 
   @Test
+  @DisplayName("server-id 改了，下一次 meta 就换，不等缓存过期")
+  void metaFollowsTheServerIdWithoutWaitingForTheCache() {
+    serverId.set(Optional.of("survival"));
+    assertEquals(
+        "survival", json(router.route(get("/v1/meta", Map.of()))).get("serverId").getAsString());
+
+    serverId.set(Optional.of("creative"));
+    assertEquals(
+        "creative", json(router.route(get("/v1/meta", Map.of()))).get("serverId").getAsString());
+
+    serverId.set(Optional.empty());
+    assertFalse(json(router.route(get("/v1/meta", Map.of()))).has("serverId"));
+  }
+
+  @Test
   @DisplayName("线路带运营商代码；有效期内再取不再读数据，过期后重读")
   void linesAreCachedForTheirMaxAge() {
     WebResponse first = router.route(get("/v1/lines/", Map.of()));

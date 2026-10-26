@@ -1,5 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -63,14 +66,11 @@ final class SkipBraking implements StopSkips.Braking {
   /** 列车在不在动（按 TrainCarts 列车名找编组）；找不到车时当作在动，状态不明按已锁定算。 */
   static Predicate<String> movingTrains() {
     return name -> {
-      if (name == null
-          || !com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore.exists(name)) {
+      if (name == null || !TrainPropertiesStore.exists(name)) {
         return true;
       }
-      com.bergerkiller.bukkit.tc.properties.TrainProperties properties =
-          com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore.get(name);
-      com.bergerkiller.bukkit.tc.controller.MinecartGroup group =
-          properties == null ? null : properties.getHolder();
+      TrainProperties properties = TrainPropertiesStore.get(name);
+      MinecartGroup group = properties == null ? null : properties.getHolder();
       return group == null || group.isMoving();
     };
   }

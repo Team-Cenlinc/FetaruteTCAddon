@@ -26,10 +26,13 @@ import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
  * </ul>
  *
  * @param units 单元，按各单元第一个成员在控制区里的先后排
- * @param links 相邻的两个单元的编号
+ * @param links 相邻的两个单元（编号对）
  * @param gaps 相邻单元之间的各处分界（哪两个成员之间的区间），切出一片后据此写出分界
  */
-record ZoneUnits(List<Unit> units, List<int[]> links, List<Gap> gaps) {
+record ZoneUnits(List<Unit> units, List<Link> links, List<Gap> gaps) {
+
+  /** 相邻的两个单元编号：只隔区间。 */
+  record Link(int from, int to) {}
 
   ZoneUnits {
     units = List.copyOf(units);
@@ -145,7 +148,7 @@ record ZoneUnits(List<Unit> units, List<int[]> links, List<Gap> gaps) {
       memberByCode.putIfAbsent(present.get(i).code(), i);
     }
     Set<Long> seen = new LinkedHashSet<>();
-    List<int[]> links = new ArrayList<>();
+    List<Link> links = new ArrayList<>();
     Set<Long> seenGaps = new LinkedHashSet<>();
     List<Gap> gaps = new ArrayList<>();
     for (int i = 0; i < present.size(); i++) {
@@ -162,7 +165,7 @@ record ZoneUnits(List<Unit> units, List<int[]> links, List<Gap> gaps) {
         int low = Math.min(a, b);
         int high = Math.max(a, b);
         if (seen.add(((long) low << 32) | high)) {
-          links.add(new int[] {low, high});
+          links.add(new Link(low, high));
         }
         // 复线上下行各一条出口：同两个成员之间只记一处
         if (seenGaps.add(((long) Math.min(i, other) << 32) | Math.max(i, other))) {

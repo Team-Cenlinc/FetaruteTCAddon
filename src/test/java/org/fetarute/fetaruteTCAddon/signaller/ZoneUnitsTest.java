@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.signaller;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.List;
@@ -26,7 +25,7 @@ class ZoneUnitsTest {
     assertEquals(List.of(ABC, DEP), units.units().get(0).members());
     assertEquals(List.of(DEF), units.units().get(1).members());
     assertEquals(1, units.links().size());
-    assertArrayEquals(new int[] {0, 1}, units.links().get(0));
+    assertEquals(new ZoneUnits.Link(0, 1), units.links().get(0));
   }
 
   /** 管理员划好的小区整体算一个单元，要么整个分出去，要么不分。 */

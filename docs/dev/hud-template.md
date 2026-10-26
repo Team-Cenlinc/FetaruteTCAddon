@@ -74,7 +74,7 @@ TERM_ARRIVING: <template line>
 AT_LAST_STATION: <template line>
 ```
 
-- 状态：`DEFAULT` / `IDLE` / `AT_LAST_STATION` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `TERM_ARRIVING` / `IN_TRIP` / `OUT_OF_SERVICE` / `JOIN_ARRIVING` / `AT_JOIN_STATION` / `DIVIDE_ARRIVING` / `AT_DIVIDE_STATION` / `CAR_ENDS_ARRIVING` / `AT_CAR_END`
+- 状态：`DEFAULT` / `IDLE` / `AT_LAST_STATION` / `AT_STATION` / `ON_LAYOVER` / `DEPARTING` / `ARRIVING` / `TERM_ARRIVING` / `IN_TRIP` / `OUT_OF_SERVICE` / `JOIN_ARRIVING` / `AT_JOIN_STATION` / `DIVIDE_ARRIVING` / `AT_DIVIDE_STATION` / `CAR_ENDS_ARRIVING` / `AT_CAR_END` / `SKIP_PASSING`
 - 可选后缀 `_n` 表示轮播顺序（按数字升序轮播）
 - 若模板内没有任何状态行，则保持“整段文本作为单行标题”的兼容行为
 - 若某状态未定义，会优先回退到 `DEFAULT`，再回退到“无前缀模板行”
@@ -89,6 +89,8 @@ AT_LAST_STATION: <template line>
 - JOIN_ARRIVING / AT_JOIN_STATION 代替 TERM_ARRIVING / AT_LAST_STATION：交路是写了联挂（`COPL`）的主干的回程支线，运营终点就是联挂站，
   车在那里挂上主干后接着走，不是终点站（此时 `dest_eop` 已是主干的终点，`join_station` 是联挂站）。与 OUT_OF_SERVICE 一样**只有模板写了才生效**，
   没写时仍按终点站显示
+- SKIP_PASSING 代替行驶中的 IN_TRIP / DEPARTING：正接近信号员令越过的站（`skip_passing` 有值）时报“列车通过某站、本站不停车”。
+  同样**只有模板写了才生效**，没写时照旧显示行驶状态；越过站与后续站点的写法见下文“越站字段”
 - DIVIDE_ARRIVING / AT_DIVIDE_STATION、CAR_ENDS_ARRIVING / AT_CAR_END 按玩家所在的车厢决定（同一列车上的乘客可能不同），见下文“分行字段”；
   同样**只有模板写了才生效**
 - 兼容旧模板的 `STOP`/`LAYOVER`/`TERMINAL_ARRIVING` 前缀，解析时会视为 `AT_STATION`/`ON_LAYOVER`/`TERM_ARRIVING`
@@ -265,6 +267,11 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
 - `join_station` / `join_station_code` / `join_station_lang2`：联挂站（本交路的运营终点）
 - 默认模板的 ActionBar 在站内（`AT_STATION`）与行驶中（`IN_TRIP`）各轮播一句 `本列车在 {?join_station} 联挂 ┃ 继续开往 {dest_eop}`；
   到联挂站时（`JOIN_ARRIVING`、`AT_JOIN_STATION`）报“本列车在本站联挂后开往 X”与“继续乘车的乘客请留在车内”，不报终点站
+
+### 越站字段
+信号员令晚点的车越过本楼的下一个停车站时，这一站从“停靠”变成“通过”；乘客 HUD 与站牌、站台广播用同一份越站令。
+- `skip_station` / `skip_station_code` / `skip_station_lang2`：本列车要越过的站；没有越站、或越站已解除时为 `-`
+- `skip_passing` / `skip_passing_code` / `skip_passing_lang2`：正接近被越的站时才有值，其余为 `-`；`SKIP_PASSING` 状态据此替换行驶中的状态
 
 ### 换乘与晚点字段
 - `transfer_lines`：下一站可换乘的线路，每条线一个线路色色块紧跟线路代码（如 `█DS █WS`）；没有换乘为 `-`
