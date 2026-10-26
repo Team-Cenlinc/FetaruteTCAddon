@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
 import org.fetarute.fetaruteTCAddon.api.station.StationApi;
 import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
+import org.fetarute.fetaruteTCAddon.web.gtfs.GtfsFeedService;
 
 /**
  * 把公开 API 的快照排成对外的 JSON 结构（{@link LinkedHashMap}，交给 Gson）。字段用 camelCase，时刻用 ISO-8601（UTC）并附毫秒时间戳；
@@ -31,21 +32,30 @@ final class WebApiViews {
   private WebApiViews() {}
 
   /**
-   * {@code /v1/meta}：版本、本服的服务器 ID、服务器时刻与时区、接口清单。
+   * {@code /v1/meta}：版本、本服的服务器 ID、服务器时刻与时区、GTFS 版本、接口清单。
    *
    * @param serverId 配置里的 {@code server-id}；没配时不输出，多服聚合方据此认出、核对来源
+   * @param gtfs 当前静态包的版本与生成时刻；静态包还没起来时不输出
    */
   static Map<String, Object> meta(
       String apiVersion,
       Optional<String> serverId,
       Instant now,
       ZoneId zone,
-      List<String> endpoints) {
+      List<String> endpoints,
+      Optional<GtfsFeedService.Summary> gtfs) {
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("apiVersion", apiVersion);
     serverId.ifPresent(value -> out.put("serverId", value));
     out.put(GENERATED_AT, now.toString());
     out.put("timezone", zone.getId());
+    gtfs.ifPresent(
+        summary -> {
+          Map<String, Object> feed = new LinkedHashMap<>();
+          feed.put("feedVersion", summary.version());
+          feed.put(GENERATED_AT, summary.generatedAt().toString());
+          out.put("gtfs", feed);
+        });
     out.put("endpoints", List.copyOf(endpoints));
     return out;
   }

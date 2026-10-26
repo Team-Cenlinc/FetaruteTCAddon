@@ -178,7 +178,27 @@ public final class EtaRuntimeSampler {
             sampleLoad(group),
             sampleMotion(group),
             TrainTagHelper.readTagValue(group.getProperties(), ConsistKey.TRAIN_TAG)
-                .flatMap(ConsistKey::of)));
+                .flatMap(ConsistKey::of),
+            samplePosition(group)));
+  }
+
+  /**
+   * 车头此刻的世界坐标与朝向；读不到实体（卸载中）时为空。
+   *
+   * <p>GTFS-Realtime 的车辆位置用它，比在上一节点与下一节点之间插值准：弯道、道岔区不会偏离轨道，停站时也就在站台上。开销只是读一次实体坐标。
+   */
+  private static Optional<TrainRuntimeSnapshot.Position> samplePosition(MinecartGroup group) {
+    MinecartMember<?> head = group.head();
+    if (head == null || head.getEntity() == null) {
+      return Optional.empty();
+    }
+    org.bukkit.entity.Entity entity = head.getEntity().getEntity();
+    if (entity == null) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        new TrainRuntimeSnapshot.Position(
+            entity.getX(), entity.getY(), entity.getZ(), entity.getYaw()));
   }
 
   /** 车上的车种、加减速与最高速度标签；只读标签，按配置补齐留给估算时做（配置可能已重载）。 */

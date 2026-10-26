@@ -23,9 +23,9 @@ class WebResponseCacheTest {
         cache.get(
             "k",
             5,
-            () -> WebResponseCache.Rendered.of("{\"n\":" + computed.incrementAndGet() + "}"));
+            () -> WebResponseCache.Rendered.json("{\"n\":" + computed.incrementAndGet() + "}"));
     cache.get(
-        "k", 5, () -> WebResponseCache.Rendered.of("{\"n\":" + computed.incrementAndGet() + "}"));
+        "k", 5, () -> WebResponseCache.Rendered.json("{\"n\":" + computed.incrementAndGet() + "}"));
     assertEquals(1, computed.get());
     assertEquals(5, first.maxAgeSeconds());
 
@@ -34,7 +34,7 @@ class WebResponseCacheTest {
         cache.get(
             "k",
             5,
-            () -> WebResponseCache.Rendered.of("{\"n\":" + computed.incrementAndGet() + "}"));
+            () -> WebResponseCache.Rendered.json("{\"n\":" + computed.incrementAndGet() + "}"));
     assertEquals(2, computed.get());
     assertNotEquals(first.etag(), second.etag());
     assertEquals(
@@ -52,13 +52,23 @@ class WebResponseCacheTest {
         cache.get(
             "k",
             5,
-            () -> new WebResponseCache.Rendered("{\"generatedAt\":\"t1\",\"n\":1}", "{\"n\":1}"));
+            () ->
+                new WebResponseCache.Rendered(
+                    "{\"generatedAt\":\"t1\",\"n\":1}".getBytes(StandardCharsets.UTF_8),
+                    WebResponse.JSON,
+                    "{\"n\":1}",
+                    ""));
     millis.addAndGet(5_000L);
     WebResponse second =
         cache.get(
             "k",
             5,
-            () -> new WebResponseCache.Rendered("{\"generatedAt\":\"t2\",\"n\":1}", "{\"n\":1}"));
+            () ->
+                new WebResponseCache.Rendered(
+                    "{\"generatedAt\":\"t2\",\"n\":1}".getBytes(StandardCharsets.UTF_8),
+                    WebResponse.JSON,
+                    "{\"n\":1}",
+                    ""));
 
     assertNotEquals(
         new String(first.body(), StandardCharsets.UTF_8),

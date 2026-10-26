@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 50;
+  private static final int EXPECTED_CONFIG_VERSION = 51;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -216,11 +216,18 @@ public final class ConfigManager {
       logger.warning("web-api.port 配置无效: " + port + "，已回退为默认值");
       port = defaults.port();
     }
+    ConfigurationSection gtfs = section.getConfigurationSection("gtfs");
     return new WebApiSettings(
         section.getBoolean("enabled", defaults.enabled()),
         section.getString("host", defaults.host()),
         port,
-        section.getString("token", defaults.token()));
+        section.getString("token", defaults.token()),
+        gtfs == null
+            ? defaults.publisherName()
+            : gtfs.getString("publisher-name", defaults.publisherName()),
+        gtfs == null
+            ? defaults.publisherUrl()
+            : gtfs.getString("publisher-url", defaults.publisherUrl()));
   }
 
   /** 解析车钩扳手配置段；缺段或取值无效时用默认值。 */
@@ -1922,17 +1929,46 @@ public final class ConfigManager {
    * @param host 监听地址；默认只听本机
    * @param port 端口
    * @param token 共享令牌；非空时请求须带 {@code Authorization: Bearer <令牌>} 或 {@code X-Fetarute-Token}
+   * @param publisherName GTFS 发布方名称（{@code feed_info.feed_publisher_name}）
+   * @param publisherUrl GTFS 发布方地址（{@code feed_info.feed_publisher_url}，也用作各运营商的 {@code
+   *     agency_url}）
    */
-  public record WebApiSettings(boolean enabled, String host, int port, String token) {
+  public record WebApiSettings(
+      boolean enabled,
+      String host,
+      int port,
+      String token,
+      String publisherName,
+      String publisherUrl) {
+
+    /** GTFS 发布方的缺省名称：与设计稿拍板的口径一致。 */
+    public static final String DEFAULT_PUBLISHER_NAME = "Fetarute FTCA Universal";
+
+    /** GTFS 发布方地址的缺省值。 */
+    public static final String DEFAULT_PUBLISHER_URL = "https://www.fetarute.org";
 
     public WebApiSettings {
       host = host == null || host.isBlank() ? "127.0.0.1" : host.trim();
       port = port < 1 || port > 65535 ? 8780 : port;
       token = token == null ? "" : token.trim();
+      publisherName =
+          publisherName == null || publisherName.isBlank()
+              ? DEFAULT_PUBLISHER_NAME
+              : publisherName.trim();
+      publisherUrl =
+          publisherUrl == null || publisherUrl.isBlank()
+              ? DEFAULT_PUBLISHER_URL
+              : publisherUrl.trim();
+    }
+
+    /** 只关心地址/端口/令牌的调用方（测试与旧代码）：发布方取缺省值。 */
+    public WebApiSettings(boolean enabled, String host, int port, String token) {
+      this(enabled, host, port, token, DEFAULT_PUBLISHER_NAME, DEFAULT_PUBLISHER_URL);
     }
 
     public static WebApiSettings defaults() {
-      return new WebApiSettings(false, "127.0.0.1", 8780, "");
+      return new WebApiSettings(
+          false, "127.0.0.1", 8780, "", DEFAULT_PUBLISHER_NAME, DEFAULT_PUBLISHER_URL);
     }
   }
 

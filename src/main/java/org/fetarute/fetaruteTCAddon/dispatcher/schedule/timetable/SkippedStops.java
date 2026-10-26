@@ -37,6 +37,19 @@ final class SkippedStops {
     return stops != null && stops.contains(stopSequence);
   }
 
+  /**
+   * 这趟车某一天越站的全部停靠序号。
+   *
+   * <p>GTFS-Realtime 的 {@code TripUpdate} 要按车次实例逐站标 {@code SKIPPED}，逐站查询会退化成 O(站数 × 哈希)；
+   * 这里一次取出整份不可变副本，web 线程读、主线程写。
+   *
+   * @return 停靠序号；没有越站时为空集
+   */
+  Set<Integer> sequences(UUID timetableId, UUID tripId, LocalDate serviceDate) {
+    Set<Integer> stops = byTrip.get(new Key(timetableId, tripId, serviceDate));
+    return stops == null ? Set.of() : Set.copyOf(stops);
+  }
+
   /** 只保留仍在用的时刻表。 */
   void retainTimetables(Set<UUID> timetableIds) {
     byTrip.keySet().removeIf(key -> !timetableIds.contains(key.timetableId()));
