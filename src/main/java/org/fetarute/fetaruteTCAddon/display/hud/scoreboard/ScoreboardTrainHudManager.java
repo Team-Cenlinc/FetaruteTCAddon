@@ -264,6 +264,9 @@ public final class ScoreboardTrainHudManager implements Listener {
             placeholders,
             template.defines(HudState.CAR_ENDS_ARRIVING),
             template.defines(HudState.AT_CAR_END));
+    state =
+        HudStateTracker.applySkipPassing(
+            state, placeholders, template.defines(HudState.SKIP_PASSING));
     TrainFrameDelta frameDelta = updateTrainFrame(trainName, context, trainState);
     Optional<ScoreboardHudTemplate.Page> pageOpt =
         template.resolvePage(state, HudLanguageRotation.nowTicks());

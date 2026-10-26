@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabFault;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 import org.fetarute.fetaruteTCAddon.drive.driver.CongestionProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveLeaderboardRow;
@@ -215,6 +216,16 @@ public final class FtaDriveCommand {
                         CommandUx.suggestions(
                             List.of("keep", "switch", "end"), input.lastRemainingToken())))
             .handler(ctx -> handleSplit(ctx.sender(), ((String) ctx.get("option")).trim())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("call")
+            .permission(permissionOf("call"))
+            .optional("reason", StringParser.stringParser(), callReasonSuggestions())
+            .handler(
+                ctx -> handleCall(ctx.sender(), ctx.optional("reason").map(String.class::cast))));
 
     manager.command(
         manager
@@ -560,6 +571,33 @@ public final class FtaDriveCommand {
     drive.chooseSplit(player, option, outcome -> sendStartOutcome(player, drive, outcome));
   }
 
+  /** 呼叫信号员的原因补全（驾驶员与车掌的 {@code call} 共用）：只列乘务员能写的原因。 */
+  static SuggestionProvider<CommandSender> callReasonSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) ->
+            CommandUx.suggestions(
+                CallReason.crewReasons().stream().map(CallReason::key).toList(),
+                input.lastRemainingToken()));
+  }
+
+  /** 呼叫信号员：只有正在驾驶调度列车的驾驶员能用，不论车上有没有车掌；列车要在有人值守的控制区内、正接近或在入口等候。可写原因（信号前等候、车门故障、线路异常），不写为一般联系。 */
+  private void handleCall(CommandSender sender, Optional<String> reasonArg) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    Optional<CallReason> reason = reasonArg.flatMap(CallReason::parse);
+    if (reasonArg.isPresent() && reason.isEmpty()) {
+      sender.sendMessage(plugin.getLocaleManager().component("drive.command.call.bad-reason"));
+      return;
+    }
+    sender.sendMessage(drive.callSignaller(player, reason.orElse(CallReason.GENERAL)));
+  }
+
   private void handleReverser(CommandSender sender, String direction) {
     Player player = requirePlayer(sender);
     if (player == null) {
@@ -897,7 +935,7 @@ public final class FtaDriveCommand {
                         "mode",
                         record.mode(),
                         "state",
-                        locale.text("drive.task.state." + record.state().toLowerCase(Locale.ROOT)),
+                        recordState(locale, record),
                         "points",
                         String.valueOf(record.points()),
                         "grade",
@@ -906,6 +944,14 @@ public final class FtaDriveCommand {
                             : record.grade())));
           }
         });
+  }
+
+  /** 记录的终态文字：信号员班次记的是下岗原因，其余是任务终态。 */
+  private static String recordState(LocaleManager locale, DriveTaskRecord record) {
+    String state = record.state().toLowerCase(Locale.ROOT);
+    return DriveTaskRecord.MODE_SIGNALLER.equals(record.mode())
+        ? locale.text("drive.signaller.end." + state.replace('_', '-'))
+        : locale.text("drive.task.state." + state);
   }
 
   /** 排行：本周（近 7 天）或全部完成的任务按总分。 */

@@ -22,6 +22,7 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
 import org.fetarute.fetaruteTCAddon.api.line.LineApi;
 import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
@@ -146,12 +147,15 @@ class WebApiRouterTest {
 
   private final AtomicLong millis = new AtomicLong(NOW.toEpochMilli());
   private final FakeData data = new FakeData();
+  private final AtomicReference<Optional<String>> serverId =
+      new AtomicReference<>(Optional.empty());
   private final WebApiRouter router =
       new WebApiRouter(
           data,
           new WebResponseCache(millis::get),
           Clock.fixed(NOW, ZoneId.of("America/Chicago")),
-          "1.14.0");
+          "1.14.0",
+          serverId::get);
 
   private static WebRequest get(String path, Map<String, String> query) {
     return new WebRequest("GET", path, query);
@@ -174,6 +178,32 @@ class WebApiRouterTest {
     assertTrue(body.getAsJsonArray("endpoints").size() >= 5);
     assertEquals(WebApiRouter.META_MAX_AGE, response.maxAgeSeconds());
     assertFalse(response.etag().isEmpty());
+    assertFalse(body.has("serverId"), "没配 server-id 时不输出");
+  }
+
+  @Test
+  @DisplayName("meta 报本服的 server-id，聚合方据此核对来源")
+  void metaReportsTheServerId() {
+    serverId.set(Optional.of("survival"));
+
+    JsonObject body = json(router.route(get("/v1/meta", Map.of())));
+
+    assertEquals("survival", body.get("serverId").getAsString());
+  }
+
+  @Test
+  @DisplayName("server-id 改了，下一次 meta 就换，不等缓存过期")
+  void metaFollowsTheServerIdWithoutWaitingForTheCache() {
+    serverId.set(Optional.of("survival"));
+    assertEquals(
+        "survival", json(router.route(get("/v1/meta", Map.of()))).get("serverId").getAsString());
+
+    serverId.set(Optional.of("creative"));
+    assertEquals(
+        "creative", json(router.route(get("/v1/meta", Map.of()))).get("serverId").getAsString());
+
+    serverId.set(Optional.empty());
+    assertFalse(json(router.route(get("/v1/meta", Map.of()))).has("serverId"));
   }
 
   @Test

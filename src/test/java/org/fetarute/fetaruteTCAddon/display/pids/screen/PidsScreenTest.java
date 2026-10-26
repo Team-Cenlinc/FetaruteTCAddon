@@ -140,6 +140,41 @@ class PidsScreenTest {
     assertEquals(Optional.of("OFL"), stationBound.operatorCode());
   }
 
+  /** 控制区记在屏幕所属运营商名下：代码规整为大写；没有所属运营商时不能绑；换了运营商就解绑，运营商不变时保留。 */
+  @Test
+  void zonesFollowTheScreensOperator() {
+    PidsScreen bare = screen(PidsFacing.SOUTH, 3, 5);
+    assertTrue(bare.withZone(Optional.of("north"), Instant.EPOCH).zone().isEmpty(), "未绑定时不能绑控制区");
+
+    PidsScreen zoned =
+        bare.withOperator("SURC", Set.of(), Instant.EPOCH)
+            .withZone(Optional.of(" north "), Instant.EPOCH);
+    assertEquals(Optional.of("NORTH"), zoned.zone());
+    assertEquals(
+        Optional.of("NORTH"),
+        zoned.withBinding(Optional.empty(), Set.of(), Set.of("MT"), Instant.EPOCH).zone(),
+        "只绑运营商时改线路、站台过滤（不换运营商）：保留");
+
+    PidsScreen sameOperator =
+        zoned.withBinding(
+            Optional.of(new PidsStationKey("surc", "PPK")), Set.of(), Set.of(), Instant.EPOCH);
+    assertEquals(Optional.of("NORTH"), sameOperator.zone(), "改绑同一运营商的车站：保留");
+    assertEquals(
+        Optional.of("NORTH"),
+        sameOperator.withOperator("SURC", Set.of(), Instant.EPOCH).zone(),
+        "改回只绑同一运营商：保留");
+
+    assertTrue(
+        zoned
+            .withBinding(
+                Optional.of(new PidsStationKey("OFL", "HHU")), Set.of(), Set.of(), Instant.EPOCH)
+            .zone()
+            .isEmpty(),
+        "换了运营商：解绑");
+    assertTrue(zoned.withOperator("SURN", Set.of(), Instant.EPOCH).zone().isEmpty());
+    assertEquals(Optional.of("NORTH"), zoned.withMode(PidsScreen.Mode.LIVE, Instant.EPOCH).zone());
+  }
+
   /** 按运营商轮播的增删：第一次加入时本运营商排在前面，再点一次去掉，只剩一家时回到不轮播；代码规整为大写、去重。 */
   @Test
   void rotationTogglesInOrderAndCollapsesBackToOwn() {

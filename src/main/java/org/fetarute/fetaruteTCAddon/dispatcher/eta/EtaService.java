@@ -2,69 +2,52 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.InstantSource;
 import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
-import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
-import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
-import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.cache.EtaCache;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.ArrivingClassifier;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.DwellModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.PathProgressModel;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RouteStopPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpawnTrainConfigResolver;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StationThroats;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.TravelTimeModel;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainLoad;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.PlatformApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DutyContinuitySupport;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnForecastSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 
 /**
  * ETA 服务（唯一入口）。
@@ -95,21 +78,27 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
  *   <li>当前速度：快照有采样时用，没有时按首边限速
  * </ul>
  *
+ * <h2>线程</h2>
+ *
+ * <p>站台屏、站台广播在主线程调用，web-api 在自己的后台线程调用站牌（钩子背后的注册表已能容忍非主线程的只读访问，见 {@code docs/dev/web-api.md}）。计算本体在
+ * {@link EtaCalculator}，外部事实经由 {@link EtaSources} 读取：
+ *
+ * <ul>
+ *   <li>单车与票据 ETA（{@link #getForTrain}、{@link #getForTicket}）在调用线程上现算，带短时缓存。只算一列车，开销小； HUD
+ *       要靠它及时报“即将到站”，经过节点时还会主动作废（{@link #invalidateTrainEta}），所以不改成先给旧值。
+ *   <li>站牌（{@link #getBoard}）要遍历全网列车与票据，交给后台线程：调用线程把钩子背后的事实拷成 {@link EtaBoardInput}， 后台只读这份拷贝算站牌。
+ *       缓存新鲜时直接返回；过期但不太旧时返回旧值并在后台刷新（同一块站牌同一时刻只有一个刷新任务）；没有旧值、旧值太旧、 调度图换过或后台停用时在调用线程上现算。调用线程从不等后台。
+ * </ul>
+ *
+ * <p>插件停用时调用 {@link #close()}，之后站牌一律在调用线程上现算。
+ *
  * @see RunCurveModel
  * @see SpawnTrainConfigResolver
  */
-public final class EtaService {
-
-  private static final int FORECAST_LIMIT_PER_SERVICE = 5;
+public final class EtaService implements AutoCloseable {
 
   /** 站牌单次重算超过该耗时（纳秒）时输出调试日志。 */
   private static final long SLOW_BOARD_NANOS = 5_000_000L;
-
-  /** 默认速度（blocks/s），当边无限速配置时使用。 */
-  private static final double DEFAULT_FALLBACK_SPEED_BPS = 6.0;
-
-  /** 站牌行站台待定或无法解析时的站台号。 */
-  private static final String UNKNOWN_PLATFORM = "-";
 
   /**
    * 未知时长扣停的估算上限（秒）。
@@ -126,13 +115,43 @@ public final class EtaService {
    */
   static final long STATION_DEPARTURE_OVERHEAD_SEC = 5L;
 
+  /** 站牌结果在这么久内直接返回。 */
+  static final Duration BOARD_FRESH = Duration.ofMillis(1500);
+
+  /**
+   * 站牌旧值最多用多久：超过时不再先给旧值，在调用线程上现算。
+   *
+   * <p>站台屏按 {@code render.snapshot-ttl-seconds}（默认 5 秒）取一次站牌，上限要比它宽，屏幕才能一直走后台刷新； 又不能太宽，偶尔查一次的命令与公开
+   * API 不该拿到很久以前的站牌。
+   */
+  static final Duration BOARD_MAX_STALE = Duration.ofSeconds(15);
+
+  /**
+   * 后台刷新共用同一份站牌输入的时长：这段时间内各站的刷新共用一份拷贝，拷贝开销不随车站数增长。
+   *
+   * <p>须短于 {@link #BOARD_FRESH}：过期的站牌刷新时用的输入一定比它自己的输入新。
+   */
+  static final Duration BOARD_INPUT_SHARE = Duration.ofMillis(500);
+
+  /** 每写入多少次站牌清一遍太旧的条目（车站改名、撤屏后旧键不会再被读到）。 */
+  private static final int BOARD_PURGE_EVERY = 256;
+
+  /** 自有后台线程空闲多久后退出。 */
+  private static final long BOARD_THREAD_IDLE_SECONDS = 30L;
+
+  private static final AtomicInteger BOARD_THREAD_IDS = new AtomicInteger();
+
   private final TrainSnapshotStore snapshotStore;
   private final RailGraphService railGraphService;
   private final RouteDefinitionCache routeDefinitions;
+  private final InstantSource clock;
 
-  private final PathProgressModel pathProgressModel = new PathProgressModel();
-  private final DwellModel dwellModel = new DwellModel();
-  private final ArrivingClassifier arrivingClassifier = new ArrivingClassifier();
+  /** 咽喉查找：按图实例缓存，单车 ETA 与后台站牌共用。 */
+  private final StationThroats stationThroats = new StationThroats();
+
+  private final EtaSources.Routes liveRoutes;
+  private final EtaSources.Trains liveTrains;
+  private final EtaSources.Tickets liveTickets = new LiveTickets();
 
   /** 运行时真实停车状态（列车名 → 当前 STOP 生命周期）；未接入时视为无扣停。 */
   private volatile java.util.function.Function<String, Optional<RuntimeStopState>> stopStates;
@@ -175,6 +194,8 @@ public final class EtaService {
   /** 运行时哪些下标已有实际节点；未接入时把实际节点与声明节点不同的下标视为已定站台。 */
   private volatile PlacedStops placedStops;
 
+  private volatile SkippedStops skippedStops;
+
   private volatile PlannedPlatforms plannedPlatforms;
 
   /** 还没派出的票预先指定的站台（叫车）；为 null 时没有。 */
@@ -191,8 +212,29 @@ public final class EtaService {
 
   private final EtaCache<String, EtaResult> trainCache = new EtaCache<>(Duration.ofMillis(800));
   private final EtaCache<String, EtaResult> ticketCache = new EtaCache<>(Duration.ofMillis(1200));
-  private final EtaCache<String, BoardResult> boardCache = new EtaCache<>(Duration.ofMillis(1500));
-  private final EtaBoardStats boardStats = new EtaBoardStats(Instant.now());
+  private final EtaBoardStats boardStats;
+
+  /** 站牌：键 → 最近一次结果与它的输入戳。 */
+  private final ConcurrentMap<String, BoardEntry> boards = new ConcurrentHashMap<>();
+
+  /** 正在后台刷新的站牌键。 */
+  private final ConcurrentMap<String, InFlight> refreshing = new ConcurrentHashMap<>();
+
+  private final AtomicLong inputSequence = new AtomicLong();
+  private final AtomicInteger boardPuts = new AtomicInteger();
+
+  /** 最近一次拷贝的站牌输入，{@link #BOARD_INPUT_SHARE} 内的后台刷新共用。 */
+  private volatile EtaBoardInput sharedInput;
+
+  /** 接入的后台执行器；为 null 时用自有线程。 */
+  private volatile Executor injectedExecutor;
+
+  private final Object executorLock = new Object();
+
+  /** 自有后台线程（按需创建，空闲后线程退出）；由 {@link #executorLock} 保护。 */
+  private ThreadPoolExecutor ownExecutor;
+
+  private volatile boolean closed;
 
   /** 未发车票据的车种推断，按交路缓存。 */
   private final SpawnTrainConfigResolver spawnTrainConfigs;
@@ -217,10 +259,25 @@ public final class EtaService {
       TrainSnapshotStore snapshotStore,
       RailGraphService railGraphService,
       RouteDefinitionCache routeDefinitions) {
+    this(snapshotStore, railGraphService, routeDefinitions, InstantSource.system());
+  }
+
+  /**
+   * @param clock 时钟（测试注入）
+   */
+  EtaService(
+      TrainSnapshotStore snapshotStore,
+      RailGraphService railGraphService,
+      RouteDefinitionCache routeDefinitions,
+      InstantSource clock) {
     // ETA 不用占用预判估算等待，改读运行时真实停车状态（见 attachRuntimeStopStates）。
     this.snapshotStore = Objects.requireNonNull(snapshotStore, "snapshotStore");
     this.railGraphService = Objects.requireNonNull(railGraphService, "railGraphService");
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
+    this.clock = Objects.requireNonNull(clock, "clock");
+    this.liveRoutes = EtaSources.Routes.of(routeDefinitions);
+    this.liveTrains = EtaSources.Trains.of(snapshotStore);
+    this.boardStats = new EtaBoardStats(clock.instant());
     this.spawnTrainConfigs =
         new SpawnTrainConfigResolver(this::readRoute, this::readRouteStops, this::readDepotSign);
     routeDefinitions.addChangeListener(spawnTrainConfigs::invalidateAll);
@@ -229,6 +286,35 @@ public final class EtaService {
   /** 接入调试日志（读取外部状态失败时留痕）。 */
   public void attachDebugLogger(java.util.function.Consumer<String> logger) {
     this.debugLogger = logger == null ? message -> {} : logger;
+  }
+
+  /**
+   * 接入站牌后台刷新用的执行器。
+   *
+   * <p>不接入时用自有的单个守护线程（按需创建，空闲 30 秒后退出）。执行器拒绝任务时这一次在调用线程上现算。
+   *
+   * @param executor 执行器；传 null 恢复用自有线程
+   */
+  public void attachBoardExecutor(Executor executor) {
+    this.injectedExecutor = executor;
+  }
+
+  /**
+   * 停用站牌后台刷新：关掉自有线程，之后站牌一律在调用线程上现算（与缓存过期即重算相同）。
+   *
+   * <p>插件停用时调用；只发出关闭，不等正在算的那一次（主线程不阻塞），它算完写回缓存后线程退出。接入的执行器由接入方自己关。
+   */
+  @Override
+  public void close() {
+    ThreadPoolExecutor executor;
+    synchronized (executorLock) {
+      closed = true;
+      executor = ownExecutor;
+      ownExecutor = null;
+    }
+    if (executor != null) {
+      executor.shutdown();
+    }
   }
 
   /**
@@ -314,6 +400,27 @@ public final class EtaService {
    */
   public void attachPlacedStops(PlacedStops placedStops) {
     this.placedStops = placedStops;
+  }
+
+  /**
+   * 接入信号员令越过的停车站：站牌上这趟车在那一站成为通过行。
+   *
+   * @param skippedStops 来源；传 null 表示断开
+   */
+  public void attachSkippedStops(SkippedStops skippedStops) {
+    this.skippedStops = skippedStops;
+  }
+
+  /** 信号员令越过的停车站（只在内存里，读可在任意线程）。 */
+  @FunctionalInterface
+  public interface SkippedStops {
+
+    /**
+     * @param trainName 列车名
+     * @param routeUuid 列车当前交路
+     * @param index 交路节点下标
+     */
+    boolean skipped(String trainName, UUID routeUuid, int index);
   }
 
   /** 运行时某停靠下标是否已有实际节点（DYNAMIC 已选台，或到站时记下了实际股道）。 */
@@ -455,16 +562,6 @@ public final class EtaService {
     }
   }
 
-  /** 当前走行参数：没有配置时按默认加减速、不做进站限速、不加停站开销。 */
-  private RunCurveModel.Settings runSettings() {
-    ConfigManager.ConfigView config = currentConfig();
-    if (config == null) {
-      return new RunCurveModel.Settings(
-          SpeedCurve.defaults(), DEFAULT_FALLBACK_SPEED_BPS, StopApproach.Rule.disabled(), 0);
-    }
-    return RunCurveModel.Settings.fromConfig(config, DEFAULT_FALLBACK_SPEED_BPS);
-  }
-
   /**
    * 查询指定列车的 ETA。
    *
@@ -472,13 +569,13 @@ public final class EtaService {
    * @param target 目标
    */
   public EtaResult getForTrain(String trainName, EtaTarget target) {
-    Instant now = Instant.now();
+    Instant now = clock.instant();
     String key = trainName + "|" + (target == null ? "null" : target);
     return trainCache
         .getIfFresh(key, now)
         .orElseGet(
             () -> {
-              EtaResult r = computeForTrain(trainName, target, now);
+              EtaResult r = liveCalculator().computeForTrain(trainName, target, now);
               trainCache.put(key, r, now);
               return r;
             });
@@ -496,19 +593,24 @@ public final class EtaService {
     trainCache.invalidateByPrefix(trainName + "|");
   }
 
+  /** 丢弃各站牌的缓存，下一次查询现算：某列车的停站计划变了（信号员令越站或撤销），旧站牌会把它画错好几秒。 */
+  public void invalidateBoards() {
+    boards.clear();
+  }
+
   /**
    * 预排班/未发车 ETA。
    *
    * <p>说明：仅基于已生成的票据（pending queue），不会读取 SpawnPlan 本身。
    */
   public EtaResult getForTicket(String ticketId) {
-    Instant now = Instant.now();
+    Instant now = clock.instant();
     String key = ticketId == null ? "null" : ticketId.trim();
     return ticketCache
         .getIfFresh(key, now)
         .orElseGet(
             () -> {
-              EtaResult r = computeForTicket(ticketId, now);
+              EtaResult r = liveCalculator().computeForTicket(ticketId, now);
               ticketCache.put(key, r, now);
               return r;
             });
@@ -531,24 +633,164 @@ public final class EtaService {
    *   <li>仅保留 ETA 落在 horizon 窗口内的行，窗口外会被过滤。
    *   <li>站点匹配依赖 RouteDefinition 的节点序列，若站点未映射到图节点会被忽略。
    * </ul>
+   *
+   * <p>新鲜度：{@link #BOARD_FRESH} 内直接返回缓存；之后、{@link #BOARD_MAX_STALE} 以内返回上一次的结果并在后台刷新，
+   * 下一次查询拿到新结果。行里的时刻都是绝对时刻，旧结果只是晚一点反映列车状态的变化。调度图换过之后不再返回按旧图算的结果。
    */
   public BoardResult getBoard(String stationId, String lineId, Duration horizon) {
-    Instant now = Instant.now();
+    if (stationId == null || stationId.isBlank()) {
+      return new BoardResult(List.of());
+    }
+    Instant now = clock.instant();
     String key =
-        (stationId == null ? "null" : stationId.trim())
+        stationId.trim()
             + "|"
             + (lineId == null ? "null" : lineId.trim())
             + "|"
             + (horizon == null ? "null" : horizon.toString());
-    Optional<BoardResult> cached = boardCache.getIfFresh(key, now);
-    if (cached.isPresent()) {
-      boardStats.recordCacheHit();
-      return cached.get();
+    long graphVersion = railGraphService.snapshotVersion();
+    BoardEntry cached = boards.get(key);
+    if (cached != null && cached.graphVersion() == graphVersion) {
+      Duration age = Duration.between(cached.capturedAt(), now);
+      if (age.compareTo(BOARD_FRESH) <= 0) {
+        boardStats.recordCacheHit();
+        return cached.result();
+      }
+      if (age.compareTo(BOARD_MAX_STALE) <= 0
+          && refreshInBackground(key, stationId, lineId, horizon, now, graphVersion)) {
+        boardStats.recordStaleHit();
+        return cached.result();
+      }
     }
+    return computeBoardNow(key, stationId, lineId, horizon, now, graphVersion);
+  }
+
+  /** 在调用线程上拷贝输入并算站牌（冷启动、旧值太旧、换图或后台不可用时）。 */
+  private BoardResult computeBoardNow(
+      String key,
+      String stationId,
+      String lineId,
+      Duration horizon,
+      Instant now,
+      long graphVersion) {
     long startNanos = System.nanoTime();
-    BoardResult result = computeBoard(stationId, lineId, horizon, now);
+    EtaBoardInput input = captureInput(now, EtaCalculator.boardWindow(horizon), graphVersion);
+    BoardResult result = computeBoard(input, stationId, lineId, horizon);
     long elapsedNanos = System.nanoTime() - startNanos;
     boardStats.recordCompute(elapsedNanos);
+    logIfSlow(stationId, elapsedNanos, result, "caller");
+    store(key, input, result);
+    return result;
+  }
+
+  /**
+   * 交给后台刷新这块站牌。
+   *
+   * @return 旧值可以先用（已在刷新，或刚交出刷新任务，或拷贝输入失败、继续用旧值）；后台不可用时为 false，由调用方现算
+   */
+  private boolean refreshInBackground(
+      String key,
+      String stationId,
+      String lineId,
+      Duration horizon,
+      Instant now,
+      long graphVersion) {
+    if (closed) {
+      return false;
+    }
+    InFlight mine = new InFlight(now);
+    InFlight running = refreshing.putIfAbsent(key, mine);
+    if (running != null
+        && (Duration.between(running.since(), now).compareTo(BOARD_MAX_STALE) <= 0
+            || !refreshing.replace(key, running, mine))) {
+      return true;
+    }
+    // 走到这里：没有在刷新，或上一次交出的任务迟迟没跑（执行器丢了任务），由这一次接手重交。
+    boolean handedOff = false;
+    try {
+      Executor executor = boardExecutor();
+      if (executor == null) {
+        return false;
+      }
+      EtaBoardInput input;
+      try {
+        input = sharedInput(now, EtaCalculator.boardWindow(horizon), graphVersion);
+      } catch (RuntimeException ex) {
+        // 钩子读取失败：先继续用旧值，旧值太旧之后由调用线程现算（失败照常抛给调用方）。
+        debugLogger.accept("ETA_BOARD_CAPTURE_FAILED station=" + stationId + " error=" + ex);
+        return true;
+      }
+      executor.execute(() -> refresh(key, mine, input, stationId, lineId, horizon));
+      handedOff = true;
+      return true;
+    } catch (RuntimeException ex) {
+      // 执行器拒收（已关闭，或插件停用后调度器不再接任务）：这一次由调用线程现算。
+      debugLogger.accept("ETA_BOARD_REFRESH_REJECTED station=" + stationId + " error=" + ex);
+      return false;
+    } finally {
+      if (!handedOff) {
+        refreshing.remove(key, mine);
+      }
+    }
+  }
+
+  /** 交给后台的一次刷新：交出时刻；按身份比较，迟到的任务清不掉后来接手的标记。 */
+  private static final class InFlight {
+    private final Instant since;
+
+    private InFlight(Instant since) {
+      this.since = since;
+    }
+
+    private Instant since() {
+      return since;
+    }
+  }
+
+  /** 后台线程：按拷好的输入算站牌并写回。算的期间换了图，结果作废。 */
+  private void refresh(
+      String key,
+      InFlight mine,
+      EtaBoardInput input,
+      String stationId,
+      String lineId,
+      Duration horizon) {
+    try {
+      long startNanos = System.nanoTime();
+      BoardResult result = computeBoard(input, stationId, lineId, horizon);
+      long elapsedNanos = System.nanoTime() - startNanos;
+      boardStats.recordRefresh(elapsedNanos);
+      logIfSlow(stationId, elapsedNanos, result, "refresh");
+      if (railGraphService.snapshotVersion() == input.graphVersion()) {
+        store(key, input, result);
+      }
+    } catch (RuntimeException ex) {
+      debugLogger.accept("ETA_BOARD_REFRESH_FAILED station=" + stationId + " error=" + ex);
+    } finally {
+      refreshing.remove(key, mine);
+    }
+  }
+
+  /** 写回站牌：只留输入较新的那一份；顺带定期清掉太旧的条目。 */
+  private void store(String key, EtaBoardInput input, BoardResult result) {
+    BoardEntry entry =
+        new BoardEntry(
+            result,
+            input.capturedAt(),
+            input.graphVersion(),
+            input.trainsVersion(),
+            input.sequence());
+    boards.merge(key, entry, (old, fresh) -> fresh.sequence() >= old.sequence() ? fresh : old);
+    if (boardPuts.incrementAndGet() % BOARD_PURGE_EVERY == 0) {
+      Instant now = clock.instant();
+      boards
+          .values()
+          .removeIf(
+              known -> Duration.between(known.capturedAt(), now).compareTo(BOARD_MAX_STALE) > 0);
+    }
+  }
+
+  private void logIfSlow(String stationId, long elapsedNanos, BoardResult result, String thread) {
     if (elapsedNanos > SLOW_BOARD_NANOS) {
       debugLogger.accept(
           "ETA_BOARD_SLOW station="
@@ -556,11 +798,92 @@ public final class EtaService {
               + " ms="
               + elapsedNanos / 1_000_000L
               + " rows="
-              + result.rows().size());
+              + result.rows().size()
+              + " thread="
+              + thread);
     }
-    boardCache.put(key, result, now);
-    return result;
   }
+
+  /** {@link #BOARD_INPUT_SHARE} 内、同一时间窗、同一张图时共用最近一次的拷贝，否则重新拷贝。 */
+  private EtaBoardInput sharedInput(Instant now, Duration window, long graphVersion) {
+    EtaBoardInput shared = this.sharedInput;
+    if (shared != null
+        && shared.graphVersion() == graphVersion
+        && shared.window().equals(window)
+        && !now.isBefore(shared.capturedAt())
+        && Duration.between(shared.capturedAt(), now).compareTo(BOARD_INPUT_SHARE) < 0) {
+      return shared;
+    }
+    return captureInput(now, window, graphVersion);
+  }
+
+  /** 在调用线程上拷贝站牌输入，并记为最近一次的拷贝。 */
+  private EtaBoardInput captureInput(Instant now, Duration window, long graphVersion) {
+    long startNanos = System.nanoTime();
+    EtaBoardInput input =
+        EtaBoardInput.capture(
+            liveSources(),
+            inputSequence.incrementAndGet(),
+            now,
+            window,
+            graphVersion,
+            snapshotStore.version(),
+            debugLogger);
+    boardStats.recordCapture(System.nanoTime() - startNanos);
+    this.sharedInput = input;
+    return input;
+  }
+
+  /** 后台执行器；停用后为 null。 */
+  private Executor boardExecutor() {
+    Executor injected = this.injectedExecutor;
+    synchronized (executorLock) {
+      if (closed) {
+        return null;
+      }
+      if (injected != null) {
+        return injected;
+      }
+      if (ownExecutor == null) {
+        ownExecutor = newBoardThread();
+      }
+      return ownExecutor;
+    }
+  }
+
+  private static ThreadPoolExecutor newBoardThread() {
+    String name = "FetaruteTCAddon-ETA-Board-" + BOARD_THREAD_IDS.incrementAndGet();
+    ThreadPoolExecutor executor =
+        new ThreadPoolExecutor(
+            1,
+            1,
+            BOARD_THREAD_IDLE_SECONDS,
+            TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(),
+            runnable -> {
+              Thread thread = new Thread(runnable, name);
+              thread.setDaemon(true);
+              return thread;
+            });
+    executor.allowCoreThreadTimeOut(true);
+    return executor;
+  }
+
+  /**
+   * 站牌缓存条目。
+   *
+   * @param result 站牌
+   * @param capturedAt 输入的拷贝时刻（站牌按它算，新鲜度按它判）
+   * @param graphVersion 输入的调度图快照版本
+   * @param trainsVersion 输入的列车快照版本
+   * @param sequence 输入的拷贝序号
+   */
+  private record BoardEntry(
+      BoardResult result,
+      Instant capturedAt,
+      long graphVersion,
+      long trainsVersion,
+      long sequence) {}
 
   /** 返回站牌查询的统计快照：缓存命中、重算次数与重算耗时。 */
   public EtaBoardStats.Snapshot boardStatsSnapshot() {
@@ -569,7 +892,7 @@ public final class EtaService {
 
   /** 清零站牌查询统计，起算时刻改为现在。 */
   public void resetBoardStats() {
-    boardStats.reset(Instant.now());
+    boardStats.reset(clock.instant());
   }
 
   /**
@@ -587,6 +910,24 @@ public final class EtaService {
     return getBoard(stationId, lineId, horizon);
   }
 
+  /** 拷贝站牌输入（测试用：与 {@link #computeBoard} 搭配，验证拷贝与现读结果一致）。 */
+  EtaBoardInput captureBoardInput(Instant now, Duration horizon) {
+    return captureInput(
+        now, EtaCalculator.boardWindow(horizon), railGraphService.snapshotVersion());
+  }
+
+  /** 按拷好的输入算站牌：不读任何钩子，可在后台线程调用。 */
+  BoardResult computeBoard(EtaBoardInput input, String stationId, String lineId, Duration horizon) {
+    return new EtaCalculator(input.sources(), railGraphService, stationThroats, debugLogger)
+        .computeBoard(stationId, lineId, horizon, input.capturedAt());
+  }
+
+  /** 直接读钩子算站牌（测试用：拷贝前的原始算法）。 */
+  BoardResult computeBoardFromLiveSources(
+      String stationId, String lineId, Duration horizon, Instant now) {
+    return liveCalculator().computeBoard(stationId, lineId, horizon, now);
+  }
+
   /** 查询运行时采样快照（用于调试输出）。 */
   public Optional<TrainRuntimeSnapshot> getRuntimeSnapshot(String trainName) {
     return snapshotStore.getSnapshot(trainName);
@@ -600,15 +941,7 @@ public final class EtaService {
    * @return 列车无快照、交路缺失或下标越界时为空
    */
   public Optional<NodeId> effectiveStopNode(String trainName, int stopIndex) {
-    if (trainName == null || trainName.isBlank() || stopIndex < 0) {
-      return Optional.empty();
-    }
-    return snapshotStore
-        .getSnapshot(trainName)
-        .flatMap(snap -> routeDefinitions.findById(snap.routeUuid()))
-        .map(route -> stopPlan(trainName, route))
-        .filter(plan -> stopIndex < plan.size())
-        .map(plan -> plan.node(stopIndex));
+    return liveCalculator().effectiveStopNode(trainName, stopIndex);
   }
 
   /**
@@ -617,15 +950,7 @@ public final class EtaService {
    * <p>与 {@link #effectiveStopNode} 的区别：未选台时那里给占位股道，这里给空，显示站台号的地方据此写“待定”而不是占位股道。
    */
   public Optional<NodeId> placedStopNode(String trainName, int stopIndex) {
-    if (trainName == null || trainName.isBlank() || stopIndex < 0) {
-      return Optional.empty();
-    }
-    return snapshotStore
-        .getSnapshot(trainName)
-        .flatMap(snap -> routeDefinitions.findById(snap.routeUuid()))
-        .map(route -> stopPlan(trainName, route))
-        .filter(plan -> stopIndex < plan.size() && !plan.unresolvedDynamic(stopIndex))
-        .map(plan -> plan.node(stopIndex));
+    return liveCalculator().placedStopNode(trainName, stopIndex);
   }
 
   /** 获取当前采样到的列车名集合（用于补全）。 */
@@ -644,321 +969,12 @@ public final class EtaService {
    * </ul>
    */
   public List<String> suggestTicketIds() {
-    Set<String> out = new HashSet<>();
-    for (var entry : snapshotStore.snapshot().entrySet()) {
-      TrainRuntimeSnapshot snap = entry.getValue();
-      if (snap == null) {
-        continue;
-      }
-      snap.ticketId().ifPresent(out::add);
-    }
-    for (SpawnTicket ticket : collectPendingTickets()) {
-      if (ticket != null && ticket.id() != null) {
-        out.add(ticket.id().toString());
-      }
-    }
-    return out.stream().sorted(String.CASE_INSENSITIVE_ORDER).toList();
+    return liveCalculator().suggestTicketIds();
   }
 
   /** 供 /fta eta 命令 tab 补全使用：返回已知 lineId 候选（来自运行中列车与待发车票据）。 */
   public List<String> suggestLineIds() {
-    Set<String> out = new HashSet<>();
-    for (TrainRuntimeSnapshot snap : snapshotStore.snapshot().values()) {
-      if (snap == null) {
-        continue;
-      }
-      routeDefinitions
-          .findById(snap.routeUuid())
-          .flatMap(RouteDefinition::metadata)
-          .map(RouteMetadata::lineId)
-          .filter(id -> id != null && !id.isBlank())
-          .ifPresent(out::add);
-    }
-    for (SpawnTicket ticket : collectPendingTickets()) {
-      if (ticket == null || ticket.service() == null) {
-        continue;
-      }
-      String line = ticket.service().lineCode();
-      if (line != null && !line.isBlank()) {
-        out.add(line);
-      }
-    }
-    return out.stream().sorted(String.CASE_INSENSITIVE_ORDER).toList();
-  }
-
-  private EtaResult computeForTrain(String trainName, EtaTarget target, Instant now) {
-    if (trainName == null || trainName.isBlank()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_VEHICLE));
-    }
-    Optional<TrainRuntimeSnapshot> snapOpt = snapshotStore.getSnapshot(trainName);
-    if (snapOpt.isEmpty()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_VEHICLE));
-    }
-    TrainRuntimeSnapshot snap = snapOpt.get();
-
-    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(snap.routeUuid());
-    if (routeOpt.isEmpty()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_ROUTE));
-    }
-    RouteDefinition route = routeOpt.get();
-
-    RailGraph graph =
-        railGraphService
-            .getSnapshot(snap.worldId())
-            .map(
-                snapshot ->
-                    RailGraphService.runtimeGraph(
-                        railGraphService, snap.worldId(), snapshot.graph()))
-            .orElse(null);
-    if (graph == null) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
-    }
-
-    RouteStopPlan plan = stopPlan(trainName, route);
-    Optional<TargetSelection> targetSelOpt =
-        resolveTargetSelection(route, plan, snap.routeIndex(), target);
-    if (targetSelOpt.isEmpty()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_TARGET));
-    }
-    TargetSelection targetSel = targetSelOpt.get();
-
-    // 使用 lastPassedNodeId 从中间图节点开始计算剩余路径，优化 arriving 判定
-    NodeId lastPassed = snap.lastPassedNodeId().orElse(null);
-    TravelTimeModel effectiveTravelTimeModel = travelTimeModelForTrain(snap, now);
-    Optional<RoutedTarget> routedOpt =
-        routeToTarget(
-            graph,
-            effectiveTravelTimeModel,
-            plan,
-            snap.routeIndex(),
-            targetSel.index(),
-            lastPassed,
-            snap.traveledSinceLastPassedBlocks(),
-            snap.currentSpeedBps());
-    if (routedOpt.isEmpty()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
-    }
-    RoutedTarget routed = routedOpt.get();
-    PathProgressModel.PathProgress progress = routed.progress();
-    int travelSec = routed.travelSec();
-    // 本站停站（含到站后、停站计时尚未开始的空档）+ 途中各停车点的计划停站
-    int currentDwellSec = currentDwellSec(trainName, snap, plan);
-    int dwellSec =
-        currentDwellSec
-            + plan.stopSecondsBetween(
-                snap.routeIndex(),
-                targetSel.index(),
-                graph,
-                effectiveTravelTimeModel.stationStopOverheadSeconds());
-
-    // 等待只看运行时真实的停车状态：旧的占用预判（lookahead preview）与现行准入口径不一致，
-    // 既会在车被扣住时报“无需等待”，也会在畅通时误报阻塞，让 HUD 在进站时丢掉“即将到站”。
-    HoldEstimate hold = estimateHold(trainName, snap, currentDwellSec, now);
-    int waitSec = hold.waitSec();
-    List<EtaReason> reasons = new ArrayList<>(hold.reasons());
-
-    int remainingEdgeCount = progress.remainingEdgeCount();
-    // 若目标站点有咽喉，检查到咽喉的剩余边数，取较小值用于 arriving 判定
-    Optional<Integer> throatEdgesOpt =
-        remainingEdgesToThroat(
-            graph, plan.effectiveNodes(), snap.routeIndex(), routed.node(), lastPassed);
-    int edgesForArriving =
-        throatEdgesOpt.map(te -> Math.min(te, remainingEdgeCount)).orElse(remainingEdgeCount);
-    ArrivingClassifier.Arriving arriving =
-        arrivingClassifier.classify(edgesForArriving, hold.blocked());
-    if (!isApproachTarget(routed.node()) && arriving.arriving()) {
-      arriving = new ArrivingClassifier.Arriving(false, EtaConfidence.LOW);
-    }
-
-    long etaMillis = now.plusSeconds((long) travelSec + dwellSec + waitSec).toEpochMilli();
-    int minutesRounded =
-        (int) Math.max(0L, Math.round(((long) travelSec + dwellSec + waitSec) / 60.0));
-
-    String statusText = arriving.arriving() ? "Arriving" : minutesRounded + "m";
-    if (hold.delaySec() >= 60L) {
-      statusText = "Delayed " + (hold.delaySec() / 60L) + "m";
-    }
-
-    EtaConfidence conf = hold.blocked() ? EtaConfidence.LOW : arriving.confidence();
-    return new EtaResult(
-        arriving.arriving(),
-        statusText,
-        etaMillis,
-        minutesRounded,
-        travelSec,
-        dwellSec,
-        waitSec,
-        reasons,
-        conf);
-  }
-
-  /** 列车眼中的交路停靠：DYNAMIC 已选台处换成实际股道（与控车读同一份有效节点）。 */
-  private RouteStopPlan stopPlan(String trainName, RouteDefinition route) {
-    List<NodeId> effective = route.waypoints();
-    java.util.function.BiFunction<String, RouteDefinition, List<NodeId>> source =
-        this.effectiveWaypoints;
-    if (source != null && trainName != null) {
-      try {
-        List<NodeId> resolved = source.apply(trainName, route);
-        if (resolved != null) {
-          effective = resolved;
-        }
-      } catch (RuntimeException ex) {
-        // ETA 是展示层：读不到实际节点就按声明节点估算，但必须留痕。
-        debugLogger.accept(
-            "ETA_EFFECTIVE_WAYPOINTS_READ_FAILED train=" + trainName + " error=" + ex);
-      }
-    }
-    List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    PlacedStops placed = this.placedStops;
-    if (placed == null || trainName == null) {
-      return RouteStopPlan.of(route.waypoints(), effective, stops);
-    }
-    return RouteStopPlan.of(
-        route.waypoints(), effective, stops, placedDynamicStops(placed, trainName, route, stops));
-  }
-
-  /** 已定站台的 DYNAMIC 停靠下标；只问 DYNAMIC 停靠，其余下标的站台由交路声明。 */
-  private Set<Integer> placedDynamicStops(
-      PlacedStops placed, String trainName, RouteDefinition route, List<RouteStop> stops) {
-    Set<Integer> out = new HashSet<>();
-    for (int i = 0; i < stops.size(); i++) {
-      if (DynamicStopMatcher.isDynamicStop(stops.get(i))) {
-        try {
-          if (placed.placed(trainName, route, i)) {
-            out.add(i);
-          }
-        } catch (RuntimeException ex) {
-          debugLogger.accept(
-              "ETA_PLACED_STOP_READ_FAILED train=" + trainName + " index=" + i + " error=" + ex);
-        }
-      }
-    }
-    return out;
-  }
-
-  /** 未发车票据眼中的交路停靠：还没有选台，实际节点即声明节点。 */
-  private RouteStopPlan declaredPlan(RouteDefinition route) {
-    return RouteStopPlan.of(
-        route.waypoints(), route.waypoints(), routeDefinitions.listStops(route.id()));
-  }
-
-  /**
-   * 到目标下标的路径与行程时间。
-   *
-   * <p>目标是尚未选台的 DYNAMIC 时按车站级估算：该站在图上存在的每条候选股道各算一遍，取最早到达的一条—— 占位股道只是范围里的第一条，未必是列车会去的那条，甚至未必可达。
-   * 其余情况只算实际节点。途中停车点按“进站—停稳—起步”拆段（见 {@link TravelTimeModel}）。
-   *
-   * @param initialSpeed 当前速度；未发车票据从静止出发传 0
-   */
-  private Optional<RoutedTarget> routeToTarget(
-      RailGraph graph,
-      TravelTimeModel model,
-      RouteStopPlan plan,
-      int fromIndex,
-      int targetIndex,
-      NodeId lastPassed,
-      OptionalDouble traveled,
-      OptionalDouble initialSpeed) {
-    RoutedTarget best = null;
-    for (NodeId candidate : targetCandidates(graph, plan, targetIndex)) {
-      List<NodeId> nodes = new ArrayList<>(plan.effectiveNodes());
-      nodes.set(targetIndex, candidate);
-      Optional<PathProgressModel.PathProgress> progressOpt =
-          pathProgressModel.remainingToIndex(graph, nodes, fromIndex, targetIndex, lastPassed);
-      if (progressOpt.isEmpty()) {
-        continue;
-      }
-      PathProgressModel.PathProgress progress =
-          trimTraveled(progressOpt.get(), lastPassed, traveled);
-      Optional<Integer> travelSec =
-          model.estimateTravelSec(
-              graph,
-              progress.remainingNodes(),
-              progress.remainingEdges(),
-              initialSpeed,
-              progress.firstEdgeRemainingBlocks(),
-              plan.stopPositions(progress.remainingNodes(), fromIndex, targetIndex),
-              plan.stopsAt(targetIndex));
-      if (travelSec.isPresent() && (best == null || travelSec.get() < best.travelSec())) {
-        best = new RoutedTarget(candidate, progress, travelSec.get());
-      }
-    }
-    return Optional.ofNullable(best);
-  }
-
-  private List<NodeId> targetCandidates(RailGraph graph, RouteStopPlan plan, int index) {
-    List<NodeId> candidates = plan.dynamicCandidates(index, graph);
-    return candidates.isEmpty() ? List.of(plan.node(index)) : candidates;
-  }
-
-  /**
-   * 选定的目标路径。
-   *
-   * @param node 实际估算到的节点（DYNAMIC 未选台时为最早到达的候选股道）
-   * @param progress 剩余路径（已扣除边内已行驶距离）
-   * @param travelSec 行程秒数（不含停站与等待）
-   */
-  private record RoutedTarget(
-      NodeId node, PathProgressModel.PathProgress progress, int travelSec) {}
-
-  /**
-   * 本站还要停多久。
-   *
-   * <p>停站计时要等列车停稳若干 tick 才注册，而进度在到站那一刻就推进到本站（通常相差约 3 秒）。这段空档里计时为空， 按 0 计的话 ETA
-   * 会先提前一整段停站、计时注册后再跳回——所以列车已到站（在站记录）、本站停车、计时既没开始也没结束时，按本站计划停站计。
-   */
-  private int currentDwellSec(String trainName, TrainRuntimeSnapshot snap, RouteStopPlan plan) {
-    int registered = dwellModel.dwellSec(snap.dwellRemainingSec().orElse(null)).orElse(0);
-    if (registered > 0
-        || snap.holdTimeline().dwellEndedAt().isPresent()
-        || !plan.stopsAt(snap.routeIndex())
-        || !atStation(trainName, snap)) {
-      return registered;
-    }
-    return plan.plannedDwellSec(snap.routeIndex());
-  }
-
-  private boolean atStation(String trainName, TrainRuntimeSnapshot snap) {
-    java.util.function.Supplier<Optional<StationPresenceTracker>> source = this.stationPresence;
-    if (source == null) {
-      return false;
-    }
-    return source
-        .get()
-        .map(tracker -> tracker.isAtStation(trainName, snap.routeId().value(), snap.routeIndex()))
-        .orElse(false);
-  }
-
-  /**
-   * 从剩余路径前端扣掉“自上一节点起已行驶的距离”。
-   *
-   * <p>只在剩余路径确实从上一经过节点起算时才扣；否则两个量的起点不同，扣了反而错。最后一条边至少留 1 格， 到站由进度推进确认，不由里程估算。
-   */
-  static PathProgressModel.PathProgress trimTraveled(
-      PathProgressModel.PathProgress progress, NodeId lastPassed, OptionalDouble traveled) {
-    if (progress == null
-        || lastPassed == null
-        || traveled == null
-        || traveled.isEmpty()
-        || progress.remainingEdges().isEmpty()
-        || progress.remainingNodes().isEmpty()
-        || !lastPassed.equals(progress.remainingNodes().get(0))) {
-      return progress;
-    }
-    List<NodeId> nodes = progress.remainingNodes();
-    List<RailEdge> edges = progress.remainingEdges();
-    double left = Math.max(0.0, traveled.getAsDouble());
-    int drop = 0;
-    while (drop < edges.size() - 1 && left >= edges.get(drop).lengthBlocks()) {
-      left -= edges.get(drop).lengthBlocks();
-      drop++;
-    }
-    double firstRemaining = Math.max(1.0, edges.get(drop).lengthBlocks() - left);
-    return new PathProgressModel.PathProgress(
-        nodes.subList(drop, nodes.size()),
-        edges.subList(drop, edges.size()),
-        OptionalDouble.of(firstRemaining));
+    return liveCalculator().suggestLineIds();
   }
 
   /**
@@ -976,150 +992,11 @@ public final class EtaService {
    * @return 当前扣停；未被扣停时为空
    */
   public Optional<TrainHold> currentHold(String trainName) {
-    return currentHold(trainName, Instant.now());
+    return currentHold(trainName, clock.instant());
   }
 
   Optional<TrainHold> currentHold(String trainName, Instant now) {
-    java.util.function.Function<String, Optional<RuntimeStopState>> source = this.stopStates;
-    if (trainName == null || trainName.isBlank() || source == null) {
-      return Optional.empty();
-    }
-    Optional<RuntimeStopState> stateOpt = safeStopState(source, trainName);
-    if (stateOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    RuntimeStopState state = stateOpt.get();
-    Optional<TrainRuntimeSnapshot> snap = snapshotStore.getSnapshot(trainName);
-    if (!state.routineStop()) {
-      Instant since = snap.flatMap(s -> s.holdTimeline().holdSince()).orElse(state.enteredAt());
-      return Optional.of(
-          new TrainHold(since, state.reasonCode(), state.detail(), state.blockers(), false));
-    }
-    if (state.releaseCondition() != RuntimeStopState.ReleaseCondition.PLANNED_STOP_COMPLETED
-        || snap.isEmpty()
-        || snap.get().dwellRemainingSec().filter(sec -> sec > 0).isPresent()) {
-      return Optional.empty();
-    }
-    Optional<Instant> dwellEndedAt = snap.get().holdTimeline().dwellEndedAt();
-    if (dwellEndedAt.isEmpty()) {
-      return Optional.empty();
-    }
-    Instant due = dwellEndedAt.get();
-    Optional<Instant> planned = plannedHoldUntil(trainName, snap.get().routeIndex(), due);
-    if (planned.isPresent() && planned.get().isAfter(due)) {
-      due = planned.get();
-    }
-    Instant since = due.plusSeconds(STATION_DEPARTURE_OVERHEAD_SEC);
-    if (!now.isAfter(since)) {
-      return Optional.empty();
-    }
-    return Optional.of(
-        new TrainHold(since, state.reasonCode(), state.detail(), state.blockers(), true));
-  }
-
-  /**
-   * 估算列车还要额外等多久才能继续走（不含停站计时本身）。
-   *
-   * <ul>
-   *   <li>时刻表早到扣留：计划发车时刻已知，按实际剩余计入（与 StationStopCoordinator 同口径：早到超过上限不扣）。
-   *   <li>扣停（见 {@link #currentHold}）：时长未知，按已扣时长顺延，上限 {@link #HOLD_ESTIMATE_CAP_SEC}。
-   * </ul>
-   */
-  private HoldEstimate estimateHold(
-      String trainName, TrainRuntimeSnapshot snap, int currentDwellSec, Instant now) {
-    long plannedWait = plannedWaitSec(trainName, snap.routeIndex(), currentDwellSec, now);
-    Optional<TrainHold> hold = currentHold(trainName, now);
-    if (hold.isPresent()) {
-      long delay = Math.max(0L, Duration.between(hold.get().since(), now).getSeconds());
-      List<EtaReason> reasons = new ArrayList<>(blockerReasons(hold.get().blockers()));
-      reasons.add(EtaReason.HOLD);
-      long wait = Math.max(plannedWait, Math.min(delay, HOLD_ESTIMATE_CAP_SEC));
-      return new HoldEstimate((int) wait, delay, true, reasons);
-    }
-    if (plannedWait > 0L) {
-      return new HoldEstimate((int) plannedWait, 0L, false, List.of(EtaReason.WAIT));
-    }
-    return HoldEstimate.NONE;
-  }
-
-  /** 按表早到时会被扣留到的计划发车时刻（与 StationStopCoordinator 同口径：早到超过上限不扣）。 */
-  private Optional<Instant> plannedHoldUntil(String trainName, int stopIndex, Instant checkedAt) {
-    java.util.function.BiFunction<String, Integer, Optional<Instant>> source =
-        this.plannedDepartures;
-    Duration cap = this.plannedHoldCap;
-    if (source == null || cap.isZero()) {
-      return Optional.empty();
-    }
-    Optional<Instant> planned = safePlannedDeparture(source, trainName, stopIndex);
-    if (planned.isEmpty() || !checkedAt.isBefore(planned.get())) {
-      return Optional.empty();
-    }
-    return Duration.between(checkedAt, planned.get()).compareTo(cap) > 0
-        ? Optional.empty()
-        : planned;
-  }
-
-  private long plannedWaitSec(String trainName, int stopIndex, int currentDwellSec, Instant now) {
-    java.util.function.BiFunction<String, Integer, Optional<Instant>> source =
-        this.plannedDepartures;
-    Duration cap = this.plannedHoldCap;
-    if (source == null || cap.isZero()) {
-      return 0L;
-    }
-    Optional<Instant> planned = safePlannedDeparture(source, trainName, stopIndex);
-    if (planned.isEmpty() || !now.isBefore(planned.get())) {
-      return 0L;
-    }
-    Duration early = Duration.between(now, planned.get());
-    if (early.compareTo(cap) > 0) {
-      return 0L;
-    }
-    // 停站计时与等点重叠：发车时刻取两者较晚者。
-    return Math.max(0L, ceilSeconds(early) - Math.max(0, currentDwellSec));
-  }
-
-  /** 正向时长向上取整到秒，负向时长向零取整（超时秒数不夸大）。 */
-  static long ceilSeconds(Duration duration) {
-    long millis = duration.toMillis();
-    return millis > 0L ? (millis + 999L) / 1000L : -((-millis) / 1000L);
-  }
-
-  private Optional<RuntimeStopState> safeStopState(
-      java.util.function.Function<String, Optional<RuntimeStopState>> source, String trainName) {
-    try {
-      Optional<RuntimeStopState> state = source.apply(trainName);
-      return state == null ? Optional.empty() : state;
-    } catch (RuntimeException ex) {
-      // ETA 是展示层：读取失败按“无扣停”处理，但必须留痕。
-      debugLogger.accept("ETA_STOP_STATE_READ_FAILED train=" + trainName + " error=" + ex);
-      return Optional.empty();
-    }
-  }
-
-  private Optional<Instant> safePlannedDeparture(
-      java.util.function.BiFunction<String, Integer, Optional<Instant>> source,
-      String trainName,
-      int stopIndex) {
-    return safePlannedTime(source, trainName, stopIndex, "DEPARTURE");
-  }
-
-  /** 读计划时刻；来源未接入、读取失败（留痕）时为空。 */
-  private Optional<Instant> safePlannedTime(
-      java.util.function.BiFunction<String, Integer, Optional<Instant>> source,
-      String trainName,
-      int stopIndex,
-      String kind) {
-    if (source == null) {
-      return Optional.empty();
-    }
-    try {
-      Optional<Instant> planned = source.apply(trainName, stopIndex);
-      return planned == null ? Optional.empty() : planned;
-    } catch (RuntimeException ex) {
-      debugLogger.accept(
-          "ETA_PLANNED_" + kind + "_READ_FAILED train=" + trainName + " error=" + ex);
-      return Optional.empty();
-    }
+    return liveCalculator().currentHold(trainName, now);
   }
 
   /**
@@ -1135,1860 +1012,20 @@ public final class EtaService {
     if (trainName == null || stopIndex < 0) {
       return OptionalLong.empty();
     }
-    Optional<Instant> planned = safePlannedTime(plannedArrivals, trainName, stopIndex, "ARRIVAL");
+    Optional<Instant> planned = liveCalculator().plannedArrivalOf(trainName, stopIndex);
     if (planned.isEmpty()) {
       return OptionalLong.empty();
     }
     EtaResult eta = getForTrain(trainName, new EtaTarget.StopIndex(stopIndex));
-    return eta.etaEpochMillis() <= 0L ? OptionalLong.empty() : deviationSeconds(planned, eta.eta());
-  }
-
-  /** 实际（预计）时刻相对计划的偏差秒数，正数为晚点。 */
-  private static OptionalLong deviationSeconds(Optional<Instant> planned, Instant actual) {
-    return planned
-        .map(at -> OptionalLong.of(ceilSeconds(Duration.between(at, actual))))
-        .orElse(OptionalLong.empty());
-  }
-
-  /** 按阻塞资源归类（与原净空模型同一套标签）。 */
-  private static List<EtaReason> blockerReasons(List<RuntimeStopState.Blocker> blockers) {
-    List<EtaReason> reasons = new ArrayList<>();
-    for (RuntimeStopState.Blocker blocker : blockers) {
-      String resource = blocker.resource();
-      EtaReason reason = null;
-      if (resource.startsWith("NODE:")) {
-        reason = EtaReason.PLATFORM;
-      } else if (resource.startsWith("CONFLICT:switcher:")) {
-        reason = EtaReason.THROAT;
-      } else if (resource.startsWith("CONFLICT:single:")) {
-        reason = EtaReason.SINGLELINE;
-      }
-      if (reason != null && !reasons.contains(reason)) {
-        reasons.add(reason);
-      }
-    }
-    return reasons;
-  }
-
-  /**
-   * 额外等待估算。
-   *
-   * @param waitSec 计入 ETA 的等待秒数
-   * @param delaySec 已产生的延误秒数（用于“Delayed N m”），与 waitSec 不同：waitSec 有上限、delaySec 没有
-   * @param blocked 列车是否正被扣停（扣停时不报“即将到站”）
-   * @param reasons 诊断标签
-   */
-  private record HoldEstimate(
-      int waitSec, long delaySec, boolean blocked, List<EtaReason> reasons) {
-    private static final HoldEstimate NONE = new HoldEstimate(0, 0L, false, List.of());
-  }
-
-  private EtaResult computeForTicket(String ticketId, Instant now) {
-    if (ticketId == null || ticketId.isBlank()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_VEHICLE));
-    }
-    Optional<String> trainOpt = findTrainByTicketId(ticketId);
-    if (trainOpt.isPresent()) {
-      return computeForTrain(trainOpt.get(), EtaTarget.nextStop(), now);
-    }
-    Optional<SpawnTicket> ticketOpt = findSpawnTicket(ticketId);
-    if (ticketOpt.isEmpty()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_VEHICLE));
-    }
-    return computeForSpawnTicket(ticketOpt.get(), EtaTarget.nextStop(), now);
-  }
-
-  private BoardResult computeBoard(String stationId, String lineId, Duration horizon, Instant now) {
-    if (stationId == null || stationId.isBlank()) {
-      return new BoardResult(List.of());
-    }
-    Duration window = horizon == null ? Duration.ofMinutes(10) : horizon;
-    Instant cutoff = now.plus(window);
-    List<BoardRowEntry> rows = new ArrayList<>();
-    Map<UUID, TerminalInfo> terminalCache = new HashMap<>();
-    TerminalResolveContext terminalContext = new TerminalResolveContext(new HashMap<>());
-    Set<UUID> returnTicketSeen = new HashSet<>();
-    Standing standing = new Standing(cutoff, new HashSet<>(), new HashSet<>());
-
-    for (var entry : snapshotStore.snapshot().entrySet()) {
-      String trainName = entry.getKey();
-      TrainRuntimeSnapshot snap = entry.getValue();
-      if (trainName == null || snap == null) {
-        continue;
-      }
-      Optional<RouteDefinition> routeOpt = routeDefinitions.findById(snap.routeUuid());
-      if (routeOpt.isEmpty()) {
-        continue;
-      }
-      RouteDefinition route = routeOpt.get();
-      RouteStopPlan plan = stopPlan(trainName, route);
-      if (layoverMidRoute(trainName, snap, plan)) {
-        // 交路中途就在待命（解编解下、照搬了主干进度的车）：按它的下一趟由待命那一段列出，不按照搬来的进度列成主干的车
-        continue;
-      }
-      EtaTarget stationTarget = new EtaTarget.Station(stationId);
-      if (!divisionRemainders.remainsAt(trainName, snap.routeId().value(), snap.routeIndex())) {
-        boardRowAtStation(
-                trainName,
-                snap,
-                route,
-                plan,
-                stationTarget,
-                lineId,
-                now,
-                terminalCache,
-                terminalContext,
-                standing)
-            .ifPresent(rows::add);
-      }
-      Optional<BoardStop> stopOpt =
-          resolveTargetSelection(route, plan, snap.routeIndex(), stationTarget)
-              .flatMap(target -> runningBoardStop(trainName, route, snap, plan, target, lineId));
-      if (stopOpt.isEmpty()) {
-        continue;
-      }
-      BoardStop stop = stopOpt.get();
-      EtaResult result = computeForTrain(trainName, stationTarget, now);
-      if (result.etaEpochMillis() <= 0L || result.etaEpochMillis() > cutoff.toEpochMilli()) {
-        continue;
-      }
-      if (stop.index() == stop.plan().size() - 1) {
-        Optional<BoardRowEntry> next =
-            turnback(
-                trainName,
-                stop,
-                result,
-                stationTarget,
-                lineId,
-                now,
-                terminalCache,
-                terminalContext,
-                standing);
-        if (next.isPresent()) {
-          rows.add(next.get());
-          continue;
-        }
-      }
-      OptionalLong delay =
-          deviationSeconds(
-              safePlannedTime(plannedArrivals, trainName, stop.index(), "ARRIVAL"), result.eta());
-      rows.add(
-          new BoardRowEntry(
-              result.etaEpochMillis(),
-              boardRow(
-                  stop,
-                  result,
-                  result.arriving() ? BoardPhase.ARRIVING : BoardPhase.EN_ROUTE,
-                  Optional.of(trainName),
-                  delay,
-                  loadOf(trainName),
-                  terminalCache,
-                  terminalContext)));
-    }
-
-    standingAtTerminal(stationId, lineId, now, terminalCache, terminalContext, standing)
-        .forEach(rows::add);
-
-    List<SpawnTicket> pendingTickets = new ArrayList<>(collectPendingTickets());
-    pendingTickets.sort(
-        Comparator.comparing(
-            (SpawnTicket ticket) ->
-                ticket == null ? Instant.MAX : resolveTicketDepartTime(ticket)));
-    Set<String> reservedSlots = new HashSet<>();
-    for (SpawnTicket ticket : pendingTickets) {
-      RouteDefinition route = resolveRouteDefinition(ticket).orElse(null);
-      buildTicketSlotKey(ticket, route).ifPresent(reservedSlots::add);
-    }
-
-    for (SpawnTicket ticket : pendingTickets) {
-      if (collapsedReturn(ticket, terminalContext, returnTicketSeen)
-          || buildTicketSlotKey(ticket, resolveRouteDefinition(ticket).orElse(null))
-              .filter(standing.trips()::contains)
-              .isPresent()) {
-        continue;
-      }
-      buildBoardRowForTicket(
-              ticket,
-              BoardPhase.PENDING,
-              stationId,
-              lineId,
-              now,
-              cutoff,
-              terminalCache,
-              terminalContext)
-          .ifPresent(row -> shown(row, ticket, terminalContext, rows, returnTicketSeen));
-    }
-
-    SpawnManager manager = this.spawnManager;
-    if (manager instanceof SpawnForecastSupport forecastSupport) {
-      Set<String> seenSlots = new HashSet<>(reservedSlots);
-      seenSlots.addAll(standing.trips());
-      List<SpawnTicket> forecastTickets =
-          forecastSupport.snapshotForecast(now, window, FORECAST_LIMIT_PER_SERVICE);
-      for (SpawnTicket ticket : forecastTickets) {
-        RouteDefinition route = resolveRouteDefinition(ticket).orElse(null);
-        Optional<String> slotKeyOpt = buildTicketSlotKey(ticket, route);
-        if (slotKeyOpt.isPresent() && !seenSlots.add(slotKeyOpt.get())) {
-          continue;
-        }
-        if (collapsedReturn(ticket, terminalContext, returnTicketSeen)) {
-          continue;
-        }
-        buildBoardRowForTicket(
-                ticket,
-                BoardPhase.FORECAST,
-                stationId,
-                lineId,
-                now,
-                cutoff,
-                terminalCache,
-                terminalContext)
-            .ifPresent(row -> shown(row, ticket, terminalContext, rows, returnTicketSeen));
-      }
-    }
-
-    rows.sort(Comparator.comparingLong(BoardRowEntry::etaMillis));
-    List<BoardResult.BoardRow> out = new ArrayList<>();
-    for (BoardRowEntry entry : rows) {
-      out.add(entry.row());
-    }
-    return new BoardResult(out);
-  }
-
-  /** 按间隔发车的回库交路，站牌上每条只列最早的一班：间隔票据不对应具体车次，同一交路排出的几张只是同一个节拍的预测。 表定票据各对应一个车次（带客回库班也是），逐条列出。 */
-  private boolean collapsedReturn(
-      SpawnTicket ticket, TerminalResolveContext terminalContext, Set<UUID> returnTicketSeen) {
-    return headwayReturnRoute(ticket, terminalContext)
-        .filter(returnTicketSeen::contains)
-        .isPresent();
-  }
-
-  /** 票据行已列出：间隔发车的回库交路记下已占位，之后同交路的票据不再列。 */
-  private void shown(
-      BoardRowEntry row,
-      SpawnTicket ticket,
-      TerminalResolveContext terminalContext,
-      List<BoardRowEntry> rows,
-      Set<UUID> returnTicketSeen) {
-    rows.add(row);
-    headwayReturnRoute(ticket, terminalContext).ifPresent(returnTicketSeen::add);
-  }
-
-  /** 间隔发车的回库交路；表定票据、非回库交路为空。 */
-  private Optional<UUID> headwayReturnRoute(
-      SpawnTicket ticket, TerminalResolveContext terminalContext) {
-    if (ticket == null || ticket.service() == null || ticket.timetableDriven()) {
-      return Optional.empty();
-    }
-    return Optional.ofNullable(ticket.service().routeId())
-        .filter(routeUuid -> isReturnRoute(routeUuid, terminalContext));
-  }
-
-  private Optional<BoardRowEntry> buildBoardRowForTicket(
-      SpawnTicket ticket,
-      BoardPhase phase,
-      String stationId,
-      String lineId,
-      Instant now,
-      Instant cutoff,
-      Map<UUID, TerminalInfo> terminalCache,
-      TerminalResolveContext terminalContext) {
-    if (ticket == null || ticket.service() == null) {
-      return Optional.empty();
-    }
-    Optional<RouteDefinition> routeOpt = resolveRouteDefinition(ticket);
-    if (routeOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    RouteDefinition route = routeOpt.get();
-    RouteStopPlan plan = declaredPlan(route);
-    EtaTarget stationTarget = new EtaTarget.Station(stationId);
-    Optional<TargetSelection> targetOpt = resolveTargetSelection(route, plan, -1, stationTarget);
-    if (targetOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    TargetSelection target = targetOpt.get();
-    // 直通运转：列车到本站时属于哪条线，就按哪条线显示与过滤。
-    String lineName =
-        lineAtStop(
-                route,
-                RouteLineChanges.LineRef.of(
-                    ticket.service().operatorCode(), ticket.service().lineCode()),
-                target.index())
-            .orElse(ticket.service().lineCode());
-    if (lineId != null && !lineId.isBlank() && !lineName.equalsIgnoreCase(lineId.trim())) {
-      return Optional.empty();
-    }
-    // 续班票要等本交路的车跑完上一趟：来车晚点，这一班就晚开，晚点传过终点。
-    Optional<Instant> vehicleReady =
-        continuity()
-            .flatMap(support -> support.awaitedVehicleOf(ticket))
-            .flatMap(vehicle -> readyAtTerminal(vehicle, now));
-    EtaResult result = computeForSpawnTicket(ticket, stationTarget, now, vehicleReady);
-    if (result.etaEpochMillis() <= 0L || result.etaEpochMillis() > cutoff.toEpochMilli()) {
-      return Optional.empty();
-    }
-    // 走行与停站按编表同一条运行曲线估算，起点发车的偏差就是到本站的偏差。
-    OptionalLong delay =
-        ticket.timetableDriven()
-            ? deviationSeconds(Optional.of(ticket.firstDueAt()), now.plusSeconds(result.waitSec()))
-            : OptionalLong.empty();
-    BoardStop stop =
-        new BoardStop(
-            route,
-            ticket.service().routeId(),
-            withPlannedPlatform(
-                plan,
-                target.index(),
-                () ->
-                    continuity()
-                        .flatMap(support -> support.plannedPlatformOf(ticket, target.index()))
-                        .map(NodeId::of)
-                        .or(() -> ticketPinnedPlatform(ticket, target.index()))),
-            target,
-            lineName,
-            worldIdForRouteSegment(route, 0, Math.max(1, target.index())));
-    return Optional.of(
-        new BoardRowEntry(
-            result.etaEpochMillis(),
-            boardRow(
-                stop,
-                result,
-                phase,
-                Optional.empty(),
-                delay,
-                Optional.empty(),
-                terminalCache,
-                terminalContext,
-                ticket.serviceTripId())));
-  }
-
-  /**
-   * 已停在本站、尚未获准发车的列车。
-   *
-   * <p>进度到站后本站不再是“下一个目标”，若不单独列出，列车一停稳就会从站牌上消失。 晚点按发车计：已在站时到达已成事实，乘客关心的是何时开。
-   */
-  private Optional<BoardRowEntry> boardRowAtStation(
-      String trainName,
-      TrainRuntimeSnapshot snap,
-      RouteDefinition route,
-      RouteStopPlan plan,
-      EtaTarget stationTarget,
-      String lineId,
-      Instant now,
-      Map<UUID, TerminalInfo> terminalCache,
-      TerminalResolveContext terminalContext,
-      Standing standing) {
-    int index = snap.routeIndex();
-    if (index < 0 || index >= plan.size() || !plan.stopsAt(index) || !atStation(trainName, snap)) {
-      return Optional.empty();
-    }
-    RouteStopPlan stationPlan = withObservedPlatform(plan, index, snap);
-    Optional<BoardStop> stopOpt =
-        resolveTargetSelection(route, stationPlan, index - 1, stationTarget)
-            .filter(target -> target.index() == index)
-            .flatMap(
-                target -> runningBoardStop(trainName, route, snap, stationPlan, target, lineId));
-    if (stopOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    int dwellSec = currentDwellSec(trainName, snap, plan);
-    HoldEstimate hold = estimateHold(trainName, snap, dwellSec, now);
-    Instant departAt = now.plusSeconds((long) dwellSec + hold.waitSec());
-    if (index == plan.size() - 1 && !stationPlan.unresolvedDynamic(index)) {
-      // 停在本交路终点：已经知道接下来开哪一趟时，列那一趟的发车行，代替“本站终到”。
-      Optional<BoardRowEntry> next =
-          standingDeparture(
-              trainName,
-              new TerminalPlatform(Optional.of(stationPlan.node(index)), true),
-              departAt,
-              Optional.empty(),
-              stationTarget,
-              lineId,
-              now,
-              terminalCache,
-              terminalContext,
-              standing);
-      if (next.isPresent()) {
-        return next;
-      }
-    }
-    EtaResult result =
-        new EtaResult(
-            false,
-            "Boarding",
-            now.toEpochMilli(),
-            0,
-            0,
-            dwellSec,
-            hold.waitSec(),
-            hold.reasons(),
-            hold.blocked() ? EtaConfidence.LOW : EtaConfidence.HIGH);
-    OptionalLong delay =
-        deviationSeconds(safePlannedDeparture(plannedDepartures, trainName, index), departAt);
-    return Optional.of(
-        new BoardRowEntry(
-            now.toEpochMilli(),
-            boardRow(
-                stopOpt.get(),
-                result,
-                BoardPhase.AT_STATION,
-                Optional.of(trainName),
-                delay,
-                loadOf(trainName),
-                terminalCache,
-                terminalContext)));
-  }
-
-  /**
-   * 站牌这一次重算的时间窗，以及停在终点、已列出下一趟发车行的车与车次。
-   *
-   * @param cutoff 时间窗终点
-   * @param trains 已列出的列车（小写）
-   * @param trips 已列出的车次去重键（与票据去重键同一口径）
-   */
-  private record Standing(Instant cutoff, Set<String> trains, Set<String> trips) {}
-
-  /** 在终点待命、尚未被快照循环列出的车：按待命登记的股道与就绪时刻列出下一趟。 */
-  private List<BoardRowEntry> standingAtTerminal(
-      String stationId,
-      String lineId,
-      Instant now,
-      Map<UUID, TerminalInfo> terminalCache,
-      TerminalResolveContext terminalContext,
-      Standing standing) {
-    LayoverRegistry registry = this.layoverRegistry;
-    if (registry == null || continuity().isEmpty()) {
-      return List.of();
-    }
-    EtaTarget stationTarget = new EtaTarget.Station(stationId);
-    List<BoardRowEntry> out = new ArrayList<>();
-    for (LayoverRegistry.LayoverCandidate candidate : registry.snapshot()) {
-      if (standing.trains().contains(candidate.trainName().toLowerCase(Locale.ROOT))) {
-        continue;
-      }
-      Instant readyAt = candidate.readyAt().isAfter(now) ? candidate.readyAt() : now;
-      standingDeparture(
-              candidate.trainName(),
-              new TerminalPlatform(Optional.of(candidate.locationNodeId()), true),
-              readyAt,
-              Optional.empty(),
-              stationTarget,
-              lineId,
-              now,
-              terminalCache,
-              terminalContext,
-              standing)
-          .ifPresent(out::add);
-    }
-    return out;
-  }
-
-  /**
-   * 开往本站终到、到站后原地折返的车：已经知道它接着开哪一趟时，列那一趟的发车行，不列“本站终到”——乘客在折返站等的就是这辆车接着开的那一趟。
-   *
-   * <p>站台是它到本站停的股道（已选台为实际股道，否则为计划站台），时刻是“到站 + 本站计划停站”与那一趟计划发车的较晚者； 进站中仍按进站显示。
-   * 不知道下一趟（不按交路运行、交路跑完）或下一趟不从本站始发时为空，照旧列“本站终到”。
-   */
-  private Optional<BoardRowEntry> turnback(
-      String trainName,
-      BoardStop stop,
-      EtaResult arrival,
-      EtaTarget stationTarget,
-      String lineId,
-      Instant now,
-      Map<UUID, TerminalInfo> terminalCache,
-      TerminalResolveContext terminalContext,
-      Standing standing) {
-    int index = stop.index();
-    RouteStopPlan plan = stop.plan();
-    TerminalPlatform platform =
-        plan.unresolvedDynamic(index)
-            ? new TerminalPlatform(plan.planned(index), false)
-            : new TerminalPlatform(Optional.of(plan.node(index)), true);
-    Instant readyAt =
-        Instant.ofEpochMilli(arrival.etaEpochMillis()).plusSeconds(plan.plannedDwellSec(index));
-    return standingDeparture(
-        trainName,
-        platform,
-        readyAt,
-        Optional.of(arrival),
-        stationTarget,
-        lineId,
-        now,
-        terminalCache,
-        terminalContext,
-        standing);
-  }
-
-  /**
-   * 终点上车接着开的那一趟从哪条股道发。
-   *
-   * @param node 股道；还没选台、也没有计划时为空
-   * @param actual 实际股道（车已停在那里或已选台）；否则是计划站台
-   */
-  private record TerminalPlatform(Optional<NodeId> node, boolean actual) {}
-
-  /**
-   * 终点上的车接下来开的那一趟：站台、计划发车、晚点（就绪晚于计划时按就绪发车），列车名为这辆车。
-   *
-   * <p>按交路运行时这一趟已经确定（{@link DutyContinuitySupport#nextDepartureOf}），不必等它的票派出才显示。 那一趟不从本站始发时不列。
-   *
-   * @param platform 车在终点停的股道
-   * @param readyAt 车最早能开的时刻
-   * @param arrival 车还在路上时它到本站的 ETA：行按进站或运行中显示、时刻为发车时刻；车已停在终点时为空，行按停靠中显示
-   */
-  private Optional<BoardRowEntry> standingDeparture(
-      String trainName,
-      TerminalPlatform platform,
-      Instant readyAt,
-      Optional<EtaResult> arrival,
-      EtaTarget stationTarget,
-      String lineId,
-      Instant now,
-      Map<UUID, TerminalInfo> terminalCache,
-      TerminalResolveContext terminalContext,
-      Standing standing) {
-    Optional<DutyContinuitySupport.NextDeparture> nextOpt =
-        continuity().flatMap(support -> support.nextDepartureOf(trainName));
-    if (nextOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    DutyContinuitySupport.NextDeparture next = nextOpt.get();
-    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(next.routeId());
-    if (routeOpt.isEmpty() || routeOpt.get().waypoints().isEmpty()) {
-      return Optional.empty();
-    }
-    RouteDefinition route = routeOpt.get();
-    RouteStopPlan declared = declaredPlan(route);
-    Optional<NodeId> origin =
-        platform
-            .node()
-            .filter(node -> declared.unresolvedDynamic(0))
-            .filter(
-                node ->
-                    declared
-                        .stop(0)
-                        .flatMap(DynamicStopMatcher::parseDynamicSpec)
-                        .filter(spec -> DynamicStopMatcher.matches(node, spec))
-                        .isPresent());
-    RouteStopPlan plan =
-        origin
-            .map(
-                node ->
-                    platform.actual()
-                        ? declared.withPlaced(0, node)
-                        : declared.withPlanned(0, node))
-            .orElse(declared);
-    Optional<TargetSelection> target =
-        resolveTargetSelection(route, plan, -1, stationTarget).filter(sel -> sel.index() == 0);
-    if (target.isEmpty()) {
-      return Optional.empty();
-    }
-    String lineName =
-        lineAtStop(route, route.metadata().flatMap(RouteLineChanges.LineRef::of), 0)
-            .orElseGet(() -> resolveLineName(route));
-    if (!lineMatches(route, lineName, lineId)) {
-      return Optional.empty();
-    }
-    Instant departAt = readyAt.isAfter(next.plannedDeparture()) ? readyAt : next.plannedDeparture();
-    if (arrival.isEmpty() && departAt.isAfter(standing.cutoff())) {
-      // 已停在终点、发车在时间窗之外：与那一趟的票据一样不列，等进了时间窗再列。
-      return Optional.empty();
-    }
-    long waitSec = Math.max(0L, ceilSeconds(Duration.between(now, departAt)));
-    EtaResult result =
-        arrival
-            .map(
-                eta ->
-                    new EtaResult(
-                        eta.arriving(),
-                        eta.statusText(),
-                        departAt.toEpochMilli(),
-                        (int) Math.min(Integer.MAX_VALUE, (waitSec + 59L) / 60L),
-                        eta.travelSec(),
-                        (int)
-                            Math.max(
-                                0L,
-                                Duration.between(
-                                        Instant.ofEpochMilli(eta.etaEpochMillis()), departAt)
-                                    .toSeconds()),
-                        0,
-                        eta.reasons(),
-                        eta.confidence()))
-            .orElseGet(
-                () ->
-                    new EtaResult(
-                        false,
-                        "Boarding",
-                        now.toEpochMilli(),
-                        0,
-                        0,
-                        0,
-                        (int) Math.min(Integer.MAX_VALUE, waitSec),
-                        List.of(),
-                        EtaConfidence.HIGH));
-    BoardPhase phase =
-        arrival
-            .map(eta -> eta.arriving() ? BoardPhase.ARRIVING : BoardPhase.EN_ROUTE)
-            .orElse(BoardPhase.AT_STATION);
-    standing.trains().add(trainName.toLowerCase(Locale.ROOT));
-    standing.trips().add("trip|" + next.serviceTripId());
-    BoardStop stop =
-        new BoardStop(
-            route,
-            next.routeId(),
-            plan,
-            target.get(),
-            lineName,
-            worldIdForRouteSegment(route, 0, Math.min(1, route.waypoints().size() - 1)));
-    return Optional.of(
-        new BoardRowEntry(
-            result.etaEpochMillis(),
-            boardRow(
-                stop,
-                result,
-                phase,
-                Optional.of(trainName),
-                deviationSeconds(Optional.of(next.plannedDeparture()), departAt),
-                departureLoad(trainName, route, arrival.isPresent()),
-                terminalCache,
-                terminalContext,
-                Optional.of(next.serviceTripId()))));
-  }
-
-  /**
-   * 终点上的车接着开下一趟时的载客，车头按下一趟的开行方向。
-   *
-   * <p>还在路上的车到终点全员下车，按全车空座计；已停在终点的车按眼下在座的乘客（多是等这一趟的）。 下一趟反向开出（原地折返）时车头换到另一端，车厢顺序倒过来；
-   * 判不出方向时不给载客，免得把各节的空位画反。
-   *
-   * @param next 下一趟的交路
-   * @param arriving 车还在开往终点的路上
-   */
-  private Optional<TrainLoad> departureLoad(
-      String trainName, RouteDefinition next, boolean arriving) {
-    Optional<TrainRuntimeSnapshot> snap = snapshotStore.getSnapshot(trainName);
-    Optional<TrainLoad> load = snap.flatMap(TrainRuntimeSnapshot::load);
-    if (load.isEmpty()) {
-      return Optional.empty();
-    }
-    TrainLoad current = arriving ? load.get().emptied() : load.get();
-    Optional<RailGraph> graph =
-        Optional.ofNullable(snap.get().worldId())
-            .flatMap(railGraphService::getSnapshot)
-            .map(RailGraphService.RailGraphSnapshot::graph);
-    List<NodeId> incoming =
-        routeDefinitions
-            .findById(snap.get().routeUuid())
-            .map(RouteDefinition::waypoints)
-            .orElse(List.of());
-    List<NodeId> outgoing = next.waypoints();
-    if (graph.isEmpty() || incoming.size() < 2 || outgoing.size() < 2) {
-      return Optional.empty();
-    }
-    Optional<org.bukkit.util.Vector> arrive =
-        PlatformApproach.direction(
-            graph.get(), incoming.get(incoming.size() - 2), incoming.get(incoming.size() - 1));
-    Optional<org.bukkit.util.Vector> depart =
-        PlatformApproach.direction(graph.get(), outgoing.get(0), outgoing.get(1));
-    if (arrive.isEmpty() || depart.isEmpty()) {
-      return Optional.empty();
-    }
-    return Optional.of(arrive.get().dot(depart.get()) < 0 ? current.reversed() : current);
-  }
-
-  /** 运行中列车眼下的载客。 */
-  private Optional<TrainLoad> loadOf(String trainName) {
-    return snapshotStore.getSnapshot(trainName).flatMap(TrainRuntimeSnapshot::load);
-  }
-
-  /** 车登记在待命池里、进度却还没到交路最后一个节点。 */
-  private boolean layoverMidRoute(String trainName, TrainRuntimeSnapshot snap, RouteStopPlan plan) {
-    LayoverRegistry registry = this.layoverRegistry;
-    return registry != null
-        && snap.routeIndex() < plan.size() - 1
-        && registry.get(trainName).isPresent();
-  }
-
-  /**
-   * 这辆车跑完当前这一趟、在终点停完站的时刻：已在终点待命按待命登记；还在路上按到终点的 ETA 加终点计划停站。
-   *
-   * <p>续班票的这一班最早只能在这个时刻开，站牌据此把来车的晚点传过终点。
-   */
-  private Optional<Instant> readyAtTerminal(String trainName, Instant now) {
-    LayoverRegistry registry = this.layoverRegistry;
-    if (registry != null) {
-      Optional<LayoverRegistry.LayoverCandidate> layover = registry.get(trainName);
-      if (layover.isPresent()) {
-        Instant readyAt = layover.get().readyAt();
-        return Optional.of(readyAt.isAfter(now) ? readyAt : now);
-      }
-    }
-    Optional<TrainRuntimeSnapshot> snapOpt = snapshotStore.getSnapshot(trainName);
-    if (snapOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    TrainRuntimeSnapshot snap = snapOpt.get();
-    Optional<RouteDefinition> route = routeDefinitions.findById(snap.routeUuid());
-    if (route.isEmpty()) {
-      return Optional.empty();
-    }
-    RouteStopPlan plan = stopPlan(trainName, route.get());
-    int terminal = plan.size() - 1;
-    if (terminal < 0) {
-      return Optional.empty();
-    }
-    if (snap.routeIndex() >= terminal) {
-      return Optional.of(now.plusSeconds(currentDwellSec(trainName, snap, plan)));
-    }
-    EtaResult eta = getForTrain(trainName, new EtaTarget.StopIndex(terminal));
-    if (eta.etaEpochMillis() <= 0L) {
-      return Optional.empty();
-    }
-    return Optional.of(
-        Instant.ofEpochMilli(eta.etaEpochMillis()).plusSeconds(plan.plannedDwellSec(terminal)));
-  }
-
-  private Optional<DutyContinuitySupport> continuity() {
-    return this.spawnManager instanceof DutyContinuitySupport support
-        ? Optional.of(support)
-        : Optional.empty();
-  }
-
-  /** 已停在站内的列车，DYNAMIC 却没有选台记录（例如重载后记录已清空）：按它最后经过的节点认站台，前提是该节点在本站的 DYNAMIC 范围内。 */
-  private static RouteStopPlan withObservedPlatform(
-      RouteStopPlan plan, int index, TrainRuntimeSnapshot snap) {
-    if (!plan.unresolvedDynamic(index)) {
-      return plan;
-    }
-    Optional<DynamicStopMatcher.DynamicSpec> spec =
-        plan.stop(index).flatMap(DynamicStopMatcher::parseDynamicSpec);
-    return snap.lastPassedNodeId()
-        .filter(node -> spec.map(s -> DynamicStopMatcher.matches(node, s)).orElse(false))
-        .map(node -> plan.withPlaced(index, node))
-        .orElse(plan);
-  }
-
-  /** 运行中列车在本站的停靠；按到本站时所属线路过滤，不匹配时为空。尚未选台时标上这一趟的计划站台。 */
-  private Optional<BoardStop> runningBoardStop(
-      String trainName,
-      RouteDefinition route,
-      TrainRuntimeSnapshot snap,
-      RouteStopPlan plan,
-      TargetSelection target,
-      String lineId) {
-    // 直通运转：列车到本站时属于哪条线，就按哪条线显示与过滤。
-    String lineName =
-        lineAtStop(route, route.metadata().flatMap(RouteLineChanges.LineRef::of), target.index())
-            .orElseGet(() -> resolveLineName(route));
-    return lineMatches(route, lineName, lineId)
-        ? Optional.of(
-            new BoardStop(
-                route,
-                snap.routeUuid(),
-                withPlannedPlatform(
-                    plan,
-                    target.index(),
-                    () -> runningPlannedPlatform(trainName, route, target.index())),
-                target,
-                lineName,
-                Optional.ofNullable(snap.worldId())))
-        : Optional.empty();
-  }
-
-  /** 尚未选台的 DYNAMIC 停靠标上计划或暂定站台；没有时原样返回。 */
-  private static RouteStopPlan withPlannedPlatform(
-      RouteStopPlan plan, int index, java.util.function.Supplier<Optional<NodeId>> lookup) {
-    if (!plan.unresolvedDynamic(index)) {
-      return plan;
-    }
-    return lookup.get().map(node -> plan.withPlanned(index, node)).orElse(plan);
-  }
-
-  /** 还没派出的票预先指定的站台（只读）。 */
-  private Optional<NodeId> ticketPinnedPlatform(SpawnTicket ticket, int index) {
-    TicketPlatforms source = this.ticketPlatforms;
-    if (source == null) {
-      return Optional.empty();
-    }
-    try {
-      Optional<NodeId> pinned = source.pinned(ticket, index);
-      return pinned == null ? Optional.empty() : pinned;
-    } catch (RuntimeException ex) {
-      debugLogger.accept("ETA_TICKET_PLATFORM_READ_FAILED ticket=" + ticket.id() + " error=" + ex);
-      return Optional.empty();
-    }
-  }
-
-  /** 区间生成的叫车票，生成点在目标站上或目标站之后：车不会经过目标站。 */
-  static boolean spawnsDownstreamOf(SpawnTicket ticket, int targetIndex) {
-    if (ticket == null || ticket.source() != TripSource.ON_DEMAND) {
-      return false;
-    }
-    java.util.OptionalInt entry = OnDemandTrip.entryIndexOf(ticket.serviceTripId());
-    return entry.isPresent() && entry.getAsInt() > 0 && entry.getAsInt() >= targetIndex;
-  }
-
-  /**
-   * 票据的车从交路哪个节点出发：区间生成的叫车票从生成点起（{@link OnDemandTrip#entryIndexOf}），其余从首站起。
-   *
-   * @param targetIndex 目标站下标；生成点不在它之前时按首站算
-   */
-  static int ticketStartIndex(SpawnTicket ticket, int targetIndex) {
-    if (ticket == null || ticket.source() != TripSource.ON_DEMAND) {
-      return 0;
-    }
-    java.util.OptionalInt entry = OnDemandTrip.entryIndexOf(ticket.serviceTripId());
-    return entry.isPresent() && entry.getAsInt() > 0 && entry.getAsInt() < targetIndex
-        ? entry.getAsInt()
-        : 0;
-  }
-
-  /** 运行中列车的计划或暂定站台（只读：暂定站台由调度这边在信号 tick 里定）。 */
-  private Optional<NodeId> runningPlannedPlatform(
-      String trainName, RouteDefinition route, int index) {
-    PlannedPlatforms source = this.plannedPlatforms;
-    if (source == null) {
-      return Optional.empty();
-    }
-    try {
-      Optional<NodeId> planned = source.planned(trainName, route, index);
-      return planned == null ? Optional.empty() : planned;
-    } catch (RuntimeException ex) {
-      debugLogger.accept("ETA_PLANNED_PLATFORM_READ_FAILED train=" + trainName + " error=" + ex);
-      return Optional.empty();
-    }
-  }
-
-  /**
-   * 本站站台：固定站台与已选台的 DYNAMIC 给出站台号；DYNAMIC 尚未选台时先看时刻表的计划站台，没有计划时站台号为 {@code -}，
-   * 附上图上存在的候选站台。候选只有一条时站台已经确定。占位股道只是范围里的第一条，不能当成列车会去的站台显示。
-   */
-  private BoardPlatform boardPlatform(BoardStop stop) {
-    int index = stop.index();
-    if (!stop.plan().unresolvedDynamic(index)) {
-      return BoardPlatform.of(RouteTerminals.platformOf(stop.target().nodeId().value()));
-    }
-    Optional<NodeId> planned = stop.plan().planned(index);
-    if (planned.isPresent()) {
-      return new BoardPlatform(
-          RouteTerminals.platformOf(planned.get().value()), false, List.of(), true);
-    }
-    List<String> candidates =
-        dynamicCandidates(stop.plan(), index, stop.worldId()).stream()
-            .map(node -> RouteTerminals.platformOf(node.value()))
-            .distinct()
-            .toList();
-    return candidates.size() == 1
-        ? BoardPlatform.of(candidates.get(0))
-        : new BoardPlatform(UNKNOWN_PLATFORM, true, candidates, false);
-  }
-
-  /** 候选股道：先在交路所在世界的图上找，世界未知或图上找不到时再看其余已加载的图。 */
-  private List<NodeId> dynamicCandidates(RouteStopPlan plan, int index, Optional<UUID> worldId) {
-    Optional<List<NodeId>> inWorld =
-        worldId
-            .flatMap(railGraphService::getSnapshot)
-            .map(snapshot -> plan.dynamicCandidates(index, snapshot.graph()))
-            .filter(candidates -> !candidates.isEmpty());
-    if (inWorld.isPresent()) {
-      return inWorld.get();
-    }
-    for (RailGraphService.RailGraphSnapshot snapshot : railGraphService.snapshotAll().values()) {
-      List<NodeId> candidates = plan.dynamicCandidates(index, snapshot.graph());
-      if (!candidates.isEmpty()) {
-        return candidates;
-      }
-    }
-    return List.of();
-  }
-
-  /**
-   * 站牌行的站台。
-   *
-   * @param platform 站台号；待定或无法解析时为 {@code -}
-   * @param pending DYNAMIC 尚未选台，也没有计划站台
-   * @param candidates 待定时的候选站台，按站台号升序
-   * @param planned 站台号是时刻表的计划站台
-   */
-  private record BoardPlatform(
-      String platform, boolean pending, List<String> candidates, boolean planned) {
-
-    static BoardPlatform of(String platform) {
-      return new BoardPlatform(platform, false, List.of(), false);
-    }
-  }
-
-  /** 组装站牌行：终点、站台与本站停靠属性按同一套口径解析，运行中列车与票据共用。 */
-  private BoardResult.BoardRow boardRow(
-      BoardStop stop,
-      EtaResult result,
-      BoardPhase phase,
-      Optional<String> trainName,
-      OptionalLong delay,
-      Optional<TrainLoad> load,
-      Map<UUID, TerminalInfo> terminalCache,
-      TerminalResolveContext terminalContext) {
-    return boardRow(
-        stop,
-        result,
-        phase,
-        trainName,
-        delay,
-        load,
-        terminalCache,
-        terminalContext,
-        Optional.empty());
-  }
-
-  /**
-   * @param serviceTripId 票据与预测行的车次标识（{@link
-   *     org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket#serviceTripId}），按下一趟列出的车（折返站上的来车、终点待命的车）为下一趟的；
-   *     其余运行中列车为空
-   */
-  private BoardResult.BoardRow boardRow(
-      BoardStop stop,
-      EtaResult result,
-      BoardPhase phase,
-      Optional<String> trainName,
-      OptionalLong delay,
-      Optional<TrainLoad> load,
-      Map<UUID, TerminalInfo> terminalCache,
-      TerminalResolveContext terminalContext,
-      Optional<String> serviceTripId) {
-    RouteDefinition route = stop.route();
-    TerminalInfo terminal =
-        resolveTerminalInfo(route, stop.routeUuid(), terminalCache, terminalContext);
-    DestinationInfo endRoute = terminal.endRoute();
-    DestinationInfo endOperation =
-        resolveRowEndOperation(route, stop.routeUuid(), stop.target(), terminal, terminalContext);
-    DestinationInfo destInfo = resolveBoardDestination(route, endOperation);
-    int index = stop.index();
-    OptionalInt ownEnd = RouteTerminals.endOfOperationIndex(routeDefinitions.listStops(route.id()));
-    Optional<BoardResult.Joining> joining = Optional.empty();
-    if (ownEnd.isPresent() && index < ownEnd.getAsInt()) {
-      // 联挂站之前：乘客留在车上，挂上主干后到主干的终点
-      Optional<ThroughRoute> through = throughRoutes.apply(stop.routeUuid());
-      Optional<RouteDefinition> trunk =
-          through.map(ThroughRoute::route).flatMap(routeDefinitions::findById);
-      if (trunk.isPresent()) {
-        DestinationInfo trunkEnd = resolveEndOperation(trunk.get(), terminalContext);
-        if (!trunkEnd.isBlank()) {
-          destInfo = resolveBoardDestination(trunk.get(), trunkEnd);
-          joining =
-              Optional.of(
-                  new BoardResult.Joining(
-                      ownEnd.getAsInt(),
-                      endOperation.label(),
-                      endOperation.destinationId(),
-                      Optional.of(trunk.get().id().value()),
-                      through.get().joinIndex()));
-        }
-      }
-    }
-    BoardPlatform platform = boardPlatform(stop);
-    return new BoardResult.BoardRow(
-        stop.lineName(),
-        route.id().value(),
-        destInfo.label(),
-        destInfo.destinationId(),
-        endRoute.label(),
-        endRoute.destinationId(),
-        endOperation.label(),
-        endOperation.destinationId(),
-        platform.platform(),
-        result.statusText(),
-        result.reasons(),
-        result.eta(),
-        phase,
-        index,
-        !stop.plan().stopsAt(index),
-        ownEnd.equals(OptionalInt.of(index)),
-        endOperation.destinationId().filter(RouteTerminals.OUT_OF_SERVICE_ID::equals).isPresent(),
-        trainName,
-        delay,
-        platform.pending(),
-        platform.candidates(),
-        platform.planned(),
-        load,
-        joining,
-        serviceTripId);
-  }
-
-  /**
-   * 站牌行对应的一次停靠。
-   *
-   * @param route 交路定义
-   * @param routeUuid 交路 UUID（终点与运营类型解析用）
-   * @param plan 列车眼中的停靠计划（运行中为实际节点，票据为声明节点）
-   * @param target 本站在交路中的位置
-   * @param lineName 列车到本站时所属线路
-   * @param worldId 交路所在世界（找 DYNAMIC 候选股道用）；未知时为空
-   */
-  private record BoardStop(
-      RouteDefinition route,
-      UUID routeUuid,
-      RouteStopPlan plan,
-      TargetSelection target,
-      String lineName,
-      Optional<UUID> worldId) {
-
-    int index() {
-      return target.index();
-    }
-  }
-
-  /**
-   * 票据与预测的去重键。表定票据按车次（同一车次出了票就不再预测）；间隔票据按交路与发车时刻。
-   *
-   * <p>表定票据不能按发车时刻比：已出票的发车时刻会被起点待命车的就绪时刻改写，和预测里的计划时刻对不上，同一班会列两行。
-   */
-  private Optional<String> buildTicketSlotKey(SpawnTicket ticket, RouteDefinition route) {
-    if (ticket != null && ticket.timetableDriven()) {
-      return ticket.serviceTripId().map(trip -> "trip|" + trip);
-    }
-    if (ticket == null || ticket.service() == null || ticket.service().key() == null) {
-      return Optional.empty();
-    }
-    Instant departAt =
-        route != null ? resolveTicketDepartTime(ticket, route) : resolveTicketDepartTime(ticket);
-    if (departAt == null) {
-      return Optional.empty();
-    }
-    return Optional.of(ticket.service().key().routeId() + "|" + departAt.toEpochMilli());
-  }
-
-  private Optional<RouteDefinition> resolveRouteDefinition(SpawnTicket ticket) {
-    if (ticket == null || ticket.service() == null) {
-      return Optional.empty();
-    }
-    return routeDefinitions.findById(ticket.service().routeId());
-  }
-
-  private Optional<String> findTrainByTicketId(String ticketId) {
-    if (ticketId == null || ticketId.isBlank()) {
-      return Optional.empty();
-    }
-    for (var entry : snapshotStore.snapshot().entrySet()) {
-      TrainRuntimeSnapshot snap = entry.getValue();
-      if (snap == null) {
-        continue;
-      }
-      Optional<String> snapTicket = snap.ticketId();
-      if (snapTicket.isPresent() && snapTicket.get().equalsIgnoreCase(ticketId)) {
-        return Optional.of(entry.getKey());
-      }
-    }
-    return Optional.empty();
-  }
-
-  private Optional<SpawnTicket> findSpawnTicket(String ticketId) {
-    if (ticketId == null || ticketId.isBlank()) {
-      return Optional.empty();
-    }
-    UUID id;
-    try {
-      id = UUID.fromString(ticketId.trim());
-    } catch (IllegalArgumentException ex) {
-      return Optional.empty();
-    }
-    for (SpawnTicket ticket : collectPendingTickets()) {
-      if (ticket != null && id.equals(ticket.id())) {
-        return Optional.of(ticket);
-      }
-    }
-    return Optional.empty();
-  }
-
-  private List<SpawnTicket> collectPendingTickets() {
-    Set<UUID> seen = new HashSet<>();
-    List<SpawnTicket> out = new ArrayList<>();
-    SpawnManager manager = this.spawnManager;
-    if (manager != null) {
-      for (SpawnTicket ticket : manager.snapshotQueue()) {
-        if (ticket == null) {
-          continue;
-        }
-        if (seen.add(ticket.id())) {
-          out.add(ticket);
-        }
-      }
-    }
-    java.util.function.Supplier<List<SpawnTicket>> supplier = this.pendingTicketSupplier;
-    if (supplier != null) {
-      for (SpawnTicket ticket : supplier.get()) {
-        if (ticket == null) {
-          continue;
-        }
-        if (seen.add(ticket.id())) {
-          out.add(ticket);
-        }
-      }
-    }
-    return out;
+    return eta.etaEpochMillis() <= 0L
+        ? OptionalLong.empty()
+        : EtaCalculator.deviationSeconds(planned, eta.eta());
   }
 
   /** 未发车票据的 ETA（包内可见供测试直接指定目标）。 */
   EtaResult computeForSpawnTicket(SpawnTicket ticket, EtaTarget target, Instant now) {
-    return computeForSpawnTicket(ticket, target, now, Optional.empty());
+    return liveCalculator().computeForSpawnTicket(ticket, target, now);
   }
-
-  /**
-   * 未发车票据的 ETA。
-   *
-   * @param vehicleReady 这张票要等的车最早能开的时刻（已知是哪辆车时）；为空时按起点待命车估
-   */
-  private EtaResult computeForSpawnTicket(
-      SpawnTicket ticket, EtaTarget target, Instant now, Optional<Instant> vehicleReady) {
-    if (ticket == null || ticket.service() == null) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_VEHICLE));
-    }
-    Optional<RouteDefinition> routeOpt = routeDefinitions.findById(ticket.service().routeId());
-    if (routeOpt.isEmpty()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_ROUTE));
-    }
-    RouteDefinition route = routeOpt.get();
-    RouteStopPlan plan = declaredPlan(route);
-    Optional<TargetSelection> targetSelOpt = resolveTargetSelection(route, plan, -1, target);
-    if (targetSelOpt.isEmpty()) {
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_TARGET));
-    }
-    TargetSelection targetSel = targetSelOpt.get();
-    NodeId targetNode = targetSel.nodeId();
-    if (spawnsDownstreamOf(ticket, targetSel.index())) {
-      // 区间生成的车在生成点才出现，不经过它之前（含生成点本身）的车站：这些站的站牌不列它。
-      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_TARGET));
-    }
-    // 区间生成的叫车票：车在生成点出现，从那里起算，不从交路首站起算。
-    int startIndex = ticketStartIndex(ticket, targetSel.index());
-    int remainingEdgeCount = 0;
-    int travelSec = 0;
-    int dwellSec = 0;
-
-    if (targetSel.index() > startIndex) {
-      Optional<UUID> worldOpt = worldIdForRouteSegment(route, startIndex, targetSel.index());
-      Optional<RailGraph> graphOpt =
-          worldOpt.flatMap(
-              id ->
-                  railGraphService
-                      .getSnapshot(id)
-                      .map(
-                          snapshot ->
-                              RailGraphService.runtimeGraph(
-                                  railGraphService, id, snapshot.graph())));
-      if (graphOpt.isEmpty()) {
-        return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
-      }
-      // 按车库推断的车种估算，边限速与运行中列车读同一个有效限速入口。
-      TravelTimeModel routeTravelTimeModel =
-          resolveTravelTimeModelForRoute(
-              ticket.service().routeId(), ticket.consist(), worldOpt.get(), now);
-      // 从起点静止出发；途中停车点与运行中列车同样拆段、同样累加停站——票据漏了停站，站牌上离起点越远的班次越早。
-      Optional<RoutedTarget> routedOpt =
-          routeToTarget(
-              graphOpt.get(),
-              routeTravelTimeModel,
-              plan,
-              startIndex,
-              targetSel.index(),
-              null,
-              OptionalDouble.empty(),
-              OptionalDouble.of(0.0));
-      if (routedOpt.isEmpty()) {
-        return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
-      }
-      travelSec = routedOpt.get().travelSec();
-      remainingEdgeCount = routedOpt.get().progress().remainingEdgeCount();
-      targetNode = routedOpt.get().node();
-      dwellSec =
-          plan.stopSecondsBetween(
-              startIndex,
-              targetSel.index(),
-              graphOpt.get(),
-              routeTravelTimeModel.stationStopOverheadSeconds());
-    }
-
-    // 区间生成不接首站的待命车，首站待命车的就绪时刻与它无关。
-    Instant departAt =
-        startIndex > 0
-            ? resolveTicketDepartTime(ticket)
-            : resolveTicketDepartTime(ticket, route, vehicleReady);
-    // 距计划发车向上取整：向下取整会让 ETA 系统性早于计划发车（最多差 1 秒）。
-    long untilDepart = ceilSeconds(Duration.between(now, departAt));
-    long overdueSec = untilDepart < 0L ? -untilDepart : 0L;
-    // 已过计划发车时刻仍未发出：按已超时长顺延（上限同扣停），不能一直报“马上就到”。
-    long waitSecLong = untilDepart > 0L ? untilDepart : Math.min(overdueSec, HOLD_ESTIMATE_CAP_SEC);
-    int waitSec = waitSecLong > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) waitSecLong;
-    List<EtaReason> reasons = new ArrayList<>();
-    if (untilDepart > 0L) {
-      reasons.add(EtaReason.WAIT);
-    } else if (overdueSec > 0L) {
-      reasons.add(EtaReason.OVERDUE);
-    }
-
-    // 若目标站点有咽喉，检查到咽喉的剩余边数用于 arriving 判定
-    final int baseEdgeCount = remainingEdgeCount;
-    int edgesForArriving = remainingEdgeCount;
-    if (targetSel.index() > startIndex) {
-      Optional<RailGraph> graphOptForThroat =
-          resolveGraphForRouteSegment(route, startIndex, targetSel.index());
-      if (graphOptForThroat.isPresent()) {
-        Optional<Integer> throatEdgesOpt =
-            remainingEdgesToThroat(
-                graphOptForThroat.get(), plan.effectiveNodes(), startIndex, targetNode, null);
-        edgesForArriving =
-            throatEdgesOpt.map(te -> Math.min(te, baseEdgeCount)).orElse(baseEdgeCount);
-      }
-    }
-    ArrivingClassifier.Arriving arriving = arrivingClassifier.classify(edgesForArriving, false);
-    if (waitSec > 0 || !isApproachTarget(targetNode)) {
-      arriving = new ArrivingClassifier.Arriving(false, EtaConfidence.LOW);
-    }
-
-    long etaMillis = now.plusSeconds((long) travelSec + dwellSec + waitSec).toEpochMilli();
-    int minutesRounded =
-        (int) Math.max(0L, Math.round(((long) travelSec + dwellSec + waitSec) / 60.0));
-
-    String statusText = minutesRounded + "m";
-    if (overdueSec >= 60L) {
-      statusText = "Delayed " + (overdueSec / 60L) + "m";
-    } else if (untilDepart > 60L) {
-      statusText = "Scheduled " + (untilDepart / 60L) + "m";
-    }
-
-    return new EtaResult(
-        arriving.arriving(),
-        statusText,
-        etaMillis,
-        minutesRounded,
-        travelSec,
-        dwellSec,
-        waitSec,
-        reasons,
-        EtaConfidence.LOW);
-  }
-
-  private Optional<RailGraph> resolveGraphForRouteSegment(
-      RouteDefinition route, int startIndex, int targetIndex) {
-    return worldIdForRouteSegment(route, startIndex, targetIndex)
-        .flatMap(
-            id ->
-                railGraphService
-                    .getSnapshot(id)
-                    .map(
-                        snapshot ->
-                            RailGraphService.runtimeGraph(railGraphService, id, snapshot.graph())));
-  }
-
-  /** 覆盖交路这一段全部路径点的世界。 */
-  private Optional<UUID> worldIdForRouteSegment(
-      RouteDefinition route, int startIndex, int targetIndex) {
-    if (route == null) {
-      return Optional.empty();
-    }
-    List<NodeId> waypoints = route.waypoints();
-    if (startIndex < 0 || targetIndex >= waypoints.size() || startIndex >= targetIndex) {
-      return Optional.empty();
-    }
-    List<NodeId> segment = waypoints.subList(startIndex, targetIndex + 1);
-    return railGraphService
-        .findWorldIdForPath(segment)
-        .or(() -> railGraphService.findCrossWorldPath(segment));
-  }
-
-  private Instant resolveTicketDepartTime(SpawnTicket ticket) {
-    if (ticket == null) {
-      return Instant.EPOCH;
-    }
-    Instant due = ticket.dueAt();
-    Instant notBefore = ticket.notBefore();
-    if (notBefore != null && due != null && notBefore.isAfter(due)) {
-      return notBefore;
-    }
-    return due != null ? due : Instant.EPOCH;
-  }
-
-  /**
-   * 票据的发车时刻：知道要等哪辆车时按那辆车最早能开的时刻（不早于票面）；不知道时按起点待命车估。
-   *
-   * <p>按起点待命车估只看起点第一辆待命车，接这张票的可能是别的车；知道是哪辆车时以它为准。
-   */
-  private Instant resolveTicketDepartTime(
-      SpawnTicket ticket, RouteDefinition route, Optional<Instant> vehicleReady) {
-    if (vehicleReady.isEmpty()) {
-      return resolveTicketDepartTime(ticket, route);
-    }
-    Instant base = resolveTicketDepartTime(ticket);
-    return vehicleReady.get().isAfter(base) ? vehicleReady.get() : base;
-  }
-
-  private Instant resolveTicketDepartTime(SpawnTicket ticket, RouteDefinition route) {
-    Instant base = resolveTicketDepartTime(ticket);
-    Optional<Instant> readyAt = resolveLayoverReadyAt(route);
-    if (readyAt.isPresent() && readyAt.get().isAfter(base)) {
-      return readyAt.get();
-    }
-    return base;
-  }
-
-  private Optional<Instant> resolveLayoverReadyAt(RouteDefinition route) {
-    if (route == null || route.waypoints().isEmpty()) {
-      return Optional.empty();
-    }
-    LayoverRegistry registry = this.layoverRegistry;
-    if (registry == null) {
-      return Optional.empty();
-    }
-    NodeId startNode = route.waypoints().get(0);
-    if (startNode == null) {
-      return Optional.empty();
-    }
-    List<LayoverRegistry.LayoverCandidate> candidates = registry.findCandidates(startNode.value());
-    if (candidates.isEmpty()) {
-      return Optional.empty();
-    }
-    Instant readyAt = candidates.get(0).readyAt();
-    return readyAt == null ? Optional.empty() : Optional.of(readyAt);
-  }
-
-  private record TargetSelection(NodeId nodeId, int index) {
-    private TargetSelection {
-      Objects.requireNonNull(nodeId, "nodeId");
-    }
-  }
-
-  /**
-   * 解析 ETA 目标对应的交路下标与实际节点。
-   *
-   * <ul>
-   *   <li>{@link EtaTarget.NextStop}：下一个停车点（STOP/TERMINATE），跳过 PASS；没有停靠配置或其后再无停车点时按下标推进。
-   *   <li>{@link EtaTarget.StopIndex}：直接取该下标。
-   *   <li>{@link EtaTarget.PlatformNode}：声明节点或实际节点任一相等即可——拿 DYNAMIC 占位股道来问，选台后落到实际股道。
-   *   <li>{@link EtaTarget.Station}：按站码找第一个车站（或咽喉）节点。
-   * </ul>
-   *
-   * <p>一律按停靠配置的下标取，不按节点反查：同一节点在交路里出现两次时，反查只能找到第一次。
-   *
-   * @param route 线路定义
-   * @param plan 与 waypoints 对齐的停靠事实
-   * @param currentIndex 当前 waypoint 索引（-1 表示未进入线路）
-   * @param target ETA 目标
-   * @return 目标节点与索引，若无法解析则返回 empty
-   */
-  private Optional<TargetSelection> resolveTargetSelection(
-      RouteDefinition route, RouteStopPlan plan, int currentIndex, EtaTarget target) {
-    if (route == null || plan == null || plan.size() == 0) {
-      return Optional.empty();
-    }
-    int startIndex = Math.max(-1, currentIndex);
-    OptionalInt index = OptionalInt.empty();
-    if (target == null || target instanceof EtaTarget.NextStop) {
-      OptionalInt next = plan.nextStoppingIndex(startIndex);
-      index = next.isPresent() ? next : OptionalInt.of(startIndex + 1);
-    } else if (target instanceof EtaTarget.StopIndex stopIndex) {
-      index = OptionalInt.of(stopIndex.stopIndex());
-    } else if (target instanceof EtaTarget.PlatformNode pn) {
-      index = plan.indexOfNode(pn.nodeId(), startIndex + 1);
-    } else if (target instanceof EtaTarget.Station station) {
-      Optional<TargetSelection> found =
-          findStationTarget(plan.effectiveNodes(), startIndex + 1, station.stationId(), route);
-      if (found.isPresent()) {
-        index = OptionalInt.of(found.get().index());
-      }
-    }
-    if (index.isEmpty() || index.getAsInt() <= startIndex || index.getAsInt() >= plan.size()) {
-      return Optional.empty();
-    }
-    return Optional.of(new TargetSelection(plan.node(index.getAsInt()), index.getAsInt()));
-  }
-
-  private Optional<TargetSelection> findStationTarget(
-      List<NodeId> waypoints, int startIndex, String stationId, RouteDefinition route) {
-    if (stationId == null || stationId.isBlank() || waypoints == null) {
-      return Optional.empty();
-    }
-    StationKey key = parseStationKey(stationId, route);
-    Optional<TargetSelection> exact = findExactNode(waypoints, startIndex, stationId);
-    if (exact.isPresent()) {
-      return exact;
-    }
-    Optional<TargetSelection> station =
-        findStationByKind(waypoints, startIndex, key, WaypointKind.STATION);
-    if (station.isPresent()) {
-      return station;
-    }
-    return findStationByKind(waypoints, startIndex, key, WaypointKind.STATION_THROAT);
-  }
-
-  private Optional<TargetSelection> findExactNode(
-      List<NodeId> waypoints, int startIndex, String rawId) {
-    for (int i = Math.max(0, startIndex); i < waypoints.size(); i++) {
-      NodeId node = waypoints.get(i);
-      if (node == null) {
-        continue;
-      }
-      if (node.value().equalsIgnoreCase(rawId)) {
-        return Optional.of(new TargetSelection(node, i));
-      }
-    }
-    return Optional.empty();
-  }
-
-  private Optional<TargetSelection> findStationByKind(
-      List<NodeId> waypoints, int startIndex, StationKey key, WaypointKind kind) {
-    for (int i = Math.max(0, startIndex); i < waypoints.size(); i++) {
-      NodeId node = waypoints.get(i);
-      if (node == null) {
-        continue;
-      }
-      Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(node);
-      if (metaOpt.isEmpty()) {
-        continue;
-      }
-      WaypointMetadata meta = metaOpt.get();
-      if (meta.kind() != kind) {
-        continue;
-      }
-      if (!meta.originStation().equalsIgnoreCase(key.station())) {
-        continue;
-      }
-      if (key.operator().isPresent() && !meta.operator().equalsIgnoreCase(key.operator().get())) {
-        continue;
-      }
-      if (key.operator().isEmpty() && key.routeOperator().isPresent()) {
-        if (!meta.operator().equalsIgnoreCase(key.routeOperator().get())) {
-          continue;
-        }
-      }
-      return Optional.of(new TargetSelection(node, i));
-    }
-    return Optional.empty();
-  }
-
-  private Optional<WaypointMetadata> parseWaypointMetadata(NodeId nodeId) {
-    if (nodeId == null) {
-      return Optional.empty();
-    }
-    return SignTextParser.parseWaypointLike(nodeId.value(), NodeType.WAYPOINT)
-        .flatMap(SignNodeDefinition::waypointMetadata);
-  }
-
-  private boolean isApproachTarget(NodeId nodeId) {
-    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(nodeId);
-    if (metaOpt.isEmpty()) {
-      return false;
-    }
-    WaypointKind kind = metaOpt.get().kind();
-    return kind == WaypointKind.STATION
-        || kind == WaypointKind.STATION_THROAT
-        || kind == WaypointKind.DEPOT
-        || kind == WaypointKind.DEPOT_THROAT;
-  }
-
-  private StationKey parseStationKey(String raw, RouteDefinition route) {
-    String trimmed = raw == null ? "" : raw.trim();
-    String operator = null;
-    String station = trimmed;
-    int idx = trimmed.indexOf(':');
-    if (idx > 0 && idx < trimmed.length() - 1) {
-      operator = trimmed.substring(0, idx).trim();
-      station = trimmed.substring(idx + 1).trim();
-    }
-    if (operator != null && !operator.isBlank()) {
-      return new StationKey(Optional.of(operator), station, Optional.empty());
-    }
-    Optional<String> routeOp = resolveRouteOperator(route);
-    return new StationKey(Optional.empty(), station, routeOp);
-  }
-
-  private Optional<String> resolveRouteOperator(RouteDefinition route) {
-    if (route == null) {
-      return Optional.empty();
-    }
-    Optional<RouteMetadata> metaOpt = route.metadata();
-    if (metaOpt.isPresent() && metaOpt.get().operator() != null) {
-      String op = metaOpt.get().operator();
-      if (!op.isBlank()) {
-        return Optional.of(op);
-      }
-    }
-    return parseRouteId(route.id()).map(RouteCodeParts::operator);
-  }
-
-  private record StationKey(
-      Optional<String> operator, String station, Optional<String> routeOperator) {
-    private StationKey {
-      operator = operator == null ? Optional.empty() : operator;
-      routeOperator = routeOperator == null ? Optional.empty() : routeOperator;
-    }
-  }
-
-  /**
-   * 站牌行是否属于要查的线路。
-   *
-   * @param route 交路
-   * @param lineName 列车到本站时所属的线路代码（{@link #lineAtStop}）
-   * @param lineId 要查的线路代码；为空时不过滤
-   */
-  private boolean lineMatches(RouteDefinition route, String lineName, String lineId) {
-    if (lineId == null || lineId.isBlank()) {
-      return true;
-    }
-    String expected = lineId.trim();
-    if (route == null) {
-      return false;
-    }
-    if (route.metadata().isPresent() && route.metadata().get().lineId() != null) {
-      return lineName.equalsIgnoreCase(expected);
-    }
-    return parseRouteId(route.id())
-        .map(parts -> parts.line().equalsIgnoreCase(expected))
-        .orElse(false);
-  }
-
-  /**
-   * 列车到达停靠表第 {@code index} 项时对乘客显示的线路代码（直通运转换线后为新线路，见 {@link RouteLineChanges}），按规范写法给出。
-   *
-   * @param routeLine 交路自身的线路；未知时为空
-   */
-  private Optional<String> lineAtStop(
-      RouteDefinition route, Optional<RouteLineChanges.LineRef> routeLine, int index) {
-    if (route == null || routeLine.isEmpty()) {
-      return Optional.empty();
-    }
-    return Optional.of(
-        lineCanonicalizer
-            .apply(
-                RouteLineChanges.lineAt(
-                    routeDefinitions.listStops(route.id()), index, routeLine.get()))
-            .lineCode());
-  }
-
-  private String resolveLineName(RouteDefinition route) {
-    if (route == null) {
-      return "-";
-    }
-    Optional<RouteMetadata> metaOpt = route.metadata();
-    if (metaOpt.isPresent() && metaOpt.get().lineId() != null) {
-      return metaOpt.get().lineId();
-    }
-    return parseRouteId(route.id()).map(RouteCodeParts::line).orElse(route.id().value());
-  }
-
-  /**
-   * 站牌主目的地（“开往 X”）：本行的运营终点（已按“先站名后回库”判定）。
-   *
-   * <p>不能用线路终点：EOR 是交路最后一个节点，回库交路会显示成车库，折返交路会显示成折返线。
-   */
-  private DestinationInfo resolveBoardDestination(
-      RouteDefinition route, DestinationInfo rowEndOperation) {
-    DestinationInfo base = rowEndOperation != null ? rowEndOperation : DestinationInfo.empty();
-    if (route == null) {
-      return base;
-    }
-    Optional<RouteMetadata> metaOpt = route.metadata();
-    if (metaOpt.isPresent()) {
-      Optional<String> displayNameOpt = metaOpt.get().displayName();
-      if (displayNameOpt.isPresent() && !displayNameOpt.get().isBlank()) {
-        return new DestinationInfo(displayNameOpt.get(), base.destinationId());
-      }
-    }
-    if (!base.isBlank()) {
-      return base;
-    }
-    return resolveDestinationInfo(route);
-  }
-
-  private String resolveDestination(RouteDefinition route) {
-    if (route == null || route.waypoints().isEmpty()) {
-      return "-";
-    }
-    Optional<RouteMetadata> metaOpt = route.metadata();
-    if (metaOpt.isPresent() && metaOpt.get().displayName().isPresent()) {
-      return metaOpt.get().displayName().get();
-    }
-    Optional<RouteCodeParts> partsOpt = parseRouteId(route.id());
-    if (partsOpt.isPresent()) {
-      return partsOpt.get().route();
-    }
-    NodeId last = route.waypoints().get(route.waypoints().size() - 1);
-    Optional<WaypointMetadata> meta = parseWaypointMetadata(last);
-    if (meta.isPresent()) {
-      return meta.get().originStation();
-    }
-    return last.value();
-  }
-
-  private DestinationInfo resolveDestinationInfo(RouteDefinition route) {
-    String label = resolveDestination(route);
-    Optional<String> destinationId = resolveDestinationId(route);
-    return new DestinationInfo(label, destinationId);
-  }
-
-  private TerminalInfo resolveTerminalInfo(
-      RouteDefinition route,
-      UUID routeUuid,
-      Map<UUID, TerminalInfo> terminalCache,
-      TerminalResolveContext terminalContext) {
-    if (route == null || route.id() == null || route.id().value() == null) {
-      return TerminalInfo.empty();
-    }
-    if (terminalCache != null && routeUuid != null) {
-      TerminalInfo cached = terminalCache.get(routeUuid);
-      if (cached != null) {
-        return cached;
-      }
-    }
-    DestinationInfo endRoute = resolveEndRoute(route, terminalContext);
-    DestinationInfo endOperation = resolveEndOperation(route, terminalContext);
-    TerminalInfo terminal = new TerminalInfo(endRoute, endOperation);
-    if (terminalCache != null && routeUuid != null) {
-      terminalCache.put(routeUuid, terminal);
-    }
-    return terminal;
-  }
-
-  /**
-   * 站牌行的运营终点：列车到达本站时若已越过运营终点（回库车通过本站），显示“回库”；否则显示终点站名。
-   *
-   * <p>按目标站下标而不是列车当前下标判断——站牌描述的是“车到这一站时”的状态。口径见 {@link RouteTerminals#outOfService}。
-   */
-  private DestinationInfo resolveRowEndOperation(
-      RouteDefinition route,
-      UUID routeUuid,
-      TargetSelection target,
-      TerminalInfo terminal,
-      TerminalResolveContext context) {
-    if (route == null || target == null || terminal == null) {
-      return terminal == null ? DestinationInfo.empty() : terminal.endOperation();
-    }
-    RouteOperationType operationType = resolveOperationType(routeUuid, context).orElse(null);
-    if (RouteTerminals.outOfService(
-        operationType, routeDefinitions.listStops(route.id()), target.index())) {
-      return new DestinationInfo(
-          RouteTerminals.OUT_OF_SERVICE_LABEL, Optional.of(RouteTerminals.OUT_OF_SERVICE_ID));
-    }
-    return terminal.endOperation();
-  }
-
-  /**
-   * 线路终点：交路最后一个节点（常为车库或折返线），见 {@link RouteTerminals#endOfRouteIndex}。
-   *
-   * <p>显示与 HUD 同一规则：车库显示为「LWN Depot」（ID 为 {@code OP:D:LWN}，与同代码车站区分）； 折返线、区间点显示它之前最近的车站（见 {@link
-   * RouteTerminals#endOfRouteLabelIndex}）。
-   */
-  private DestinationInfo resolveEndRoute(RouteDefinition route, TerminalResolveContext context) {
-    if (route == null || route.id() == null) {
-      return DestinationInfo.empty();
-    }
-    List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    if (!stops.isEmpty()) {
-      Optional<RouteTerminals.StationRef> depot =
-          RouteTerminals.depotRef(stops.get(stops.size() - 1));
-      if (depot.isPresent()) {
-        String code = depot.get().stationCode();
-        return new DestinationInfo(
-            RouteTerminals.depotCodeLabel(code),
-            Optional.of(depot.get().operatorCode() + ":D:" + code));
-      }
-    }
-    Optional<DestinationInfo> station =
-        resolveStopDestination(route, RouteTerminals::endOfRouteLabelIndex, context);
-    if (station.isPresent()) {
-      return station.get();
-    }
-    if (route.waypoints().isEmpty()) {
-      return DestinationInfo.empty();
-    }
-    NodeId last = route.waypoints().get(route.waypoints().size() - 1);
-    return new DestinationInfo(last.value(), Optional.of(last.value()));
-  }
-
-  /** 运营终点；没有载客车站时为空（不拿线路终点顶替，站牌 API 调用方要能分辨这种情况）。 */
-  private DestinationInfo resolveEndOperation(
-      RouteDefinition route, TerminalResolveContext context) {
-    return resolveStopDestination(route, RouteTerminals::endOfOperationIndex, context)
-        .orElse(DestinationInfo.empty());
-  }
-
-  /** 用 {@link RouteTerminals} 挑出终点 stop，再按站牌口径解析显示。 */
-  private Optional<DestinationInfo> resolveStopDestination(
-      RouteDefinition route,
-      java.util.function.Function<List<RouteStop>, java.util.OptionalInt> selector,
-      TerminalResolveContext context) {
-    if (route == null || route.id() == null) {
-      return Optional.empty();
-    }
-    List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    java.util.OptionalInt index = selector.apply(stops);
-    if (index.isEmpty() || !RouteTerminals.isStationStop(stops.get(index.getAsInt()))) {
-      return Optional.empty();
-    }
-    return resolveStationDestination(stops.get(index.getAsInt()), context);
-  }
-
-  private Optional<DestinationInfo> resolveStationDestination(
-      RouteStop stop, TerminalResolveContext context) {
-    if (stop == null) {
-      return Optional.empty();
-    }
-    // 1. 优先通过 stationId 查询
-    if (stop.stationId().isPresent()) {
-      return resolveStationDestination(stop.stationId().get(), context);
-    }
-    // 2. 通过 waypointNodeId 解析
-    if (stop.waypointNodeId().isPresent()) {
-      return resolveStationDestination(NodeId.of(stop.waypointNodeId().get()));
-    }
-    // 3. 尝试从 DYNAMIC spec 生成 placeholder nodeId 并解析
-    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
-        DynamicStopMatcher.parseDynamicSpec(stop);
-    if (dynamicSpec.isPresent()) {
-      DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
-      String displayName = spec.nodeName();
-      String stationKey = spec.operatorCode() + ":" + spec.nodeName();
-      return Optional.of(new DestinationInfo(displayName, Optional.of(stationKey)));
-    }
-    return Optional.empty();
-  }
-
-  /** 站牌目的地只认车站本体节点（咽喉不是终点），口径见 {@link RouteTerminals#stationRefOfNode}。 */
-  private Optional<DestinationInfo> resolveStationDestination(NodeId nodeId) {
-    if (nodeId == null) {
-      return Optional.empty();
-    }
-    return RouteTerminals.stationRefOfNode(nodeId.value())
-        .map(
-            ref ->
-                new DestinationInfo(
-                    ref.stationCode(), Optional.of(ref.operatorCode() + ":" + ref.stationCode())));
-  }
-
-  private Optional<DestinationInfo> resolveStationDestination(
-      UUID stationId, TerminalResolveContext context) {
-    if (stationId == null || context == null) {
-      return Optional.empty();
-    }
-    return context
-        .stationCache()
-        .computeIfAbsent(
-            stationId, id -> stationLookup.apply(id).flatMap(this::resolveStationDestination));
-  }
-
-  /** 车站绑定了图节点时按节点解析（与运行时同一口径）；否则用运营商代码 + 站码。 */
-  private Optional<DestinationInfo> resolveStationDestination(StationDirectory.StationEntry entry) {
-    Station station = entry.station();
-    if (station.graphNodeId().isPresent()) {
-      Optional<DestinationInfo> infoOpt =
-          resolveStationDestination(NodeId.of(station.graphNodeId().get()));
-      if (infoOpt.isPresent()) {
-        return infoOpt;
-      }
-    }
-    String stationCode = station.code();
-    String operator = entry.operator().code();
-    if (stationCode == null || stationCode.isBlank() || operator == null || operator.isBlank()) {
-      return Optional.empty();
-    }
-    String operatorCode = operator.trim();
-    return Optional.of(
-        new DestinationInfo(stationCode, Optional.of(operatorCode + ":" + stationCode)));
-  }
-
-  private boolean isReturnRoute(UUID routeUuid, TerminalResolveContext context) {
-    return resolveOperationType(routeUuid, context)
-        .map(type -> type == RouteOperationType.RETURN)
-        .orElse(false);
-  }
-
-  /** 交路的运营类型，取自交路缓存。 */
-  private Optional<RouteOperationType> resolveOperationType(
-      UUID routeUuid, TerminalResolveContext context) {
-    if (routeUuid == null || context == null) {
-      return Optional.empty();
-    }
-    return routeDefinitions.findRecord(routeUuid).map(record -> record.route().operationType());
-  }
-
-  private Optional<String> resolveDestinationId(RouteDefinition route) {
-    if (route == null || route.waypoints().isEmpty()) {
-      return Optional.empty();
-    }
-    NodeId last = route.waypoints().get(route.waypoints().size() - 1);
-    Optional<WaypointMetadata> metaOpt = parseWaypointMetadata(last);
-    if (metaOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    WaypointMetadata meta = metaOpt.get();
-    String operator = meta.operator();
-    if (operator == null || operator.isBlank()) {
-      return Optional.empty();
-    }
-    String stationCode;
-    if (meta.kind() == WaypointKind.INTERVAL && meta.destinationStation().isPresent()) {
-      stationCode = meta.destinationStation().get();
-    } else {
-      stationCode = meta.originStation();
-    }
-    if (stationCode == null || stationCode.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.of(operator + ":" + stationCode);
-  }
-
-  private Optional<RouteCodeParts> parseRouteId(RouteId routeId) {
-    if (routeId == null || routeId.value() == null) {
-      return Optional.empty();
-    }
-    String[] parts = routeId.value().split(":");
-    if (parts.length < 3) {
-      return Optional.empty();
-    }
-    return Optional.of(new RouteCodeParts(parts[0].trim(), parts[1].trim(), parts[2].trim()));
-  }
-
-  private record RouteCodeParts(String operator, String line, String route) {}
-
-  private record BoardRowEntry(long etaMillis, BoardResult.BoardRow row) {}
-
-  private record TerminalInfo(DestinationInfo endRoute, DestinationInfo endOperation) {
-    private TerminalInfo {
-      endRoute = endRoute == null ? DestinationInfo.empty() : endRoute;
-      endOperation = endOperation == null ? DestinationInfo.empty() : endOperation;
-    }
-
-    private static TerminalInfo empty() {
-      DestinationInfo empty = DestinationInfo.empty();
-      return new TerminalInfo(empty, empty);
-    }
-  }
-
-  /** 一次站牌重算内共用的终点解析结果。 */
-  private record TerminalResolveContext(Map<UUID, Optional<DestinationInfo>> stationCache) {
-    private TerminalResolveContext {
-      stationCache = stationCache == null ? new HashMap<>() : stationCache;
-    }
-  }
-
-  private record DestinationInfo(String label, Optional<String> destinationId) {
-    private DestinationInfo {
-      label = label == null || label.isBlank() ? "-" : label;
-      destinationId = destinationId == null ? Optional.empty() : destinationId;
-    }
-
-    private static DestinationInfo empty() {
-      return new DestinationInfo("-", Optional.empty());
-    }
-
-    private boolean isBlank() {
-      return "-".equals(label) && destinationId.isEmpty();
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // 动态旅行时间模型辅助
-  // ─────────────────────────────────────────────────────────────────────────────
 
   /**
    * 未发车票据的走行模型：车种按 Route 的 CRET 车库推断（{@link SpawnTrainConfigResolver}），推断不出来用默认车种； 其余参数与运行中列车相同。
@@ -2998,7 +1035,7 @@ public final class EtaService {
    * @param now 当前时刻（临时限速按它判断是否生效）
    */
   TravelTimeModel resolveTravelTimeModelForRoute(UUID routeUuid, UUID worldId, Instant now) {
-    return resolveTravelTimeModelForRoute(routeUuid, Optional.empty(), worldId, now);
+    return liveCalculator().resolveTravelTimeModelForRoute(routeUuid, worldId, now);
   }
 
   /**
@@ -3008,21 +1045,118 @@ public final class EtaService {
    */
   TravelTimeModel resolveTravelTimeModelForRoute(
       UUID routeUuid, Optional<String> consist, UUID worldId, Instant now) {
-    RunCurveModel.Settings settings = runSettings();
-    ConfigManager.ConfigView config = currentConfig();
-    OptionalDouble maxSpeed = OptionalDouble.empty();
-    if (routeUuid != null && config != null) {
-      Optional<TrainConfig> planned =
-          plannedConsist.apply(routeUuid, consist == null ? Optional.empty() : consist);
-      TrainConfig trainConfig =
-          planned.isPresent()
-              ? planned.get()
-              : spawnTrainConfigs.resolve(routeUuid, config.trainConfigSettings(), now);
-      settings = settings.withTrain(trainConfig.accelBps2(), trainConfig.decelBps2());
-      maxSpeed = trainConfig.maxSpeedBps();
+    return liveCalculator().resolveTravelTimeModelForRoute(routeUuid, consist, worldId, now);
+  }
+
+  /** 见 {@link EtaCalculator#trimTraveled}。 */
+  static PathProgressModel.PathProgress trimTraveled(
+      PathProgressModel.PathProgress progress, NodeId lastPassed, OptionalDouble traveled) {
+    return EtaCalculator.trimTraveled(progress, lastPassed, traveled);
+  }
+
+  /** 见 {@link EtaCalculator#ceilSeconds}。 */
+  static long ceilSeconds(Duration duration) {
+    return EtaCalculator.ceilSeconds(duration);
+  }
+
+  /** 见 {@link EtaCalculator#spawnsDownstreamOf}。 */
+  static boolean spawnsDownstreamOf(SpawnTicket ticket, int targetIndex) {
+    return EtaCalculator.spawnsDownstreamOf(ticket, targetIndex);
+  }
+
+  /** 见 {@link EtaCalculator#ticketStartIndex}。 */
+  static int ticketStartIndex(SpawnTicket ticket, int targetIndex) {
+    return EtaCalculator.ticketStartIndex(ticket, targetIndex);
+  }
+
+  /** 直接读钩子的计算（在调用线程上用）。 */
+  private EtaCalculator liveCalculator() {
+    return new EtaCalculator(liveSources(), railGraphService, stationThroats, debugLogger);
+  }
+
+  /** 实时来源：直接读当前接入的钩子，在调用线程上用。 */
+  private EtaSources liveSources() {
+    java.util.function.Supplier<Optional<StationPresenceTracker>> presence = this.stationPresence;
+    LayoverRegistry layovers = this.layoverRegistry;
+    return new EtaSources(
+        liveRoutes,
+        liveTrains,
+        stopStates,
+        plannedDepartures,
+        plannedHoldCap,
+        plannedArrivals,
+        effectiveWaypoints,
+        placedStops,
+        plannedPlatforms,
+        ticketPlatforms,
+        presence == null
+            ? null
+            : (trainName, routeKey, routeIndex) ->
+                presence
+                    .get()
+                    .map(tracker -> tracker.isAtStation(trainName, routeKey, routeIndex))
+                    .orElse(false),
+        lineCanonicalizer,
+        stationLookup,
+        currentConfig(),
+        this::resolveTicketTrainConfig,
+        liveTickets,
+        spawnManager instanceof DutyContinuitySupport support ? support : null,
+        layovers == null ? null : EtaSources.Layovers.of(layovers),
+        throughRoutes,
+        divisionRemainders,
+        skippedStops);
+  }
+
+  /** 未发车票据的车型：票上指定或编组方案预计的车型优先，否则按 CRET 车库推断（读牌子，只能在主线程）。 */
+  private TrainConfig resolveTicketTrainConfig(
+      UUID routeUuid, Optional<String> consist, ConfigManager.ConfigView config, Instant now) {
+    Optional<TrainConfig> planned = plannedConsist.apply(routeUuid, consist);
+    return planned.isPresent()
+        ? planned.get()
+        : spawnTrainConfigs.resolve(routeUuid, config.trainConfigSettings(), now);
+  }
+
+  /** 实时票据来源：发车队列与待派票据（按 id 去重），以及排班器的预测。 */
+  private final class LiveTickets implements EtaSources.Tickets {
+
+    @Override
+    public List<SpawnTicket> pending() {
+      Set<UUID> seen = new HashSet<>();
+      List<SpawnTicket> out = new ArrayList<>();
+      SpawnManager manager = spawnManager;
+      if (manager != null) {
+        for (SpawnTicket ticket : manager.snapshotQueue()) {
+          if (ticket == null) {
+            continue;
+          }
+          if (seen.add(ticket.id())) {
+            out.add(ticket);
+          }
+        }
+      }
+      java.util.function.Supplier<List<SpawnTicket>> supplier = pendingTicketSupplier;
+      if (supplier != null) {
+        for (SpawnTicket ticket : supplier.get()) {
+          if (ticket == null) {
+            continue;
+          }
+          if (seen.add(ticket.id())) {
+            out.add(ticket);
+          }
+        }
+      }
+      return out;
     }
-    return new TravelTimeModel(
-        new RunCurveModel(settings, effectiveSpeeds(worldId, now, maxSpeed)));
+
+    @Override
+    public Optional<List<SpawnTicket>> forecast(Instant now, Duration window, int maxPerService) {
+      if (!(spawnManager instanceof SpawnForecastSupport forecastSupport)) {
+        return Optional.empty();
+      }
+      List<SpawnTicket> tickets = forecastSupport.snapshotForecast(now, window, maxPerService);
+      return Optional.of(tickets == null ? List.of() : tickets);
+    }
   }
 
   private Optional<Route> readRoute(UUID routeUuid) {
@@ -3042,141 +1176,5 @@ public final class EtaService {
     return registry == null
         ? DepotSpawnPattern.SignRead.missing()
         : DepotSpawnPattern.readLoaded(registry, depotId);
-  }
-
-  /**
-   * 运行中列车的走行模型：与编表同一条运行曲线，边限速读运行时的有效限速（含永久覆盖与临时限速）。
-   *
-   * <p>加减速按本车标签的车种（与控车同一规则，{@link TrainRuntimeSnapshot.Motion#resolve}）；车上没有车种标签时按默认车种。
-   */
-  private TravelTimeModel travelTimeModelForTrain(TrainRuntimeSnapshot snap, Instant now) {
-    RunCurveModel.Settings settings = runSettings();
-    ConfigManager.ConfigView config = currentConfig();
-    if (config != null && !TrainRuntimeSnapshot.Motion.NONE.equals(snap.motion())) {
-      TrainConfig train = snap.motion().resolve(config.trainConfigSettings());
-      settings = settings.withTrain(train.accelBps2(), train.decelBps2());
-    }
-    return new TravelTimeModel(
-        new RunCurveModel(
-            settings, effectiveSpeeds(snap.worldId(), now, snap.motion().maxSpeedBps())));
-  }
-
-  /**
-   * 运行时控车用的有效限速：合并图基础限速、永久 override 与临时限速。
-   *
-   * <p>编表只接永久覆盖（临时限速带截止时刻，进表会破坏确定性）；ETA 要回答"现在开过去多久"，所以连临时限速一起算。
-   */
-  private RunCurveModel.EdgeSpeedResolver effectiveSpeeds(
-      UUID worldId, Instant now, OptionalDouble maxSpeedBps) {
-    if (worldId == null) {
-      return null;
-    }
-    Instant at = now != null ? now : Instant.now();
-    if (maxSpeedBps != null && maxSpeedBps.isPresent()) {
-      // 车型最高速度封顶边限速：与控车、编表同一口径。
-      double max = maxSpeedBps.getAsDouble();
-      return (graph, edge, fallbackSpeed) ->
-          Math.min(
-              railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, at, fallbackSpeed),
-              max);
-    }
-    return (graph, edge, fallbackSpeed) ->
-        railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, at, fallbackSpeed);
-  }
-
-  /**
-   * 查找目标节点对应的站咽喉节点列表。
-   *
-   * <p>仅当目标是 STATION/DEPOT 类型时才会查找；若目标本身就是咽喉则返回空列表。
-   *
-   * <p>站咽喉格式：{@code Operator:S:Station:Track:Seq}（5 段）。 站点格式：{@code Operator:S:Station:Track}（4 段）。
-   * 匹配规则：咽喉的 operator/station/track 与目标站点相同。
-   *
-   * @param graph 调度图
-   * @param target 目标节点（通常是站点）
-   * @return 该站点的咽喉节点列表；若无咽喉则返回空列表
-   */
-  private List<NodeId> findThroatsForStation(RailGraph graph, NodeId target) {
-    if (graph == null || target == null) {
-      return List.of();
-    }
-    Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodeOpt =
-        graph.findNode(target);
-    if (nodeOpt.isEmpty()) {
-      return List.of();
-    }
-    var node = nodeOpt.get();
-    Optional<WaypointMetadata> metaOpt = node.waypointMetadata();
-    if (metaOpt.isEmpty()) {
-      return List.of();
-    }
-    WaypointMetadata meta = metaOpt.get();
-    // 只为 STATION/DEPOT 查找咽喉
-    if (meta.kind() != WaypointKind.STATION && meta.kind() != WaypointKind.DEPOT) {
-      return List.of();
-    }
-    WaypointKind throatKind =
-        meta.kind() == WaypointKind.STATION
-            ? WaypointKind.STATION_THROAT
-            : WaypointKind.DEPOT_THROAT;
-    String operator = meta.operator();
-    String station = meta.originStation();
-    int track = meta.trackNumber();
-
-    List<NodeId> throats = new ArrayList<>();
-    for (var n : graph.nodes()) {
-      Optional<WaypointMetadata> nMetaOpt = n.waypointMetadata();
-      if (nMetaOpt.isEmpty()) {
-        continue;
-      }
-      WaypointMetadata nMeta = nMetaOpt.get();
-      if (nMeta.kind() == throatKind
-          && nMeta.operator().equalsIgnoreCase(operator)
-          && nMeta.originStation().equalsIgnoreCase(station)
-          && nMeta.trackNumber() == track) {
-        throats.add(n.id());
-      }
-    }
-    return throats;
-  }
-
-  /**
-   * 计算到咽喉的剩余边数（若有咽喉）。
-   *
-   * <p>若目标站点有咽喉，返回当前位置到最近咽喉的剩余边数；否则返回空。
-   *
-   * @param graph 调度图
-   * @param waypoints 交路实际节点序列
-   * @param currentIndex 当前 route waypoint 索引
-   * @param target 目标节点
-   * @param lastPassed 列车经过的最后一个图节点
-   * @return 到最近咽喉的剩余边数；若无咽喉或不可达则返回空
-   */
-  private Optional<Integer> remainingEdgesToThroat(
-      RailGraph graph, List<NodeId> waypoints, int currentIndex, NodeId target, NodeId lastPassed) {
-    List<NodeId> throats = findThroatsForStation(graph, target);
-    if (throats.isEmpty()) {
-      return Optional.empty();
-    }
-    int minEdges = Integer.MAX_VALUE;
-    for (NodeId throat : throats) {
-      // 构建一个临时路径：从当前位置到咽喉
-      // 由于咽喉不一定在 route waypoints 中，需要用最短路计算
-      var pathFinder =
-          new org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder();
-      NodeId from = lastPassed != null ? lastPassed : waypoints.get(Math.max(0, currentIndex));
-      var pathOpt =
-          pathFinder.shortestPath(
-              graph,
-              from,
-              throat,
-              org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder.Options
-                  .shortestDistance());
-      if (pathOpt.isPresent()) {
-        int edgeCount = pathOpt.get().nodes().size() - 1;
-        minEdges = Math.min(minEdges, edgeCount);
-      }
-    }
-    return minEdges == Integer.MAX_VALUE ? Optional.empty() : Optional.of(minEdges);
   }
 }

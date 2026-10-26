@@ -184,12 +184,15 @@ public final class StorageManager {
   private void applyCompatibilityMigrations(Connection connection) throws SQLException {
     ensureRailGraphSnapshotSignatureColumn(connection);
     ensureRailEdgeFootprintColumn(connection);
+    ensureRailNodeDoorDirectionColumn(connection);
     ensureRouteOperationTypeColumn(connection);
     migrateRoutePatternTypeEnums(connection);
     ensureTimetableDutyConsistColumn(connection);
     ensureTimetableDutyCouplingColumns(connection);
     ensurePidsScreenPagesColumn(connection);
     ensurePidsScreenRotationColumn(connection);
+    ensurePidsScreenZoneColumn(connection);
+    ensurePidsScreenWorkstationColumn(connection);
     migrateLicenseClassIds(connection);
   }
 
@@ -291,6 +294,44 @@ public final class StorageManager {
     }
   }
 
+  /** 兼容性迁移：为旧版 pids_screens 补齐 zone_code 列（站场图屏绑定的控制区；旧表为空，只画绑定的车站）。 */
+  private void ensurePidsScreenZoneColumn(java.sql.Connection connection) {
+    String screensTable = storageSchema.tablePrefix() + "pids_screens";
+    String sql = "ALTER TABLE " + screensTable + " ADD COLUMN zone_code " + dialect.stringType();
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: pids_screens.zone_code (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.zone_code: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.zone_code: " + ex.getMessage());
+    }
+  }
+
+  /** 兼容性迁移：为旧版 pids_screens 补齐 workstation 列（控制台是不是中心工位；旧表为空，按不是）。 */
+  private void ensurePidsScreenWorkstationColumn(java.sql.Connection connection) {
+    String screensTable = storageSchema.tablePrefix() + "pids_screens";
+    String sql = "ALTER TABLE " + screensTable + " ADD COLUMN workstation " + dialect.intType();
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: pids_screens.workstation (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.workstation: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.workstation: " + ex.getMessage());
+    }
+  }
+
   /** 兼容性迁移：为旧版 timetable_duties 补齐 consist_key 列（交路的车型；旧表为空，出车按 route 的编组）。 */
   private void ensureTimetableDutyConsistColumn(java.sql.Connection connection) {
     String dutiesTable = storageSchema.tablePrefix() + "timetable_duties";
@@ -385,6 +426,29 @@ public final class StorageManager {
       logger.warn("应用兼容性迁移失败: 添加 rail_edges.footprint_json: " + ex.getMessage());
     } catch (Exception ex) {
       logger.warn("应用兼容性迁移失败: 添加 rail_edges.footprint_json: " + ex.getMessage());
+    }
+  }
+
+  /**
+   * 兼容性迁移：为旧版 rail_nodes 表补齐 door_direction 列（AutoStation 牌子第 4 行的开门方向）。
+   *
+   * <p>可空、无默认值：旧行读出为空，下一次建图或改牌时按牌子写入。附加式、幂等，与 {@code footprint_json} 迁移同形：加列失败且原因是"已存在"时静默返回。
+   */
+  private void ensureRailNodeDoorDirectionColumn(java.sql.Connection connection) {
+    String nodesTable = storageSchema.tablePrefix() + "rail_nodes";
+    String sql = "ALTER TABLE " + nodesTable + " ADD COLUMN door_direction " + dialect.stringType();
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: rail_nodes.door_direction (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 rail_nodes.door_direction: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 rail_nodes.door_direction: " + ex.getMessage());
     }
   }
 

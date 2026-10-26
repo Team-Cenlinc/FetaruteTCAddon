@@ -1,6 +1,13 @@
 # 内置文案改写前的旧值。服务器上的 lang/zh_CN.yml 里某个键仍是这里列出的旧值之一（没有改过）时，
 # 加载时换成新的内置文案；改过的保留。只列改写过的键：新增的键会自动补上，不用列。
 command:
+  signal:
+    console:
+      help:
+        set: ["<gray>/fta signal console set <white><控制台></white> layout|appearance|mode <white><取值></white></gray> <white>-</white> <dark_aqua>换布局、外观，启用显示或回到测试卡</dark_aqua>"]
+    zone:
+      create:
+        invalid: ["<prefix> <red>代码与名称不能为空，代码不能含冒号</red>"]
   route:
     set:
       batch-success: ["<prefix> <dark_aqua>已批量更新 <white><count></white> 条运营运行图：</dark_aqua><white><codes></white> <gray>（出库与回送运行图不在批量范围内）</gray>"]
@@ -59,6 +66,10 @@ command:
       give:
         - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"
         - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5、status-3x5 线路运行状况屏或自定义布局）</dark_aqua>"
+        - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4 站台屏，加 -right 为站台号在右的版本；platform-group-1x3、platform-group-1x4 多站台屏；platform-2x1 停站屏；station-3x5 车站统屏；status-3x5 线路运行状况屏；或自定义布局）</dark_aqua>"
+        - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4 站台屏，加 -right 为站台号在右的版本；platform-group-1x3、platform-group-1x4 多站台屏；platform-2x1 停站屏；station-3x5 车站统屏；status-3x5 线路运行状况屏；yard-3x5 站场图；或自定义布局）</dark_aqua>"
+    set:
+      operator-line-status-only: ["<prefix> <red>只有线路运行状况屏可以不绑车站、只绑运营商</red> <gray>其余布局按车站显示到发信息</gray>"]
     list:
       operator-only: ["<operator>（<code>，不绑车站）"]
   train:
@@ -305,11 +316,16 @@ pids:
       on-time: ["准点"]
     destination:
       out-of-service-secondary: ["Not in Service"]
+    yard:
+      partial: ["部分区间缺少轨道几何，以直线代替；重建调度图后可修正"]
+      partial-secondary: ["Some sections drawn as straight lines"]
     line-status:
       filtered: ["本屏线路过滤没有匹配的线路"]
       detail:
         cancelled-secondary: ["<count> trips cancelled this hour"]
         cancelled-one-secondary: ["1 trip cancelled this hour"]
+    signalbox:
+      call: ["<train> 呼叫", "<train> 呼叫：<reason>"]
   test-card:
     hint: ["手持配置棍右键屏幕进行配置"]
     operator: ["运营商：<operator>（<code>）· 不绑车站"]
@@ -424,6 +440,8 @@ drive:
           rule: ["<prefix> <white>要求：</white><gray>练习步骤须自己完成，不能点「跳过」；说明类步骤读完点「继续」即可；最后一步结束驾驶，教程即告完成。</gray>"]
           content: ["<prefix> <white>考试内容：</white><gray>完整做完新手教程。教程会一步步教你启动列车、换向、起步、惰行、制动停车、开关车门与紧急制动。</gray>"]
           how: ["<prefix> <white>开始方式：</white><gray>在 <minutes> 分钟内坐上任意非调度列车，输入 <aqua>/fta drive on</aqua> 开始驾驶，教程随即开始；正在驾驶时教程马上开始。</gray>"]
+        signaller:
+          pass: ["<prefix> <white>交卷：</white><gray>从上岗起亲手排满 <white><trains></white> 列车的进路（车驶入控制区才算，走自动通过的不算）。满分 100，每有一列车等候超时由系统代排、或一次呼叫超时未回复，各扣 <white><penalty></white> 分；及格 <white><min></white> 分。</gray>"]
       stop:
         outcome:
           accepted: ["<green>停在可开门范围内</green>"]
@@ -446,6 +464,13 @@ drive:
       need-training: ["<prefix> <yellow>报考<white><name></white>路考前，须先完整开完 <white><required></white> 次路考练习（已完成 <white><done></white> 次）</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>", "<prefix> <yellow>报考<white><name></white>路考前，须先完成 <white><required></white> 次路考练习（已完成 <white><done></white> 次）</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"]
       tutorial-skipped: ["<prefix> <yellow>本次教程跳过了练习步骤，不计为<white><name></white>考试成绩，请重新做一遍并自己完成练习步骤</yellow> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive tutorial start</white>'><aqua>[重新开始教程]</aqua></hover></click>", "<prefix> <yellow>本次教程跳过了练习步骤，不计入<white><name></white>考试，请重新开始教程并独立完成全部练习步骤</yellow> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive tutorial start</white>'><aqua>[重新开始教程]</aqua></hover></click>"]
       retry-now: ["<prefix> <gray>可以马上重新报名</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><yellow>[重新报名]</yellow></hover></click>"]
+      unknown-class: ["<prefix> <red>没有这一级驾驶证：<white><class></white></red>"]
+      signaller:
+        reason:
+          passed: ["亲手排 <manual> 列，代排 <auto> 次，漏接 <missed> 次，得分 <points>"]
+          points: ["得分 <points>，低于及格线 <min> 分（代排 <auto> 次，漏接 <missed> 次）"]
+        tip:
+          points: ["<prefix> <gray>要领：盯住列车表里「入口等待」的车，选中后按「排列进路」；接近的车可以提前排好。标题栏亮起呼叫牌时点它，选一条回复。</gray>"]
     practice:
       warn:
         overrun: ["<prefix> <red>练习：在 <station> 停过头或越站，路考中出现即不及格</red>"]
@@ -458,6 +483,11 @@ drive:
       not-road: ["<prefix> <yellow><white><name></white>考的是新手教程，没有路考练习；可随时输入 /fta drive tutorial start 练习教程</yellow>"]
       stop:
         line: ["<prefix> <gray>练习 <done>/<total></gray> <white><station></white> <window><doors>"]
+      signaller:
+        review:
+          counts: ["<prefix> <gray>亲手排 <white><manual></white> 列 · 代排 <white><auto></white> 次 · 漏接 <white><missed></white> 次 · 按考试标准折合 <white><points></white> 分（及格 <min> 分）</gray>"]
+        tips:
+          call: ["<prefix> <aqua>信号员提示</aqua> <gray>驾驶员在呼叫：点标题栏的呼叫牌，在操作区选一条回复。超时未回复算漏接（考试中扣分）。</gray>"]
     coach:
       depart: ["<prefix> <aqua>教练：</aqua><gray>可以发车。请拨到 P1 平稳起步，随后跟随 Boss 栏的建议速度行车。</gray>"]
     drill:
@@ -472,25 +502,46 @@ drive:
         breaker-trip: ["<prefix> <gray>要领：主断跳闸时先将手柄拨回 N，在驾驶台菜单中依次断开、闭合主断路器，闭合完成后再牵引。</gray>"]
     reissue:
       cooldown: ["<prefix> <yellow>补发太频繁，<white><minutes></white> 分钟后再试</yellow>"]
+      done: ["<prefix> <green>已补发驾驶证（证号 <white><serial></white>），已放进背包</green>"]
+      none: ["<prefix> <yellow>你还没有驾驶证，输入 /fta license 查看可报名的考试</yellow>"]
     info:
       level-open-road-test: ["  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>路考 <stops> 站，及格 <min> 分</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（不发证）</gray>'><aqua>[练习]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名（在车站附近报名）</gray>'><green>[报名路考]</green></hover></click>"]
       level-need-practice: ["  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>报名路考前须完成路考练习（<done>/<required> 次）</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"]
-      footer: ["<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>驾驶证丢了？点击补发</gray>'><aqua>[补发驾驶证]</aqua></hover></click>"]
+      footer: ["<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>驾驶证丢了？点击补发</gray>'><aqua>[补发驾驶证]</aqua></hover></click>", "<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>驾驶证遗失时点击补发</gray>'><aqua>[补发驾驶证]</aqua></hover></click>"]
+      header: ["<prefix> <gold>我的驾驶证</gold> <gray>证号 <white><serial></white> · 全部 FTCA 列车通用</gray>"]
+      none: ["  <gray>尚未持有驾驶证</gray>"]
     admin:
       granted: ["<prefix> <green>已给 <white><player></white> 发放<white><name></white></green>"]
-      granted-offline: ["<prefix> <green>已给 <white><player></white> 发放<white><name></white></green> <gray>（玩家不在线，上线后生效，可用 /fta license reissue 领取驾驶证）</gray>"]
+      granted-offline: ["<prefix> <green>已给 <white><player></white> 发放<white><name></white></green> <gray>（玩家不在线，上线后生效，可用 /fta license reissue 领取驾驶证）</gray>", "<prefix> <green>已向 <white><player></white> 发放<white><name></white></green> <gray>（玩家不在线，上线后生效，可用 /fta license reissue 领取驾驶证）</gray>"]
+      list-header: ["<prefix> <gold><player> 的驾驶证</gold> <gray>证号 <serial></gray>"]
     guard:
       handback: ["<prefix> <red>本车次已晚点 <white><delay></white> 秒，为保证调度正常运行，列车将在停稳后交还自动运行，本次结束。</red>"]
+    card:
+      heading: ["<dark_blue><bold>FTCA 驾驶证</bold></dark_blue>"]
+      notice: ["<black>本证全服通用，可驾驶全部 FTCA 列车。</black>\n\n<dark_gray>驾驶权限以系统记录为准，本证仅作凭证。遗失可输入 /fta license reissue 补发。\n\n查看等级与报名考试：/fta license</dark_gray>"]
+      title: ["FTCA 驾驶证"]
+    disabled: ["<prefix> <red>驾驶证功能未开放</red>"]
+    granted-desc: ["<prefix> <gray>现在可以：<white><description></white>（全部 FTCA 列车通用）</gray>"]
+    loading: ["<prefix> <yellow>正在读取你的驾驶证，请稍后再试</yellow>"]
+    storage-unavailable: ["<prefix> <red>驾驶证存储暂不可用，请稍后再试</red>"]
+    top: ["<prefix> <gold>你已取得全部等级的驾驶证</gold>"]
   handbook:
     driver:
       page-4: ["<dark_blue><bold>三、领任务与接班</bold></dark_blue>\n<black>在车站输入 /fta drive tasks 打开任务板：左键人工驾驶，右键 ATO。列车到站后坐进车头驾驶室，确认座位后输入 /fta drive on 接班。</black>"]
       page-9: ["<dark_blue><bold>八、终点与换端</bold></dark_blue>\n<black>到终点站开门后结算本趟成绩，可以结束驾驶，也可以接着驾驶本车的下一趟。\n需要换端时，车门可以开着，走到另一端驾驶室坐下；驾驶座未标记的列车须确认座位。</black>"]
-      page-3: ["<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 自由驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 调度驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>", "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 见习驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 正式驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"]
+      page-3: ["<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 自由驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 调度驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>", "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 见习驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 正式驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>", "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 见习驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 正式驾驶证：先坐上调度列车练习，再在车站报名路考，及格取得，可领任务驾驶调度列车。\n附注 车掌：另行考取，见《车掌手册》。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"]
       page-7: ["<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>", "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。终点站最多越过停车点 3 米，超出会被强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"]
-      page-1: ["<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与准点\n八、终点与换端\n九、出了状况</black>"]
+      page-1: ["<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与准点\n八、终点与换端\n九、出了状况</black>", "<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与正点\n八、终点与换端\n九、异常处置</black>"]
       page-8: ["<dark_blue><bold>七、发车与准点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步会被拦下。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>", "<dark_blue><bold>七、发车与正点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步将被制止。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"]
-      page-10: ["<dark_blue><bold>九、出了状况</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车卡住时可以交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>", "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"]
+      page-10: ["<dark_blue><bold>九、出了状况</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车卡住时可以交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>", "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>", "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。行驶中不能离座；终点站等下一趟时可离座走到发车端，其余情况离座即结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"]
       page-6: ["<dark_blue><bold>五、信号与控速</bold></dark_blue>\n<black>侧边栏「信号」给出行车许可：允许时按限速行车；注意、减速时降速；停车时须在前方停住。信号变严时按提示右键确认。\nBoss 栏的建议速度按时刻表的运行曲线给出，跟着它驾驶即可准点。</black>"]
+    signaller:
+      page-1: ["<dark_blue><bold>FTCA 信号员手册</bold></dark_blue>\n\n<black>一、控制区与上岗\n二、控制台\n三、排列进路\n四、扣车与改停股道\n五、自动通过与模式\n六、呼叫与成绩\n七、练习与考试</black>"]
+      page-4: ["<dark_blue><bold>三、排列进路</bold></dark_blue>\n<black>车开到入口会停下等候：列车表写「入口等待」，入口信号为红。在列车表里选中它，按「排列进路」；进路上有别的车时许可保持排列中，前车让开即放行。接近的车可以提前排好。等满时限无人处理，由系统代排。</black>"]
+      page-7: ["<dark_blue><bold>六、呼叫与成绩</bold></dark_blue>\n<black>驾驶员呼叫时标题栏亮起呼叫牌，点它选一条回复。每班满分 100：代排、呼叫超时未回复各扣 5 分。奖励按亲手排的车发，走自动通过的不计。</black>", "<dark_blue><bold>六、呼叫</bold></dark_blue>\n<black>驾驶员呼叫时标题栏亮起呼叫牌，写着原因；点它按原因回复：\n信号前等候回「进路正在排列」或「前方有车，请等待」；\n车门故障回「已收到」；\n线路异常回「请以注意速度运行」。\n超时未回复算漏接，回错算答错。</black>"]
+      page-8: ["<dark_blue><bold>七、练习与考试</bold></dark_blue>\n<black>练习：输入 /fta license practice signaller，到控制台上岗，按提示一步步做完，最后用 /fta signal off 下岗计一次。\n考试：输入 /fta license exam signaller，在时限内上岗，亲手排满规定的列数交卷；代排、漏接扣分，低于及格线或转为自动即不及格。</black>\n<dark_gray>列数、及格线与时限以 /fta license 显示为准。</dark_gray>", "<dark_blue><bold>七、练习与考试</bold></dark_blue>\n<black>练习：输入 /fta license practice signaller，到控制台上岗，按提示一步步做完，最后下岗计一次。\n考试：输入 /fta license exam signaller，在时限内上岗，亲手排满 5 列交卷；代排、漏接各扣 10 分，70 分及格；转为自动即不及格。</black>"]
+    guard:
+      page-5: ["<dark_blue><bold>四、发车铃与紧急停车</bold></dark_blue>\n<black>回座后，出站信号开放时右键 6 确认，再在 7 上按住右键约一秒（一长声）发出发车信号；一短为收到，一秒内右键两下为呼叫驾驶员。出站信号未开放时不计时。遇危险右键 9 紧急停车，停稳后再发一长声解除。</black>"]
   sidebar:
     label:
       train: ["车次"]
@@ -511,6 +562,7 @@ drive:
       entry-cab: ["  <gray>•</gray> <white>/fta drive cab</white> <gray>- 折返换端时直接换到发车端驾驶室</gray>"]
       entry-on: ["  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐在列车座位上后开始驾驶</gray>", "  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐上列车座位后开始驾驶</gray>"]
       entry-congestion: ["  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵熔断</gray>", "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵保护</gray>"]
+      entry-call: ["  <gray>•</gray> <white>/fta drive call</white> <gray>- 驾驶调度列车时呼叫信号员（车上无车掌时也可按两短铃）</gray>"]
     start:
       not-head-cab: ["<prefix> <red>请坐到列车前进方向的车头驾驶室再接管</red>"]
       reserved-by-other: ["<prefix> <red>该列车已由 <white><player></white> 领取，正等候其接班，不能接管</red>"]
@@ -524,6 +576,7 @@ drive:
       unavailable: ["<prefix> <red>手动驾驶当前不可用，请查看控制台日志</red>"]
       train-in-use: ["<prefix> <red>该列车正在被驾驶或正在制动停车</red>"]
       not-stopped-at-station: ["<prefix> <red>只能在列车停站期间接管调度列车</red>"]
+      guard-on-duty: ["<prefix> <red>你正在当车掌，不能同时驾驶</red>"]
     unavailable: ["<prefix> <red>手动驾驶功能尚未就绪</red>"]
     fault:
       not-simulation: ["<prefix> <red><player> 的驾驶会话不是 simulation 级，不能注入故障</red>"]
@@ -531,6 +584,10 @@ drive:
     congestion:
       status: ["<prefix> 拥堵熔断：<white><status></white>"]
       reset: ["<prefix> <yellow>已解除拥堵熔断</yellow>"]
+    mode:
+      exam: ["<prefix> <red>驾驶证路考与路考练习须全程人工驾驶，不能切换驾驶方式</red>"]
+    call:
+      called: ["<prefix> <aqua>已呼叫信号员，请等候回复</aqua>"]
   menu:
     card:
       level:
@@ -565,11 +622,20 @@ drive:
       tripped: ["<prefix> <red>线路拥堵熔断：<white><reason></white>；已交还 <white><count></white> 列驾驶员列车并暂停接班</red>"]
     ato:
       notch-ignored: ["<aqua>ATO 运行中：手柄不起作用，拉到 EB 立即转为人工驾驶</aqua>"]
+    signaller:
+      called: ["<aqua>已呼叫信号员，请等候回复</aqua>"]
   bossbar:
     cab-change:
       announced: ["<gold>下一趟由第 <white><car></white> 节驾驶室开出</gold> <gray>请先到那一端就座</gray>"]
   seat-exit:
     moving: ["<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座</yellow>"]
+  guard:
+    command:
+      start:
+        driving: ["<prefix> <red>你正在驾驶，不能同时当车掌</red>"]
+    button:
+      hint:
+        buzzer: ["<gray>选中后按住右键约一秒为发车信号（一长声）；一秒内右键两下为呼叫驾驶员</gray>"]
 sign:
   stopmark:
     invalid: ["<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"]
@@ -609,3 +675,14 @@ enum:
 graph:
   alert:
     hint: ["<gray>请到该世界执行</gray> <click:suggest_command:'/fta graph build'><hover:show_text:'<gray>点击填入命令</gray>'><white>/fta graph build</white></hover></click><gray>；若属误删，在原位置按原文字手动放回牌子也可恢复。</gray>"]
+signaller:
+  call:
+    wrong-signal: ["<prefix> <yellow>回复与呼叫不符：<white><train></white> 报的是信号前等候，应回复「进路正在排列」（马上给它排）或「前方有车，请等待」</yellow>"]
+    incoming-signal: ["<prefix> <gold>列车 <white><train></white> 呼叫信号楼：信号前等候</gold> <gray>点控制台的呼叫牌回复「进路正在排列」或「前方有车，请等待」</gray>"]
+    incoming-signal-bar: ["<gold>列车 <white><train></white> 呼叫：信号前等候</gold>"]
+    incoming-doors: ["<prefix> <gold>列车 <white><train></white> 呼叫信号楼：车门故障</gold> <gray>点控制台的呼叫牌回复「已收到」</gray>"]
+    incoming-doors-bar: ["<gold>列车 <white><train></white> 呼叫：车门故障</gold>"]
+    incoming-obstruction: ["<prefix> <gold>列车 <white><train></white> 呼叫信号楼：线路异常</gold> <gray>点控制台的呼叫牌回复「请以注意速度运行」</gray>"]
+    incoming-obstruction-bar: ["<gold>列车 <white><train></white> 呼叫：线路异常</gold>"]
+    incoming-general: ["<prefix> <gold>列车 <white><train></white> 呼叫信号楼</gold> <gray>请在控制台点击呼叫牌回复</gray>"]
+    incoming-general-bar: ["<gold>列车 <white><train></white> 呼叫信号楼</gold>"]

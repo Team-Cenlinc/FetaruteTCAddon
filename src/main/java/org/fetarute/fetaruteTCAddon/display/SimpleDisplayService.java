@@ -63,6 +63,13 @@ public final class SimpleDisplayService implements DisplayService {
             templateService,
             plugin::debug,
             Bukkit::getCurrentTick);
+    // 信号员令越过的站不当下一站：调度服务可能晚于显示服务就绪，每次现取
+    this.resolver.setSkippedStops(
+        (train, route, index) ->
+            plugin
+                .getRuntimeDispatchService()
+                .map(dispatch -> dispatch.stationStops().stopSkips().skipped(train, route, index))
+                .orElse(false));
     this.bossBarHud =
         new BossBarTrainHudManager(
             plugin,

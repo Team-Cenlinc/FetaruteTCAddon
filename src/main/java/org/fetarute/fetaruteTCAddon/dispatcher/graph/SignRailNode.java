@@ -14,7 +14,8 @@ public record SignRailNode(
     NodeType type,
     Vector worldPosition,
     Optional<String> trainCartsDestination,
-    Optional<WaypointMetadata> waypointMetadata)
+    Optional<WaypointMetadata> waypointMetadata,
+    Optional<String> doorDirection)
     implements RailNode {
 
   public SignRailNode {
@@ -23,10 +24,29 @@ public record SignRailNode(
     Objects.requireNonNull(worldPosition, "worldPosition");
     Objects.requireNonNull(trainCartsDestination, "trainCartsDestination");
     Objects.requireNonNull(waypointMetadata, "waypointMetadata");
+    doorDirection =
+        doorDirection == null
+            ? Optional.empty()
+            : doorDirection.map(String::trim).filter(text -> !text.isEmpty());
+  }
+
+  /** 不带开门方向的节点。 */
+  public SignRailNode(
+      NodeId id,
+      NodeType type,
+      Vector worldPosition,
+      Optional<String> trainCartsDestination,
+      Optional<WaypointMetadata> waypointMetadata) {
+    this(id, type, worldPosition, trainCartsDestination, waypointMetadata, Optional.empty());
   }
 
   @Override
   public Optional<WaypointMetadata> waypointMetadata() {
     return waypointMetadata;
+  }
+
+  @Override
+  public Optional<String> doorDirection() {
+    return doorDirection;
   }
 }

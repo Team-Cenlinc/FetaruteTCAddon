@@ -12,8 +12,9 @@ import org.bukkit.block.sign.Side;
 import org.bukkit.block.sign.SignSide;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorDirection;
 
-/** 从牌子方块解析节点定义（waypoint/autostation/depot）。 */
+/** 从牌子方块解析节点定义（waypoint/autostation/depot）；autostation 另记下第 4 行的开门方向。 */
 public final class NodeSignDefinitionParser {
 
   private static final PlainTextComponentSerializer PLAIN_TEXT =
@@ -60,12 +61,15 @@ public final class NodeSignDefinitionParser {
 
     String line2 = safeLine(sign, side, 2);
     String line3 = safeLine(sign, side, 3);
+    Optional<String> doorDirection =
+        "autostation".equals(header) ? doorDirectionOf(line3) : Optional.empty();
     return parseNodeIdFromLines(line2, line3, nodeType)
         .filter(
             def ->
                 def.waypointMetadata()
                     .map(metadata -> expectedKinds.contains(metadata.kind()))
-                    .orElse(false));
+                    .orElse(false))
+        .map(def -> def.withDoorDirection(doorDirection));
   }
 
   /**
@@ -108,12 +112,27 @@ public final class NodeSignDefinitionParser {
 
     String line2 = safeLine(trackedSign, 2);
     String line3 = safeLine(trackedSign, 3);
+    Optional<String> doorDirection =
+        "autostation".equals(action) ? doorDirectionOf(line3) : Optional.empty();
     return parseNodeIdFromLines(line2, line3, nodeType)
         .filter(
             def ->
                 def.waypointMetadata()
                     .map(metadata -> expectedKinds.contains(metadata.kind()))
-                    .orElse(false));
+                    .orElse(false))
+        .map(def -> def.withDoorDirection(doorDirection));
+  }
+
+  /**
+   * AutoStation 牌子第 4 行的开门方向：识别得出方向（含 {@code BOTH}）时返回枚举名，空行、{@code NONE} 或识别不了时为空。
+   *
+   * <p>节点 ID 被拆到第 3、4 行时，第 4 行是 ID 的后半截（带冒号或是股道号），解析结果为 {@code NONE}，不会被误当成开门方向。
+   */
+  public static Optional<String> doorDirectionOf(String line) {
+    AutoStationDoorDirection direction = AutoStationDoorDirection.parse(line);
+    return direction == AutoStationDoorDirection.NONE
+        ? Optional.empty()
+        : Optional.of(direction.name());
   }
 
   private static Optional<SignNodeDefinition> parseNodeIdFromLines(

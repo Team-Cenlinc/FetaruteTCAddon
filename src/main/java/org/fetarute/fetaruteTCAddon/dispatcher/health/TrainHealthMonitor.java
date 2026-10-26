@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.SignallerGateCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchAction;
@@ -535,6 +536,10 @@ public final class TrainHealthMonitor {
     if (controlAuthority.awaitingDriver(trainName)) {
       return true;
     }
+    // 停在控制区入口等信号员：有超时自动排列兜底，期间重发或清车都会绕过人工闸。
+    if (waitingForSignaller(trainName)) {
+      return true;
+    }
     StationStopCoordinator stationStops = dispatchService.stationStops();
     return stationStops != null && stationStops.holdingForSchedule(trainName);
   }
@@ -550,6 +555,12 @@ public final class TrainHealthMonitor {
         .deadlockTrainContext(trainName)
         .map(RuntimeDispatchService.DeadlockTrainContext::layoverReady)
         .orElse(false);
+  }
+
+  /** 列车此刻停在控制区入口等信号员：只认闸自己的等待状态。不按停因回退——闸已不认它在等（许可到了、控制区回到自动、超时自动排列）之后， 留在停车状态里的旧停因不能继续豁免。 */
+  private boolean waitingForSignaller(String trainName) {
+    SignallerGateCoordinator gates = dispatchService.signallerGates();
+    return gates != null && gates.waiting(trainName);
   }
 
   /** 替换控制权（测试用）。 */

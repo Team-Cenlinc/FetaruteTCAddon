@@ -65,7 +65,8 @@ class DriveSidebarRowsTest {
 
   @Test
   void standardShowsOnlyTheDoorsBecauseOneOffStepsLiveInTheActionBar() {
-    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session(CabSystems.disabled()), 0);
+    List<DriveSidebarRows.Row> rows =
+        DriveSidebarRows.build(session(CabSystems.disabled()), 0, false);
 
     assertEquals(1, rows.size());
     assertEquals("drive.sidebar.value.doors.closed", row(rows, "doors").valueKey());
@@ -74,7 +75,7 @@ class DriveSidebarRowsTest {
   @Test
   void simulationAddsAirAndVigilance() {
     CabSystems cab = CabSystems.simulation(CabConfig.defaults(), true, 600, false, 0);
-    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session(cab), 0);
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session(cab), 0, false);
 
     assertEquals(3, rows.size());
     DriveSidebarRows.Row air = row(rows, "air");
@@ -88,7 +89,7 @@ class DriveSidebarRowsTest {
     CabSystems cab = CabSystems.simulation(CabConfig.defaults(), false, 300, false, 0);
     cab.tick(1, 0.05, true, 0, true, true);
 
-    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session(cab), 1);
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session(cab), 1, false);
 
     assertEquals("↑", row(rows, "air").values().get("pump"));
     assertTrue(row(rows, "air").valueKey().endsWith(".low"));
@@ -102,13 +103,13 @@ class DriveSidebarRowsTest {
     session.attachDriverLink(link);
     link.setTargetLabel("测试站");
 
-    DriveSidebarRows.Row next = row(DriveSidebarRows.build(session, 0), "next-station");
+    DriveSidebarRows.Row next = row(DriveSidebarRows.build(session, 0, false), "next-station");
     assertEquals("drive.sidebar.value.text", next.valueKey());
     assertEquals("测试站", next.values().get("text"));
 
     link.updateApproach(
         NodeId.of("OP:S:STA:1"), "station", OptionalDouble.of(50.0), Instant.EPOCH, 10.0);
-    DriveSidebarRows.Row mark = row(DriveSidebarRows.build(session, 0), "stop-mark");
+    DriveSidebarRows.Row mark = row(DriveSidebarRows.build(session, 0, false), "stop-mark");
     assertEquals("drive.sidebar.value.stop.approach", mark.valueKey());
     assertEquals("60", mark.values().get("distance"));
 
@@ -120,7 +121,52 @@ class DriveSidebarRowsTest {
     stop.markStopped();
     assertEquals(
         "drive.sidebar.value.stop.open-doors.left",
-        row(DriveSidebarRows.build(session, 0), "stop").valueKey());
+        row(DriveSidebarRows.build(session, 0, false), "stop").valueKey());
+  }
+
+  /** 停在人工控制区入口等信号员：信号一行下面写明怎么呼叫信号员；车上有车掌时两短铃呼叫的是车掌，改写命令。 */
+  @Test
+  void waitingForTheSignallerShowsHowToCall() {
+    DriveSession session = session(CabSystems.disabled());
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L);
+    session.attachDriverLink(link);
+
+    assertTrue(
+        DriveSidebarRows.build(session, 0, false).stream()
+            .noneMatch(row -> row.labelKey().equals("drive.sidebar.label.signaller")));
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0, true);
+    assertEquals("drive.sidebar.value.signaller.waiting", row(rows, "signaller").valueKey());
+    assertEquals(
+        rows.indexOf(row(rows, "signal")) + 1, rows.indexOf(row(rows, "signaller")), "紧跟信号一行");
+
+    link.setGuardAboard(true);
+    assertEquals(
+        "drive.sidebar.value.signaller.waiting-guard",
+        row(DriveSidebarRows.build(session, 0, true), "signaller").valueKey());
+  }
+
+  /** 信号楼令越站：调度命令一行一直显示到过了那一站（越站令撤销或过站后显示层不再给站名）。 */
+  @Test
+  void aSkipOrderShowsAsADispatchOrderUntilTheStationIsPassed() {
+    DriveSession session = session(CabSystems.disabled());
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L);
+    session.attachDriverLink(link);
+    assertTrue(
+        DriveSidebarRows.build(session, 0, false).stream()
+            .noneMatch(row -> row.labelKey().equals("drive.sidebar.label.dispatch-order")));
+
+    link.setSkipOrder("中桥");
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0, false);
+
+    DriveSidebarRows.Row order = row(rows, "dispatch-order");
+    assertEquals("drive.sidebar.value.dispatch-order.skip", order.valueKey());
+    assertEquals(Map.of("station", "中桥"), order.values());
+    assertEquals(rows.indexOf(row(rows, "signal")) + 1, rows.indexOf(order), "紧跟信号一行");
+
+    link.setSkipOrder("");
+    assertTrue(
+        DriveSidebarRows.build(session, 0, false).stream()
+            .noneMatch(row -> row.labelKey().equals("drive.sidebar.label.dispatch-order")));
   }
 
   @Test
@@ -136,7 +182,7 @@ class DriveSidebarRowsTest {
             UUID.randomUUID(), "MT-1O-168", "绿洲农场", Instant.parse("2026-10-07T08:52:15Z")));
     link.setTurnbackPending(true);
 
-    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0);
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0, false);
     assertEquals("drive.sidebar.value.stop.standby", row(rows, "stop").valueKey());
     assertTrue(
         rows.stream().noneMatch(r -> r.labelKey().startsWith("drive.sidebar.label.scheduled-")),
@@ -155,7 +201,7 @@ class DriveSidebarRowsTest {
 
     assertEquals(
         "drive.sidebar.value.stop.standby-plain",
-        row(DriveSidebarRows.build(session, 0), "stop").valueKey());
+        row(DriveSidebarRows.build(session, 0, false), "stop").valueKey());
   }
 
   @Test
@@ -166,7 +212,7 @@ class DriveSidebarRowsTest {
     Instant planned = Instant.parse("2026-10-03T08:00:00Z");
     link.setSchedule(new DriverSchedule(false, planned, OptionalLong.of(95L)));
 
-    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0);
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0, false);
     DriveSidebarRows.Row schedule = row(rows, "scheduled-arrival");
 
     assertEquals("drive.sidebar.value.schedule.late", schedule.valueKey());
@@ -180,7 +226,7 @@ class DriveSidebarRowsTest {
     link.setSchedule(new DriverSchedule(true, planned, OptionalLong.of(-20L)));
     assertEquals(
         "drive.sidebar.value.schedule.plain",
-        row(DriveSidebarRows.build(session, 0), "scheduled-departure").valueKey());
+        row(DriveSidebarRows.build(session, 0, false), "scheduled-departure").valueKey());
   }
 
   @Test
@@ -207,10 +253,10 @@ class DriveSidebarRowsTest {
 
     assertEquals(
         "drive.sidebar.value.doors.closing",
-        row(DriveSidebarRows.build(session, 20L), "doors").valueKey());
+        row(DriveSidebarRows.build(session, 20L, false), "doors").valueKey());
     assertEquals(
         "drive.sidebar.value.doors.closed",
-        row(DriveSidebarRows.build(session, 40L), "doors").valueKey());
+        row(DriveSidebarRows.build(session, 40L, false), "doors").valueKey());
   }
 
   /** 多模车的受电一行：当前方式，这一段要求换别的时后面跟要换成什么；单模车没有这一行。 */

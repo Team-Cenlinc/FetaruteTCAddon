@@ -594,7 +594,8 @@ public final class ConnectedRailNodeDiscoverySession {
                         y,
                         z,
                         def.trainCartsDestination(),
-                        def.waypointMetadata());
+                        def.waypointMetadata(),
+                        def.doorDirection());
                 duplicateCollector.record(
                     def.nodeId(),
                     new DuplicateNodeId.Occurrence(
@@ -676,7 +677,8 @@ public final class ConnectedRailNodeDiscoverySession {
                         y,
                         z,
                         def.trainCartsDestination(),
-                        def.waypointMetadata());
+                        def.waypointMetadata(),
+                        def.doorDirection());
                 duplicateCollector.record(
                     def.nodeId(),
                     new DuplicateNodeId.Occurrence(

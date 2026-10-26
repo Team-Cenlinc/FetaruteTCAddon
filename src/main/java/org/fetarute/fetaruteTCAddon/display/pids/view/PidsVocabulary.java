@@ -1,11 +1,17 @@
 package org.fetarute.fetaruteTCAddon.display.pids.view;
 
+import java.util.EnumMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
+import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 
 /**
  * 站台屏文案。中英文同时显示，每条文案取两个键：{@code <键>} 为中文，{@code <键>-secondary} 为英文。
@@ -490,6 +496,128 @@ public final class PidsVocabulary {
       case EXPRESS -> Optional.of(primary("type.express"));
       case NORMAL, OTHER -> Optional.empty();
     };
+  }
+
+  /** 站场图图例。 */
+  public PidsYardView.Legend yardLegend() {
+    return new PidsYardView.Legend(
+        names("yard.legend.free"),
+        names("yard.legend.route"),
+        names("yard.legend.held"),
+        names("yard.legend.occupied"),
+        names("yard.legend.train"),
+        names("yard.legend.platform"),
+        names("yard.legend.note"));
+  }
+
+  /** 站台块里的股道号，{@code <track>} 处换成股道号。 */
+  public Names yardTrack() {
+    return names("yard.track");
+  }
+
+  /** 站场图上的车库名，{@code <depot>} 处换成车库所在站名或车库代码。 */
+  public Names yardDepot() {
+    return names("yard.depot");
+  }
+
+  /** 站场图上的库线号，{@code <track>} 处换成库线号。 */
+  public Names yardDepotTrack() {
+    return names("yard.depot-track");
+  }
+
+  /** 站场图画不出来的原因。 */
+  public Names yardProblem(YardPicture.Problem problem) {
+    return switch (problem) {
+      case GRAPH_NOT_READY -> names("yard.no-graph");
+      case NOT_IN_GRAPH -> names("yard.not-in-graph");
+      case ZONE_NOT_FOUND -> names("yard.no-zone");
+      case BUILDING -> names("yard.building");
+    };
+  }
+
+  /** 有区间缺少轨道几何、以直线代替。 */
+  public Names yardPartial() {
+    return names("yard.partial");
+  }
+
+  /** 信号员控制台的文案（{@code pids.board.signalbox.*}）。 */
+  public SignalboxView.Labels signalboxLabels() {
+    Map<SignalboxState.RowStatus, String> statuses = new EnumMap<>(SignalboxState.RowStatus.class);
+    for (SignalboxState.RowStatus status : SignalboxState.RowStatus.values()) {
+      statuses.put(status, primary("signalbox.status." + keyOf(status)));
+    }
+    Map<SignalboxState.Button, Names> buttons = new EnumMap<>(SignalboxState.Button.class);
+    for (SignalboxState.Button button : SignalboxState.Button.values()) {
+      if (button != SignalboxState.Button.MODE) {
+        buttons.put(button, names("signalbox.button." + keyOf(button)));
+      }
+    }
+    Map<SignalboxState.TrainAction, Names> trainActions =
+        new EnumMap<>(SignalboxState.TrainAction.class);
+    for (SignalboxState.TrainAction action : SignalboxState.TrainAction.values()) {
+      trainActions.put(action, names("signalbox.train-action." + keyOf(action)));
+    }
+    Map<SignalboxState.Reply, Names> replies = new EnumMap<>(SignalboxState.Reply.class);
+    for (SignalboxState.Reply reply : SignalboxState.Reply.values()) {
+      replies.put(reply, names("signalbox.reply." + keyOf(reply)));
+    }
+    Map<CallerRole, String> callers = new EnumMap<>(CallerRole.class);
+    for (CallerRole role : CallerRole.values()) {
+      callers.put(role, primary("signalbox.caller." + keyOf(role)));
+    }
+    Map<CallReason, String> callReasons = new EnumMap<>(CallReason.class);
+    for (CallReason reason : CallReason.values()) {
+      callReasons.put(reason, primary("signalbox.call-reason." + keyOf(reason)));
+    }
+    Map<SignalboxState.NoticeKind, String> notices = new EnumMap<>(SignalboxState.NoticeKind.class);
+    for (SignalboxState.NoticeKind kind : SignalboxState.NoticeKind.values()) {
+      notices.put(kind, primary("signalbox.notice." + keyOf(kind)));
+    }
+    return new SignalboxView.Labels(
+        primary("signalbox.mode.manual"),
+        primary("signalbox.mode.auto"),
+        primary("signalbox.signaller"),
+        primary("signalbox.unattended"),
+        primary("signalbox.call"),
+        callers,
+        callReasons,
+        primary("signalbox.header.train"),
+        primary("signalbox.header.destination"),
+        primary("signalbox.header.status"),
+        primary("signalbox.header.delay"),
+        statuses,
+        primary("signalbox.auto-routed"),
+        primary("signalbox.on-time"),
+        primary("signalbox.no-trains"),
+        buttons,
+        names("signalbox.button.to-auto"),
+        names("signalbox.button.to-manual"),
+        names("signalbox.button.cancel-auto-pass"),
+        names("signalbox.button.release"),
+        trainActions,
+        names("signalbox.train-action.cancel-armed"),
+        names("signalbox.train-action.skip-revoke"),
+        primary("signalbox.skipping"),
+        replies,
+        notices,
+        primary("signalbox.notice.route-blocked-by"),
+        primary("signalbox.delegated"),
+        primary("signalbox.delegated-workstation"));
+  }
+
+  /** 信号员模块未就绪（或控制区查不到）时控制台写的说明。 */
+  public Names signalboxNotReady() {
+    return names("signalbox.not-ready");
+  }
+
+  /** 控制台屏幕没绑控制区时写的说明。 */
+  public Names signalboxNoZone() {
+    return names("signalbox.no-zone");
+  }
+
+  /** 枚举常量 → 文案键的一段：小写、下划线换成连字符（{@code ROUTE_PENDING} → {@code route-pending}）。 */
+  private static String keyOf(Enum<?> value) {
+    return value.name().toLowerCase(Locale.ROOT).replace('_', '-');
   }
 
   private Names names(String key) {

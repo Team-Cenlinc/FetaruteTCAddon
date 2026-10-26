@@ -131,7 +131,7 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
         "SELECT player_uuid, MAX(player_name) AS player_name, COUNT(*) AS tasks,"
             + " SUM(points) AS total FROM "
             + table(TABLE)
-            + " WHERE state = ? AND mode <> ?"
+            + " WHERE state = ? AND mode NOT IN (?, ?)"
             + (since == null ? "" : " AND finished_at >= ?")
             + " GROUP BY player_uuid ORDER BY total DESC, tasks DESC LIMIT "
             + Math.max(1, limit);
@@ -139,8 +139,9 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
         var statement = connection.prepareStatement(sql)) {
       statement.setString(1, COMPLETED);
       statement.setString(2, DriveTaskRecord.MODE_GUARD);
+      statement.setString(3, DriveTaskRecord.MODE_SIGNALLER);
       if (since != null) {
-        setInstant(statement, 3, since);
+        setInstant(statement, 4, since);
       }
       List<DriveLeaderboardRow> rows = new ArrayList<>();
       try (ResultSet rs = statement.executeQuery()) {
@@ -180,9 +181,11 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
   /** 评级从好到差；汇总时按下标取最小。 */
   private static final String GRADES = "SABCD";
 
+  /** 驾驶员的汇总不算车掌值乘与信号员班次。 */
   @Override
   public PlayerTotals totalsByPlayer(UUID playerId) {
-    return totals(playerId, "mode <> ?", DriveTaskRecord.MODE_GUARD);
+    return totals(
+        playerId, "mode NOT IN (?, ?)", DriveTaskRecord.MODE_GUARD, DriveTaskRecord.MODE_SIGNALLER);
   }
 
   @Override
@@ -190,8 +193,8 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
     return totals(playerId, "mode = ?", Objects.requireNonNull(mode, "mode"));
   }
 
-  /** 按方式筛选后汇总：{@code modeClause} 是带一个参数的方式条件。 */
-  private PlayerTotals totals(UUID playerId, String modeClause, String mode) {
+  /** 按方式筛选后汇总：{@code modeClause} 是方式条件，参数依次是 {@code modes}。 */
+  private PlayerTotals totals(UUID playerId, String modeClause, String... modes) {
     Objects.requireNonNull(playerId, "playerId");
     String sql =
         "SELECT COUNT(*) AS tasks,"
@@ -207,7 +210,9 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
       statement.setString(1, COMPLETED);
       statement.setString(2, COMPLETED);
       setUuid(statement, 3, playerId);
-      statement.setString(4, mode);
+      for (int i = 0; i < modes.length; i++) {
+        statement.setString(4 + i, modes[i]);
+      }
       try (ResultSet rs = statement.executeQuery()) {
         if (!rs.next()) {
           return new PlayerTotals(0, 0, 0L, "");

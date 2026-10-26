@@ -132,6 +132,7 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
   public void delete(UUID id) {
     // 车站组与成员显式删除，不依赖 PRAGMA foreign_keys 的级联（同 JdbcTimetableRepository#delete）：
     // 组内可能有别家公司的车站，成员也要随组一起删；本公司车站在别家组里的成员随车站一起删。
+    // 本公司各运营商的控制区与成员同样显式删除。
     List<String> statements =
         List.of(
             "DELETE FROM "
@@ -147,6 +148,18 @@ public final class JdbcCompanyRepository extends JdbcRepositorySupport
                 + table("operators")
                 + " o ON s.operator_id = o.id WHERE o.company_id = ?)",
             "DELETE FROM " + table("station_groups") + " WHERE company_id = ?",
+            "DELETE FROM "
+                + table("control_zone_members")
+                + " WHERE zone_id IN (SELECT z.id FROM "
+                + table("control_zones")
+                + " z JOIN "
+                + table("operators")
+                + " o ON z.operator_id = o.id WHERE o.company_id = ?)",
+            "DELETE FROM "
+                + table("control_zones")
+                + " WHERE operator_id IN (SELECT id FROM "
+                + table("operators")
+                + " WHERE company_id = ?)",
             "DELETE FROM " + table("companies") + " WHERE id = ?");
     try {
       inTransaction(

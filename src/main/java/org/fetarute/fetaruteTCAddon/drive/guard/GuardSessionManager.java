@@ -39,6 +39,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop.Phase;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallResult;
+import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
+import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCallDialog;
+import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCalls;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriveRewards;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
@@ -90,14 +95,35 @@ public final class GuardSessionManager {
     /** 给驾驶员一条动作栏提示（停留一会儿，不被驾驶 HUD 覆盖），可带提示音。 */
     void notifyDriver(UUID driverId, String key, Map<String, String> values, DriveCue cue);
 
-    /** 玩家是否在驾驶（驾驶员不能同时当车掌）。 */
-    boolean isDriving(UUID playerId);
-
-    /** 玩家是否领了还没结束的驾驶任务（同一时间只能当一个角色）。 */
-    boolean hasDriverTask(UUID playerId);
-
     /** 快捷栏数据包改写已就绪（BKCommonLib 监听注册成功）。 */
     boolean hotbarReady();
+
+    /**
+     * 车掌呼叫信号员：与驾驶员共用去处与重复呼叫的合并（{@link SignallerCalls}）。
+     *
+     * @param guardId 车掌
+     * @param trainName 车掌值乘的列车（当前车名）
+     * @param reason 原因
+     * @return 有没有人接，没人接时的原因
+     */
+    SignallerCalls.Outcome callSignaller(UUID guardId, String trainName, CallReason reason);
+
+    /**
+     * 车掌按了两短铃（或菜单的呼叫按钮）而车上没有驾驶员：弹框选原因还是直接呼叫，与驾驶员同一套（见 {@link SignallerCalls#buzz}）。
+     *
+     * @param guardId 车掌
+     * @param trainName 车掌值乘的列车（当前车名）
+     * @param stopped 列车停着
+     */
+    void buzzSignaller(
+        UUID guardId,
+        String trainName,
+        boolean stopped,
+        SignallerCalls.Ask ask,
+        SignallerCalls.Reply reply);
+
+    /** 列车此刻正停在人工控制的控制区入口，等信号员排列进路（侧边栏据此提示怎么呼叫信号员）。 */
+    boolean signallerWaiting(String trainName);
 
     /** 这列车的驾驶员亲手开着车门（人工驾驶）。 */
     boolean driverDoorsOpen(String trainName);
@@ -161,6 +187,11 @@ public final class GuardSessionManager {
     /** 列车按交路进度的下一个停靠站（与乘客 HUD 同一口径）；展示层未启用或查不到时为空。 */
     Optional<String> nextStationOf(MinecartGroup group);
 
+    /** 信号楼令这列车越过的站（与乘客 HUD 同一口径）；没有越站令、展示层未启用或查不到时为空。 */
+    default Optional<String> skipOrderOf(MinecartGroup group) {
+      return Optional.empty();
+    }
+
     /** 担当这一班的列车与它最近停过的停靠序号；还没对上列车时为空。 */
     Optional<TripTrain> trainForTrip(TaskKey key);
 
@@ -192,7 +223,10 @@ public final class GuardSessionManager {
     DISABLED,
     UNAVAILABLE,
     ALREADY_ON_DUTY,
+    /** 玩家在驾驶，或领了还没结束的驾驶任务。 */
     DRIVING,
+    /** 玩家正在值守信号楼。 */
+    SIGNALLER_ON_DUTY,
     BAD_GAME_MODE,
     NOT_SEATED,
     NOT_MANAGED,
@@ -226,6 +260,12 @@ public final class GuardSessionManager {
   /** 侧边栏“演练”一行的标签。 */
   private static final String DRILL_LABEL = "drive.guard.sidebar.label.drill";
 
+  /** 侧边栏“信号员”一行的标签。 */
+  private static final String SIGNALLER_LABEL = "drive.guard.sidebar.label.signaller";
+
+  /** 呼叫信号员的结果提示（{@code <前缀>.<结果>}）。 */
+  static final String SIGNALLER_CALL_KEYS = "drive.guard.signaller";
+
   /** 侧边栏与常驻提示的刷新间隔。 */
   private static final int DISPLAY_INTERVAL_TICKS = 10;
 
@@ -253,6 +293,9 @@ public final class GuardSessionManager {
   private final GuardSeatReach reach;
   private final ClientClock clock;
 
+  /** 在岗登记：开始值乘或领任务前问玩家是否在担任别的角色。 */
+  private final CrewDuty crew;
+
   /** 给公开 API 的快照：任务、值乘、按车名找车掌（车名小写）。主线程刷新，任意线程读。 */
   private volatile Map<UUID, GuardApi.TaskView> taskViews = Map.of();
 
@@ -270,7 +313,8 @@ public final class GuardSessionManager {
       Supplier<DriveConfig> config,
       Supplier<ConfigManager.AutoStationSettings> chime,
       DriverSide drivers,
-      ClientClock clock) {
+      ClientClock clock,
+      CrewDuty crew) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.registry = Objects.requireNonNull(registry, "registry");
     this.sounds = Objects.requireNonNull(sounds, "sounds");
@@ -279,6 +323,7 @@ public final class GuardSessionManager {
     this.chime = Objects.requireNonNull(chime, "chime");
     this.drivers = Objects.requireNonNull(drivers, "drivers");
     this.clock = Objects.requireNonNull(clock, "clock");
+    this.crew = Objects.requireNonNull(crew, "crew");
     this.sidebar = new DriveSidebar(locale);
     this.tips = new GuardTips(plugin, locale, sounds);
     this.reach = new GuardSeatReach(plugin);
@@ -406,8 +451,11 @@ public final class GuardSessionManager {
     if (sessions.containsKey(id)) {
       return StartOutcome.ALREADY_ON_DUTY;
     }
-    if (drivers.isDriving(id)) {
-      return StartOutcome.DRIVING;
+    Optional<CrewDuty.Role> other = crew.busyOtherThan(id, CrewDuty.Role.GUARD);
+    if (other.isPresent()) {
+      return other.get() == CrewDuty.Role.SIGNALLER
+          ? StartOutcome.SIGNALLER_ON_DUTY
+          : StartOutcome.DRIVING;
     }
     if (!gameModeAllowed(player.getGameMode(), current)) {
       return StartOutcome.BAD_GAME_MODE;
@@ -534,6 +582,21 @@ public final class GuardSessionManager {
 
   /** 结束值乘：车掌开着的门随之关上，车门交还驾驶员或站台。 */
   public void stop(UUID playerId, GuardSession.EndReason reason) {
+    stop(
+        playerId,
+        reason,
+        reason.name(),
+        "drive.guard.end." + reason.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'));
+  }
+
+  /**
+   * 结束值乘，任务记录的原因与告诉车掌的话另给（例如信号楼取消车次）。
+   *
+   * @param taskReason 任务记录里写的原因
+   * @param endMessageKey 告诉车掌的语言键（占位符 {@code <stops>}、{@code <timeouts>}）
+   */
+  public void stop(
+      UUID playerId, GuardSession.EndReason reason, String taskReason, String endMessageKey) {
     GuardSession session = sessions.remove(playerId);
     if (session == null) {
       return;
@@ -572,7 +635,7 @@ public final class GuardSessionManager {
         dutyTask == null
             ? GuardTrip.stateFor(reason)
             : GuardTrip.taskStateFor(reason, dutyTask.handoverStopSequence(), dutyTask.source()),
-        reason.name());
+        taskReason);
     if (player != null) {
       reach.update(player, false);
       sidebar.hide(player);
@@ -582,8 +645,7 @@ public final class GuardSessionManager {
       player.updateInventory();
       player.sendMessage(
           locale.component(
-              "drive.guard.end."
-                  + reason.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
+              endMessageKey,
               Map.of(
                   "stops",
                   String.valueOf(session.link().completedStops()),
@@ -1348,11 +1410,22 @@ public final class GuardSessionManager {
     }
   }
 
-  /** 侧边栏各行：最上面是还没过时的提示，其次是进行中的演练，然后是值乘状态。 */
+  /** 侧边栏各行：最上面是还没过时的提示，其次是进行中的演练、在控制区入口等信号员时怎么呼叫，然后是值乘状态。 */
   private List<DriveSidebarRows.Row> sidebarRows(
       GuardSession session, GuardDisplay.Snapshot snapshot, long now) {
     List<DriveSidebarRows.Row> rows = new ArrayList<>();
     session.notice(now).ifPresent(rows::add);
+    String train = session.link().currentTrainName();
+    if (drivers.signallerWaiting(train)) {
+      // 车上有驾驶员时两短铃呼叫的是驾驶员，呼叫信号员只能用命令
+      rows.add(
+          new DriveSidebarRows.Row(
+              SIGNALLER_LABEL,
+              drivers.driverOf(train).isPresent()
+                  ? "drive.guard.sidebar.value.signaller-command"
+                  : "drive.guard.sidebar.value.signaller-buzzer",
+              Map.of()));
+    }
     GuardDrill drill = session.drill();
     if (drill != null) {
       rows.add(
@@ -1391,7 +1464,7 @@ public final class GuardSessionManager {
     }
   }
 
-  /** 车掌的铃：一长发车、一短收到、两短呼叫。 */
+  /** 车掌的铃：一长发车、一短收到、两短呼叫驾驶员（车上没有驾驶员时呼叫信号员）。 */
   private void onGuardBuzzer(
       Player player, GuardSession session, BuzzerPress.Kind kind, boolean seated) {
     String train = session.link().currentTrainName();
@@ -1439,8 +1512,58 @@ public final class GuardSessionManager {
                       "drive.guard.driver.call",
                       Map.of("guard", session.playerName()),
                       DriveCue.BUZZER),
-              () -> notice(session, "drive.guard.call.no-driver", Map.of()));
+              () -> buzzSignaller(player, session));
     }
+  }
+
+  /** 车上没有驾驶员时的两短（或菜单的呼叫按钮）：列车停着时弹出对话框选原因，叫不到时直接说明原因、不弹框；行驶中直接按一般联系呼叫。结果在侧边栏提示。 */
+  private void buzzSignaller(Player player, GuardSession session) {
+    drivers.buzzSignaller(
+        session.playerId(),
+        session.link().currentTrainName(),
+        findGroup(session).map(group -> !group.isMoving()).orElse(false),
+        (zone, waiting) -> {
+          player.closeInventory();
+          SignallerCallDialog.open(
+              plugin, locale, player, zone, waiting, this::callSignallerFromCab);
+        },
+        (result, ring) -> tellSignallerCall(player, session, result, ring));
+  }
+
+  /** 对话框里选了原因：呼叫信号员。 */
+  private void callSignallerFromCab(Player player, CallReason reason) {
+    GuardSession session = sessions.get(player.getUniqueId());
+    if (session == null) {
+      return;
+    }
+    SignallerCalls.Outcome outcome =
+        drivers.callSignaller(session.playerId(), session.link().currentTrainName(), reason);
+    tellSignallerCall(player, session, outcome.result(), outcome.rings());
+  }
+
+  /** 车掌在车上呼叫信号员的结果在侧边栏提示，有人接时响一声。 */
+  private void tellSignallerCall(
+      Player player, GuardSession session, CallResult result, boolean ring) {
+    notice(session, result.key(SIGNALLER_CALL_KEYS), result.values());
+    if (ring) {
+      sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
+    }
+  }
+
+  /**
+   * {@code /fta guard call [原因]}：值乘中的车掌呼叫信号员（不论车上有没有驾驶员）。结果在侧边栏提示并发到聊天框。
+   *
+   * @param reason 原因；没写时为一般联系（车正在入口等候时信号员那边按“信号前等候”算）
+   */
+  public void callSignaller(Player player, CallReason reason) {
+    GuardSession session = sessions.get(player.getUniqueId());
+    if (session == null) {
+      player.sendMessage(locale.component("drive.guard.command.not-on-duty"));
+      return;
+    }
+    SignallerCalls.Outcome outcome =
+        drivers.callSignaller(session.playerId(), session.link().currentTrainName(), reason);
+    alert(player, session, outcome.result().key(SIGNALLER_CALL_KEYS), outcome.result().values());
   }
 
   /** 铃响一下：这列车上的车掌与驾驶员都听得到（驾驶室里的蜂鸣器）。 */
@@ -1473,7 +1596,7 @@ public final class GuardSessionManager {
         .computeIfAbsent(
             driver.getUniqueId(),
             id ->
-                new BuzzerPress(
+                BuzzerPress.forKey(
                     current.guard().buzzerLongTicks(), current.guard().buzzerDoubleTicks()))
         .press(at);
     ringBuzzer(driver, trainName);
@@ -1765,7 +1888,8 @@ public final class GuardSessionManager {
             .flatMap(stop -> session.link().work())
             .map(work -> !work.canReport())
             .orElse(false);
-    return new GuardMenu.View(endConfirm, reportUsed);
+    boolean driverAboard = drivers.driverOf(session.link().currentTrainName()).isPresent();
+    return new GuardMenu.View(endConfirm, reportUsed, driverAboard);
   }
 
   /** 车掌点了菜单上半部分的一个槽位。由事件监听在取消点击之后调用。 */
@@ -1805,6 +1929,7 @@ public final class GuardSessionManager {
     sessionOf(player.getUniqueId()).ifPresent(session -> session.setMenuTopSize(0));
   }
 
+  /** 菜单的呼叫按钮：与两短铃相同，有驾驶员时呼叫驾驶员，没有时呼叫信号员。 */
   private void callDriver(Player player, GuardSession session) {
     ringBuzzer(player, session.link().currentTrainName());
     onGuardBuzzer(player, session, BuzzerPress.Kind.CALL, true);
@@ -2714,7 +2839,8 @@ public final class GuardSessionManager {
         seated,
         session.link().timeoutStops(),
         cabChange,
-        stop.isEmpty() ? drivers.nextStationOf(group) : Optional.empty());
+        stop.isEmpty() ? drivers.nextStationOf(group) : Optional.empty(),
+        drivers.skipOrderOf(group));
   }
 
   private void refreshHotbar(Player player, GuardSession session, boolean force) {
@@ -2780,7 +2906,7 @@ public final class GuardSessionManager {
   }
 
   /**
-   * 领取或派出一班车掌（任务板与插件共用）：车掌功能可用、不在值乘、不在驾驶；一个车次一名车掌、一名玩家一个未结束的任务。
+   * 领取或派出一班车掌（任务板与插件共用）：车掌功能可用、不在值乘、不在担任别的角色（驾驶、已领驾驶任务、值守信号楼）；一个车次一名车掌、一名玩家一个未结束的任务。
    *
    * @param unavailable 车次已取消或在接班站终到
    */
@@ -2793,8 +2919,11 @@ public final class GuardSessionManager {
     if (sessions.containsKey(id)) {
       return GuardTasks.ClaimOutcome.ON_DUTY;
     }
-    if (drivers.isDriving(id) || drivers.hasDriverTask(id)) {
-      return GuardTasks.ClaimOutcome.DRIVING;
+    Optional<CrewDuty.Role> other = crew.busyOtherThan(id, CrewDuty.Role.GUARD);
+    if (other.isPresent()) {
+      return other.get() == CrewDuty.Role.SIGNALLER
+          ? GuardTasks.ClaimOutcome.SIGNALLER_ON_DUTY
+          : GuardTasks.ClaimOutcome.DRIVING;
     }
     GuardTasks.ClaimOutcome outcome =
         tasks.register(id, player.getName(), spec, unavailable, Instant.now());
@@ -2874,7 +3003,7 @@ public final class GuardSessionManager {
       }
       return;
     }
-    if (drivers.isDriving(task.playerId())) {
+    if (crew.busyOtherThan(task.playerId(), CrewDuty.Role.GUARD).isPresent()) {
       player.sendActionBar(locale.component("drive.guard.task.busy", values));
       return;
     }
@@ -3001,13 +3130,14 @@ public final class GuardSessionManager {
     }
     GuardTask task = found.get();
     Player player = Bukkit.getPlayer(task.playerId());
-    // 车掌正在别的车上值乘或在驾驶：上不了这列车，扣着只会让这一班白白晚点。
+    // 车掌正在别的车上值乘或在担任别的角色：上不了这列车，扣着只会让这一班白白晚点。
     boolean online =
         player != null
             && player.isOnline()
             && available()
             && (task.state() != GuardTask.State.CLAIMED
-                || (!sessions.containsKey(task.playerId()) && !drivers.isDriving(task.playerId())));
+                || (!sessions.containsKey(task.playerId())
+                    && crew.busyOtherThan(task.playerId(), CrewDuty.Role.GUARD).isEmpty()));
     switch (GuardTasks.layover(task, trainName, online, now)) {
       case HOLD -> {
         return false;

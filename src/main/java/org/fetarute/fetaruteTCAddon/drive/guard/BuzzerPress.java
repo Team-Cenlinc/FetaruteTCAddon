@@ -10,8 +10,11 @@ import org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock;
  * <p>按住的时长有两种量法。车掌手里的发车铃是一件“可使用”的物品：准星没对着方块或实体时，客户端按下右键只发一次“使用”，之后一直处于使用状态，
  * 松开时另发一个包，按住多久就是多久（{@link #press(long, boolean)} 传 {@code true}，松开调 {@link
  * #release(long)}）。其余情况客户端按住时每 {@value #USE_REPEAT_TICKS} tick 重发一次“使用”，相隔超过 {@value
- * #RELEASE_GAP_TICKS} tick 算松开。松开时按按住的时长判一长或一短。一短之后在 {@code doubleTicks}
- * 内又按一下（短按）算呼叫，否则等时限过了才认作一短。驾驶员用丢弃键（每按一下一次）同样走这里，按一下就是一短。
+ * #RELEASE_GAP_TICKS} tick 算松开。松开时按按住的时长判一长或一短。一短之后在 {@code doubleTicks} 内又按一下（短按）算呼叫，否则等时限过了才认作一短。
+ *
+ * <p>驾驶员的铃是丢弃键（{@link #forKey}）：按一下发一个包，按住时系统先隔一段初始延迟（约 0.25–1 秒）再按键重复、密集地连发。 两个包相隔超过 {@value
+ * #KEY_REPEAT_TICKS} tick 就是又按了一下，快速连按两下也认得出两短；“单独一个包、隔一会儿、再一串密集的包”是按住了一次， 不当两短。 手快的连按两下可能只隔
+ * {@value #KEY_REPEAT_TICKS} tick、看着像按键重复，但前面没有单独的一个包、只有挨着的两个：也认作两短。
  *
  * <p>时刻一律是 {@link ClientClock} 的读数（毫秒）：按下与松开在收到数据包时读，定时调用时读此刻的。客户端时钟数的是客户端自己的 tick，重发间隔恰好 4 tick，
  * 网络抖动、丢包重传、服务器卡顿都不会把按住拆开或把两下并成一下；阈值按 tick 给，换算成毫秒。方法都加了锁（网络线程与主线程都会调用）。
@@ -37,6 +40,12 @@ public final class BuzzerPress {
   /** 客户端报着按住、却一直没等到松开，按住这么久就作废（多半是客户端其实没在使用、松开的包不会来）。 */
   static final long MAX_HELD_TICKS = 200L;
 
+  /** 丢弃键按住时系统按键重复的间隔上限：相隔不超过这么久的两个包是同一次按住。 */
+  static final long KEY_REPEAT_TICKS = 2L;
+
+  /** 按一下发一个包的键（丢弃键）。 */
+  private final boolean key;
+
   private final long repeat;
   private final long releaseGap;
   private final long longHold;
@@ -49,6 +58,9 @@ public final class BuzzerPress {
   /** 这一次按住由客户端报着（处于使用状态，松开时另发包），不按重发间隔判松开。 */
   private boolean clientHeld;
 
+  /** 这一次按住收到了几个包。 */
+  private int packets;
+
   /** 已认出、等 {@link #tick} 交出去的按法。 */
   private final ArrayDeque<Kind> ready = new ArrayDeque<>();
 
@@ -60,12 +72,27 @@ public final class BuzzerPress {
    * @param doubleTicks 两短相隔多久以内算呼叫
    */
   public BuzzerPress(long longTicks, long doubleTicks) {
+    this(longTicks, doubleTicks, false);
+  }
+
+  private BuzzerPress(long longTicks, long doubleTicks, boolean key) {
     long unit = ClientClock.MILLIS_PER_TICK;
-    this.repeat = USE_REPEAT_TICKS * unit;
-    this.releaseGap = RELEASE_GAP_TICKS * unit;
+    this.key = key;
+    this.repeat = (key ? KEY_REPEAT_TICKS : USE_REPEAT_TICKS) * unit;
+    this.releaseGap = (key ? KEY_REPEAT_TICKS : RELEASE_GAP_TICKS) * unit;
     this.longHold = Math.max(USE_REPEAT_TICKS, longTicks) * unit;
     this.doubleGap = Math.max(USE_REPEAT_TICKS, doubleTicks) * unit;
     this.maxHeld = MAX_HELD_TICKS * unit;
+  }
+
+  /**
+   * 按一下发一个包的键（驾驶员的丢弃键），见类说明。
+   *
+   * @param longTicks 按住多久算一长
+   * @param doubleTicks 两短相隔多久以内算呼叫
+   */
+  public static BuzzerPress forKey(long longTicks, long doubleTicks) {
+    return new BuzzerPress(longTicks, doubleTicks, true);
   }
 
   /** 按下（或按住时的一次重发）。 */
@@ -84,11 +111,13 @@ public final class BuzzerPress {
     if (holdStart < 0L) {
       holdStart = at;
       lastPress = at;
+      packets = 1;
       this.clientHeld = clientHeld;
       return true;
     }
     this.clientHeld = false;
     lastPress = Math.max(lastPress, at);
+    packets++;
     return false;
   }
 
@@ -105,6 +134,7 @@ public final class BuzzerPress {
     holdStart = -1L;
     lastPress = -1L;
     clientHeld = false;
+    packets = 0;
     ready.clear();
     pendingShortAt = -1L;
   }
@@ -147,9 +177,22 @@ public final class BuzzerPress {
   /** 结束这一次按住：按住够久是一长；短按要等等看是不是两短。 */
   private void finish(long held) {
     long pressedAt = holdStart;
+    int count = packets;
     holdStart = -1L;
     lastPress = -1L;
     clientHeld = false;
+    packets = 0;
+    if (key && count > 1 && pendingShortAt >= 0L && pressedAt - pendingShortAt <= doubleGap) {
+      // 丢弃键按住不放：先是单独一个包，隔着系统的初始延迟才连发，前后是同一次按住
+      held += pressedAt - pendingShortAt;
+      pressedAt = pendingShortAt;
+      pendingShortAt = -1L;
+    } else if (key && count == 2 && held < longHold) {
+      // 前面没有单独的一个包、只有挨着的两个：是快速连按两下（按住时一定先只有一个包，隔着初始延迟才连发，见上一条）
+      pendingShortAt = -1L;
+      ready.add(Kind.CALL);
+      return;
+    }
     if (held >= longHold) {
       pendingShortAt = -1L;
       ready.add(Kind.LONG);

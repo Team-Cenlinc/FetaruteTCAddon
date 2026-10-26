@@ -31,6 +31,7 @@ class TripSheetTest {
           "下一站 {station}",
           "{station}",
           "终点 {station}",
+          "{station} {eta}",
           List.of("换乘 {?transfer_lines}", "晚点 {?delay_minutes} 分钟", "本站起改为 {?line_change}"));
 
   private static UpcomingStop stop(
@@ -48,6 +49,19 @@ class TripSheetTest {
         transfers,
         OptionalLong.empty(),
         terminal);
+  }
+
+  private static UpcomingStop skipped(UpcomingStop stop) {
+    return new UpcomingStop(
+        stop.sequence(),
+        stop.display(),
+        stop.eta(),
+        stop.track(),
+        stop.line(),
+        stop.transfers(),
+        stop.delaySeconds(),
+        stop.terminal(),
+        true);
   }
 
   private static TripSheet build(List<UpcomingStop> stops, int total, boolean transfersOnly) {
@@ -70,6 +84,7 @@ class TripSheetTest {
           row.put("station", stop.display().label());
           row.put("transfer_lines", stop.transfers().isEmpty() ? "-" : "DS");
           row.put("delay_minutes", "-");
+          row.put("eta", stop.skipped() ? "不停车" : "2 分钟");
           if (!stop.line().orElseThrow().sameLine(MT)) {
             row.put("line", "浦蓝线");
           }
@@ -130,5 +145,29 @@ class TripSheetTest {
         List.of("下一站 站1", "站18", "终点 站20"),
         transfers.rows().stream().map(row -> plain(row.text()).split("\n")[0]).toList(),
         "先筛后截：第 18 站的换乘站也能列出");
+  }
+
+  @Test
+  void aSkippedStationIsListedAsNotStoppingAndTheNextStopIsTheOneAfterIt() {
+    List<UpcomingStop> skipping =
+        List.of(skipped(stops.get(0)), stops.get(1), stops.get(2), stops.get(3));
+
+    TripSheet sheet = build(skipping, 4, false);
+
+    assertEquals(
+        List.of(
+            TripSheet.Kind.SKIPPED,
+            TripSheet.Kind.NEXT,
+            TripSheet.Kind.STOP,
+            TripSheet.Kind.TERMINAL),
+        sheet.rows().stream().map(TripSheet.Row::kind).toList());
+    assertEquals("新笛矢 不停车", plain(sheet.rows().get(0).text()).split("\n")[0]);
+    assertEquals("下一站 镇西", plain(sheet.rows().get(1).text()));
+    assertEquals(
+        List.of("新笛矢 不停车", "下一站 镇西", "主城湾", "终点 蒲塘桥"),
+        build(skipping, 4, true).rows().stream()
+            .map(row -> plain(row.text()).split("\n")[0])
+            .toList(),
+        "只看换乘站时也留着被越的站：要在那里下车的乘客得知道");
   }
 }

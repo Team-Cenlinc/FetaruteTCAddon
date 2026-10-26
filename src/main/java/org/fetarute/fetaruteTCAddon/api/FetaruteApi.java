@@ -12,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.api.line.LineApi;
 import org.fetarute.fetaruteTCAddon.api.occupancy.OccupancyApi;
 import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
+import org.fetarute.fetaruteTCAddon.api.signaller.SignallerApi;
 import org.fetarute.fetaruteTCAddon.api.station.StationApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
@@ -62,6 +63,7 @@ import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
  * @see TimetableApi
  * @see DriveApi
  * @see GuardApi
+ * @see SignallerApi
  * @see org.fetarute.fetaruteTCAddon.api.event
  */
 public final class FetaruteApi {
@@ -84,6 +86,7 @@ public final class FetaruteApi {
   private volatile DriveApi driveApi = DriveApi.UNAVAILABLE;
   private volatile GuardApi guardApi = GuardApi.UNAVAILABLE;
   private volatile CallApi callApi = CallApi.UNAVAILABLE;
+  private volatile SignallerApi signallerApi = SignallerApi.UNAVAILABLE;
 
   private FetaruteApi(
       GraphApi graphApi,
@@ -250,6 +253,14 @@ public final class FetaruteApi {
   }
 
   /**
+   * 车站信号员 API（1.15.0）：各信号楼的模式、值守者、在入口等信号员的车与扣着的车。信号员功能未加载时返回占位实现，{@link SignallerApi#enabled()} 为
+   * {@code false}。
+   */
+  public SignallerApi signaller() {
+    return signallerApi;
+  }
+
+  /**
    * 当前 API 版本。
    *
    * @return 语义版本字符串
@@ -388,6 +399,14 @@ public final class FetaruteApi {
     FetaruteApi current = instance;
     if (current != null) {
       current.callApi = call == null ? CallApi.UNAVAILABLE : call;
+    }
+  }
+
+  /** 接上信号员 API（仅供 {@code FetaruteTCAddon} 调用）；传 {@code null} 恢复占位实现。 */
+  public static void installSignaller(SignallerApi signaller) {
+    FetaruteApi current = instance;
+    if (current != null) {
+      current.signallerApi = signaller == null ? SignallerApi.UNAVAILABLE : signaller;
     }
   }
 

@@ -1,0 +1,49 @@
+# 信号员控制台 3×5（640×384，3 行 5 列地图）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 第 1 行：控制区名，其后依次是模式牌、值守的信号员与呼叫牌，右侧是临时提示与当前时间；
+# 中间是站场图（另画选中车的计划进路、排列中的进路、控制区入口信号与可改停的股道）；左下是列车表，右下是操作按钮。
+# 绑定控制区后才是控制台：右键点击为“按”，左键点击为取消选择。不能与其他布局组合翻页。
+format: 1
+name: 信号员控制台 3×5
+tiles:
+  rows: 3
+  cols: 5
+widgets:
+  # 控制区名；模式牌、值守者与呼叫牌接在名字后面
+  - type: station-title
+    x: 8
+    y: 4
+    width: 260
+    sizes: [24, 20]
+    secondary: 12
+    gap: 8
+  # 右对齐时 x 为右缘；临时提示写在时钟左边
+  - type: clock
+    x: 628
+    y: 8
+    size: 20
+    align: right
+  # inset：轨道距组件边缘的留白；label：股道号、车次窗与去向的字号
+  - type: yard
+    x: 4
+    y: 34
+    width: 632
+    height: 228
+    inset: 6
+    label: 10
+  # 列车表：表头一行，每列车一行；columns 为各列左缘（相对列车表左缘），车次一列从 0 起
+  - type: train-list
+    x: 4
+    y: 264
+    width: 416
+    header: {height: 14, size: 10}
+    rows: {count: 4, height: 24, size: 12}
+    columns: {destination: 76, status: 180, delay: 352}
+  # 操作按钮：平时 2 列 × 3 行，回复呼叫时换成 1 列 × 4 行；按钮与回复的点击区都不得小于 16×16
+  - type: signal-buttons
+    x: 428
+    y: 266
+    width: 208
+    height: 114
+    gap: {x: 8, y: 6}
+    label: {size: 12, secondary: 10, gap: 2}

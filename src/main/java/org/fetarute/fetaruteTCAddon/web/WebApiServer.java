@@ -28,6 +28,7 @@ import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
+import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 
 /**
  * 只读 HTTP 接口的服务：JDK 自带的 {@link HttpServer}，请求在插件自己的两条后台线程上处理，不碰服务器主线程。按配置启停，配置变了时重启。
@@ -84,7 +85,8 @@ public final class WebApiServer {
             WebApiData.of(FetaruteApi::get, directory, lineStatus),
             new WebResponseCache(System::currentTimeMillis),
             Clock.systemDefaultZone(),
-            FetaruteApi.API_VERSION);
+            FetaruteApi.API_VERSION,
+            ServerIdentity::id);
     HttpServer created;
     try {
       created = HttpServer.create(new InetSocketAddress(settings.host(), settings.port()), 32);

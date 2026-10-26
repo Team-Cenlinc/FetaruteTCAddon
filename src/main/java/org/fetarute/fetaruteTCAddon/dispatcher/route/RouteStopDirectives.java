@@ -75,6 +75,29 @@ public final class RouteStopDirectives {
     return Optional.empty();
   }
 
+  /**
+   * 停靠点备注里有没有除 {@code DYNAMIC} 以外的动作指令（换线、加挂、拆开、换模、折返、销毁等）：有的话这一站的作业离不开停车。
+   *
+   * @param stop 停靠点
+   */
+  public static boolean hasAction(RouteStop stop) {
+    if (stop == null || stop.notes().isEmpty()) {
+      return false;
+    }
+    String normalized = stop.notes().get().replace("\r\n", "\n").replace('\r', '\n');
+    for (String line : normalized.split("\n", -1)) {
+      String trimmed = line == null ? "" : line.trim();
+      if (trimmed.isEmpty() || !ACTION_PREFIX_PATTERN.matcher(trimmed).find()) {
+        continue;
+      }
+      String prefix = firstSegment(normalizeActionLine(trimmed)).trim();
+      if (!"DYNAMIC".equalsIgnoreCase(prefix)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private static String firstSegment(String line) {
     if (line == null || line.isEmpty()) {
       return "";

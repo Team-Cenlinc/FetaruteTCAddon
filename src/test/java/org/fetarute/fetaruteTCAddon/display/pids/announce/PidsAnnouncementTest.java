@@ -6,6 +6,7 @@ import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixture
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.platformPending;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.row;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.running;
+import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.skipped;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -64,6 +65,22 @@ class PidsAnnouncementTest {
         List.of(PidsAnnouncement.Kind.PASSING),
         kinds(row(PidsRow.Status.ARRIVING, "0471", 20, 400, true, false, false)),
         "通过车不播晚点");
+  }
+
+  /** 信号员令越站：本应停车的车改为通过。离到站还早就在聊天里播，候车的人好及早改乘；进站时照常播通过。 */
+  @Test
+  void aStopTheSignallerSkipsIsToldInChatAheadOfThePassingWarning() {
+    assertEquals(
+        List.of(PidsAnnouncement.Kind.SKIPPED),
+        kinds(skipped(row(PidsRow.Status.EN_ROUTE, "0366", 600, 260, true, false, false))));
+    assertEquals(
+        List.of(PidsAnnouncement.Kind.SKIPPED, PidsAnnouncement.Kind.PASSING),
+        kinds(skipped(row(PidsRow.Status.ARRIVING, "0366", 20, 260, true, false, false))));
+    assertEquals(PidsAnnouncement.Channel.CHAT, PidsAnnouncement.Kind.SKIPPED.channel());
+    assertEquals(
+        List.of(),
+        kinds(row(PidsRow.Status.EN_ROUTE, "0366", 600, 260, true, false, false)),
+        "交路里本就通过的站不播");
   }
 
   @Test

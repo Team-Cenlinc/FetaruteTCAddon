@@ -35,7 +35,7 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
   public List<RailNodeRecord> listByWorld(UUID worldId) {
     Objects.requireNonNull(worldId, "worldId");
     String sql =
-        "SELECT world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind FROM "
+        "SELECT world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind, door_direction FROM "
             + table("rail_nodes")
             + " WHERE world_id = ?"
             + " ORDER BY node_id ASC";
@@ -60,8 +60,8 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
     String insert =
         "INSERT INTO "
             + table("rail_nodes")
-            + " (world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind)"
-            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            + " (world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind, door_direction)"
+            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
     String sql =
         dialect.applyUpsert(
             insert,
@@ -77,7 +77,8 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
                 "waypoint_destination",
                 "waypoint_track",
                 "waypoint_sequence",
-                "waypoint_kind"));
+                "waypoint_kind",
+                "door_direction"));
 
     try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
@@ -93,7 +94,7 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
   public List<RailNodeRecord> listByPosition(UUID worldId, int x, int y, int z) {
     Objects.requireNonNull(worldId, "worldId");
     String sql =
-        "SELECT world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind FROM "
+        "SELECT world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind, door_direction FROM "
             + table("rail_nodes")
             + " WHERE world_id = ? AND x = ? AND y = ? AND z = ?";
     List<RailNodeRecord> results = new ArrayList<>();
@@ -161,8 +162,8 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
     String insert =
         "INSERT INTO "
             + table("rail_nodes")
-            + " (world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind)"
-            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            + " (world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind, door_direction)"
+            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
     try (var connection = openConnection();
         var statement = connection.prepareStatement(insert)) {
@@ -217,6 +218,7 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
       statement.setObject(12, null);
       statement.setObject(13, null);
     }
+    statement.setString(14, node.doorDirection().orElse(null));
   }
 
   private RailNodeRecord mapRow(ResultSet rs) throws SQLException {
@@ -247,8 +249,19 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
             rs.getString("waypoint_sequence"),
             rs.getString("waypoint_kind"));
 
+    // 旧行或没有开门方向时为 NULL，读成空；空白由记录的构造器归成空。
+    Optional<String> doorDirection = Optional.ofNullable(rs.getString("door_direction"));
+
     return new RailNodeRecord(
-        worldId, NodeId.of(nodeIdRaw), nodeType, x, y, z, tcDestination, waypointMetadata);
+        worldId,
+        NodeId.of(nodeIdRaw),
+        nodeType,
+        x,
+        y,
+        z,
+        tcDestination,
+        waypointMetadata,
+        doorDirection);
   }
 
   private Optional<WaypointMetadata> readWaypointMetadata(

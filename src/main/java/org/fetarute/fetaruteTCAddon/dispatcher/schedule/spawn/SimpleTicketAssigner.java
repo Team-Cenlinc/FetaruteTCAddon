@@ -44,12 +44,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.SignallerGateCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignallerGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -4143,6 +4145,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       return Optional.empty();
     }
+    // 信号员闸：车还没实体化，用将要出车的车名问；被拦就本轮不出车、不耗重试预算，下一轮再问。
+    if (signallerBlocksSpawn(trainName, authorityRequest, now)) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      deferByGate(effectiveTicket, now, reasonPrefix + SignallerGateCoordinator.DECISION_REASON);
+      return Optional.empty();
+    }
     LaunchAuthorizationService.AuthorizationResult authorization =
         previewSpawnGate(authorityRequest);
     if (!authorization.allowed()) {
@@ -5491,6 +5500,32 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             false,
             true,
             LaunchAuthorizationService.LaunchActions.none()));
+  }
+
+  /**
+   * 信号员闸拦不拦这次出车：问的是将要出车的车名与出库授权请求，与出站门控共用调度服务上的同一个闸。没有接上信号员模块时不拦。
+   *
+   * @param trainName 将要出车的车名
+   * @param request 出库授权请求
+   * @param now 调度层时钟
+   */
+  private boolean signallerBlocksSpawn(String trainName, OccupancyRequest request, Instant now) {
+    SignallerGateCoordinator gates = runtimeDispatchService.signallerGates();
+    if (gates == null) {
+      return false;
+    }
+    Optional<SignallerGate.Hold> hold = gates.admit(trainName, request, now);
+    if (hold.isEmpty()) {
+      return false;
+    }
+    debugLogger.accept(
+        "自动发车等待信号员: train="
+            + trainName
+            + " reason="
+            + SignallerGateCoordinator.DECISION_REASON
+            + " "
+            + hold.get().detail(now));
+    return true;
   }
 
   private static void releaseSpawnLease(SpawnControl.Lease lease) {

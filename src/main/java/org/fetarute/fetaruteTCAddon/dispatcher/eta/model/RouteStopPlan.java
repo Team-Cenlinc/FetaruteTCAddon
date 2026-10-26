@@ -29,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
  *   <li><b>已定站台</b>：运行时已经有实际节点的下标（DYNAMIC 已选台，或到站时记下了实际股道）。选中的恰好是占位股道时，
  *       实际节点与声明节点相同，只有这份记录能把它与“尚未选台”分开。
  *   <li><b>计划站台</b>：尚未选台的 DYNAMIC 停靠在时刻表里排定的股道。只供展示，不进路径与行程时间：车最终停哪条股道以运行时选台为准。
+ *   <li><b>越站</b>：信号员令这趟车越过的停车点，按不停车算（不累加停站、不当下一个停车点）。
  * </ul>
  */
 public final class RouteStopPlan {
@@ -38,6 +39,7 @@ public final class RouteStopPlan {
   private final List<RouteStop> stops;
   private final Set<Integer> placed;
   private final Map<Integer, NodeId> planned;
+  private final Set<Integer> skipped;
 
   /** 各站的换模加时：第一次查停站秒数时推算（见 {@link RoutePowerModes#switchDwellPlan}）。 */
   private int[] powerDwell;
@@ -47,7 +49,8 @@ public final class RouteStopPlan {
       List<NodeId> effective,
       List<RouteStop> stops,
       Set<Integer> placed,
-      Map<Integer, NodeId> planned) {
+      Map<Integer, NodeId> planned,
+      Set<Integer> skipped) {
     this.declared = List.copyOf(declared);
     this.effective =
         List.copyOf(
@@ -58,6 +61,7 @@ public final class RouteStopPlan {
             : Collections.unmodifiableList(new ArrayList<>(stops));
     this.placed = placed == null ? differing(this.declared, this.effective) : Set.copyOf(placed);
     this.planned = planned == null ? Map.of() : Map.copyOf(planned);
+    this.skipped = skipped == null ? Set.of() : Set.copyOf(skipped);
   }
 
   /**
@@ -70,7 +74,7 @@ public final class RouteStopPlan {
   public static RouteStopPlan of(
       List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops) {
     Objects.requireNonNull(declared, "declared");
-    return new RouteStopPlan(declared, effective, stops, null, null);
+    return new RouteStopPlan(declared, effective, stops, null, null, null);
   }
 
   /**
@@ -83,7 +87,7 @@ public final class RouteStopPlan {
       List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops, Set<Integer> placed) {
     Objects.requireNonNull(declared, "declared");
     Objects.requireNonNull(placed, "placed");
-    return new RouteStopPlan(declared, effective, stops, placed, null);
+    return new RouteStopPlan(declared, effective, stops, placed, null, null);
   }
 
   private static Set<Integer> differing(List<NodeId> declared, List<NodeId> effective) {
@@ -108,7 +112,7 @@ public final class RouteStopPlan {
     nodes.set(index, node);
     Set<Integer> indices = new HashSet<>(placed);
     indices.add(index);
-    return new RouteStopPlan(declared, nodes, stops, indices, planned);
+    return new RouteStopPlan(declared, nodes, stops, indices, planned, skipped);
   }
 
   /**
@@ -130,7 +134,20 @@ public final class RouteStopPlan {
     }
     Map<Integer, NodeId> next = new HashMap<>(planned);
     next.put(index, node);
-    return new RouteStopPlan(declared, effective, stops, placed, next);
+    return new RouteStopPlan(declared, effective, stops, placed, next, skipped);
+  }
+
+  /**
+   * 把信号员令越过的停车点按不停车算。
+   *
+   * @param indices 越过的下标
+   */
+  public RouteStopPlan withSkipped(Set<Integer> indices) {
+    Objects.requireNonNull(indices, "indices");
+    if (indices.isEmpty()) {
+      return this;
+    }
+    return new RouteStopPlan(declared, effective, stops, placed, planned, indices);
   }
 
   /** 尚未选台的 DYNAMIC 停靠在时刻表里排定的股道；已选台、不是 DYNAMIC 或没有计划时为空。 */
@@ -161,9 +178,9 @@ public final class RouteStopPlan {
     return Optional.ofNullable(stops.get(index));
   }
 
-  /** 列车是否在该下标停车；没有停靠配置时一律按“不知道”返回 false。 */
+  /** 列车是否在该下标停车；没有停靠配置时一律按“不知道”返回 false，令越过的停车点也返回 false。 */
   public boolean stopsAt(int index) {
-    return stop(index).map(RouteStop::stops).orElse(false);
+    return !skipped.contains(index) && stop(index).map(RouteStop::stops).orElse(false);
   }
 
   /** 该下标的计划停站秒数（PASS 与无配置为 0，停车没配 dwell 取运行时缺省）。 */

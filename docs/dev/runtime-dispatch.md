@@ -383,10 +383,11 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 - mutual wait-for 的全部 active edge 都被双方 fresh canonical plan 证明为同一个 exact switcher 的 `MERGE` 投影时，Smart planner 输出 `SMART_DISPATCH_SWITCHER_MERGE_DETECTED`，并把 exact conflict claim 持有者标记为 `currentConflictOwner`、另一方标记为 `otherTrain`；两者都不是下一位 Gate Queue winner 或已确定的 loser。该纯汇流场景不再误报 `NEED_DIRECTION_AUDIT`，但会明确返回 `SWITCHER_MERGE_EXECUTOR_NOT_READY`。若同一 pattern 还包含其他 NODE/EDGE、single 或其他 switcher blocker，则不能被 MERGE 诊断吞掉，继续走正常 fail-closed 审计。在两阶段停车与 admission lease 尚未建立前，planner 不会删除任何一方的 `MOVEMENT_REQUIRED` claim、不会写 destination、不会失效 movement token，也不会自行签发 authority。
 - `SMART_MUTUAL_CONFLICT_OWNER_SET` 在赢家选择时记录每个 owner 的实时请求 priority 与来源、当前节点及 `PHYSICAL_FOOTPRINT/HOLD_ONLY` claim、active movement token 的 claimVersion/aspect/resources。证据缺失会写明 `unavailable:no-live-request` 或 `reason=no-token`，不得再用固定 `unknown` 掩盖仲裁输入。
 - Gate Queue 优先级默认按 `OPERATION > depot exit/CREATE > RETURN` 分类；`FTA_PRIORITY` 仍可人工覆盖。Depot spawn gate 不再固定加 `100`，其实际 priority 会出现在 `SMART_DEPOT_SPAWN_AUTHORITY_WINDOW`。
+- 交路展开计划（`ExpandedRoutePlan`）：`OccupancyRequestBuilder` 对实时路径与方向上下文路径的“整条剩余交路展开、折返切分、逐段取边”和整段单线方向判定（耗时的主体，随路径长度近似平方增长）都从计划里取。计划按（底层图快照身份、此刻被覆盖封锁的边、实际节点串[含 DYNAMIC 选台与当前节点改写]）记在 `ExpandedRoutePlans`，按图快照弱引用分表、每表 LRU 2048 份；只有 `SimpleRailGraph`、`RailNetwork.View` 及其上的 `EdgeOverrideRailGraph` 共用，其他图实现每次现算。失败日志原文与折返切分事件存进计划，每次使用时按本次列车、交路与用途重新输出，日志条目与频率不变。截断窗口、资源收集、尾部保护、联锁窗口、冲突出口仍在主线程按本次速度、车长、车头位置现算。换图、改覆盖或交路变化后，`RoutePathPrewarmer` 在最短路预热之后，后台按每条交路从各途经点到终点各算一份计划（遇 DYNAMIC 停靠截在它之前），没赶上的第一次在主线程算。测试开关 `fetarute.expandedRoutePlan.verify=true` 让每次命中都再现算一份逐项比对，不一致抛 `AssertionError`。
 
 ## 类体积约束：不要再往 RuntimeDispatchService 里加方法
 
-`RuntimeDispatchService` 约三万行、996 个方法，已经贴着 SpotBugs 的单类分析上限。
+`RuntimeDispatchService` 约三万行、981 个方法（另有静态初始化块 `static {}`，SpotBugs 计为 982），离 SpotBugs 的单类分析上限只剩十几个名额。
 越线之后整个类被标记 `SKIPPED_CLASS_TOO_BIG` 并**完全跳过静态分析**——而它恰恰是全项目最需要被覆盖的类。
 
 判据（SpotBugs 4.8.6 `AnalysisContext#isTooBig`）：类文件超过 1,000,000 字节，或方法数超过 1000，任一成立即跳过。
@@ -397,12 +398,21 @@ javap -p <class> | grep -cE '\(.*\)( throws [^;]*)?;$'
 ```
 
 只数 `'(.*);'` 会漏掉 `throws` 子句结尾的方法——主类恰好没有这种方法，测试类里却很多。
+这条命令也数不到 `static {}`（它没有括号），而 SpotBugs 把它算作一个方法，所以实际名额要再减一。
 
 因此往这个类里加能力时，做法是把逻辑放进独立协作者，只在它上面留一个访问器。
 `StationStopCoordinator` 与 `RuntimeDispatchService#stationStops()` 是现成范例：
 时刻表录制播报 + 计划扣留一共只在这个类上花掉一个方法的余量。
+`SignallerGateCoordinator`（信号员进路许可闸）同理，只占 `signallerGates()` 一个访问器，各插入点是内联调用，接线用方法引用。
 
-**`RuntimeDispatchServiceTest` 同样受这个上限约束**（现 996 个方法，`spotbugsTest` 会分析它）。
+嵌套类编译成独立的 class 文件（`RuntimeDispatchService$Xxx.class`），它的方法不计入外部类的方法数；
+Java 11 起嵌套类访问外部类私有成员走 nestmate，也不会在外部类里生成 `access$` 合成方法。
+需要大量回调主类私有方法的协作者可以这样拆：`SmartPlannerCycle` 是独立协作者，
+它要回调的主类能力由嵌套类 `RuntimeDispatchService$SmartPlannerHost`（实现 `SmartPlannerCycle.Host`）提供，
+三十多个回调方法都落在嵌套类里，主类上一个不占。
+注意 lambda 仍然编进外部类（`lambda$xxx$N`），嵌套类之外写的 lambda 照样计数。
+
+**`RuntimeDispatchServiceTest` 同样受这个上限约束**（现 998 个方法，`spotbugsTest` 会分析它）。
 越线的现象不是它自己报错，而是它被整类跳过后，只在它里面赋值的 `FakeTrain` 字段被误报 `UWF_UNWRITTEN_FIELD`。
 新用例放进独立测试类（例如 `RuntimeDispatchPositionHoldTest`），不要再往里加。
 

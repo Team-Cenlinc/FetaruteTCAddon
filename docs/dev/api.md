@@ -66,7 +66,7 @@ if (!FetaruteApi.isCompatible(this, "1.0.0")) {
 
 ## API 模块
 
-FetaruteApi 提供十二个子模块、一个数据版本号 `dataRevision()`（1.6.0，见“车站组与停靠线路”一节），另有一组 Bukkit 事件（见“事件”一节）：
+FetaruteApi 提供十三个子模块、一个数据版本号 `dataRevision()`（1.6.0，见“车站组与停靠线路”一节），另有一组 Bukkit 事件（见“事件”一节）：
 
 | 模块 | 方法 | 功能 |
 |------|------|------|
@@ -81,6 +81,7 @@ FetaruteApi 提供十二个子模块、一个数据版本号 `dataRevision()`（
 | `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消；1.11.0 车型） |
 | `drive()` | `DriveApi` | 驾驶任务：派任务、查询任务与驾驶状态、成绩记录（1.10.0；1.12.0 接班站与交班站改称 `takeoverStation`/`handoverStation`、停车结果改为 `StopOutcome`，旧名 `board`/`alight`/`StopWindow` 标为弃用、照常可用；1.13.0 `TaskRequest.rewards(false)` 不发驾驶奖励） |
 | `call()` | `CallApi` | 叫车（1.14.0）：车站上能叫车的方向与此刻能不能叫、叫车单；叫车功能未加载时为占位实现（`enabled()` 为 false） |
+| `signaller()` | `SignallerApi` | 车站信号员（1.15.0）：各信号楼（控制区）的模式与值守者、在入口等信号员的车、许可数与扣着的车；信号员功能未加载时为占位实现（`enabled()` 为 false） |
 | `guard()` | `GuardApi` | 车掌（1.14.0）：派车掌任务（`TaskRequest` 写法同驾驶任务，可设交班站、不发奖励）、查询任务与值乘、按车名找车掌、车掌记录与累计成绩；车掌功能未加载时为占位实现（`enabled()` 为 false） |
 
 ---
@@ -849,6 +850,32 @@ if (calls.enabled()) {
 - `directionsAt` 只能在主线程调用（要排车源），否则抛出 `IllegalStateException`；与叫车对话框同一口径。
 - `callOf` 查还没派出的叫车，或已派出、叫来的车还在的叫车；`callsOf` 是玩家还没派出的叫车，加上本次运行中派出、叫来的车还在的。
 
+## SignallerApi - 车站信号员（1.15.0）
+
+信号员在墙上的控制台（布局 `signalbox-3x5`、`signalbox-4x8`，绑定控制区的站台屏）上岗；有人值守时控制区为人工，进入控制区的车要信号员排列进路，
+没人值守时为自动、调度照常放行（规则见 `docs/dev/signaller.md`）。本 API 只查询，不代玩家上岗或操作控制台。
+
+```java
+SignallerApi signaller = api.signaller();
+if (signaller.enabled()) {
+    // 任意线程：各信号楼的概况（有控制台在显示、被点过或有人值守过的楼）
+    for (SignallerApi.SignalBoxView box : signaller.boxes()) {
+        // box.mode()：MANUAL（有人值守、调度图已就绪）/ AUTO
+        // box.signallerId()、signallerName()、onDutySince()：值守的信号员与上岗时刻
+        // box.waitingTrains()：在入口等许可的车（按开始等的先后）；permits()；heldTrains()：扣在站里的车
+        // box.parentZoneCode()：中心工位分出去的临时小区所属的大区；普通控制区为空
+    }
+    signaller.box("SURC", "PPK-SPB");          // 运营商代码 + 控制区代码，不分大小写
+    signaller.dutyOf(playerId);                // 这名玩家在值守的楼
+    signaller.waitingForSignaller("T-1234");   // 这列车此刻停在控制区入口等信号员
+}
+```
+
+- 所有方法都可在任意线程调用，读的是信号员模块每秒巡检与每次操作后发布的快照（最多约一秒前）；上岗与下岗事件发出前已刷新。
+- 模式按实际生效的写：调度图未就绪时闸对这片控制区放行，即使有人值守也是 `AUTO`。
+- 人工控制只在内存里，重启与重载一律回到自动、值守结束（发下岗事件，原因 `SHUTDOWN`）。
+- 中心工位：大区有人值守时，后来的人在工位上分到的一片临时小区也列在 `boxes()` 里，`zoneCode` 为临时代码（形如 `大区代码~2`，不在控制区目录里），`parentZoneCode` 为所属大区；那人下岗后这座楼随之消失。`SignalBoxView` 保留不带 `parentZoneCode` 的十参构造器（视为普通控制区）。
+
 ## 事件（1.4.0）
 
 以下均为同步 Bukkit 事件，在事实发生后的**下一个 tick** 由主线程统一发出：调度路径里只入队，不直接调用外部代码，
@@ -916,6 +943,16 @@ public class BoardListener implements Listener {
 | `TrainCallDispatchedEvent` | 叫来的车派出（车库出车、区间生成或首站待命车接走）；折返车开出时不发，等它开进终点被这一单接走才发 |
 | `TrainCallArrivedEvent` | 叫来的车到达叫车的车站（进度推进到本站），每张叫车单只发一次；首站待命车、折返车在叫车的车站接走时，派出时已停在这一站，跟着派出事件发（`getNodeId()` 为交路这一站的写法） |
 | `TrainCallEndedEvent` | 没派出就结束：玩家取消（`CANCELLED`）、等太久撤票（`TIMED_OUT`）、排不出车作废（`FAILED`） |
+
+### 信号员事件（1.15.0）
+
+信号员事件由信号员模块在主线程**当场**发出、都只读，发出前已刷新 `SignallerApi` 的快照；监听器抛异常只记日志。玩家可能已下线（下线即下岗），
+只保证有 `getPlayerId()`。抽象基类 `SignallerEvent`（带控制区的运营商代码、控制区代码与名称）不能直接监听。
+
+| 事件 | 时机 |
+|------|------|
+| `SignallerDutyStartEvent` | 上岗（点了控制台、确认上岗之后）；`isManual()` 为控制区已转人工（调度图未就绪时为 false，暂为自动）。在中心工位上岗时（大区有人值守、后来的人分到一片临时小区），`getZoneCode()` 为临时代码（形如 `大区代码~2`，只在内存里、不在控制区目录里），`getZoneName()` 为临时名，`getParentZoneCode()` 为所属大区；普通控制区 `getParentZoneCode()` 为空 |
+| `SignallerDutyEndedEvent` | 下岗（这一班已结算，控制区回到自动）；含上下岗时刻、原因（`OFF_DUTY`、`LEFT_CONSOLE`、`QUIT`、`INCAPACITATED`、`REVOKED`、`SHUTDOWN`，信号员考试交卷或了结时为 `EXAM`）与这一班的计数：经手车数、亲手排列的进路、代排、自动通过、扣车、回复与漏接的呼叫；`getParentZoneCode()` 同上岗事件 |
 
 ---
 
@@ -1066,6 +1103,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.15.0 | 新增 `FetaruteApi#signaller()` 与 `SignallerApi`（各信号楼的模式、值守者、在入口等信号员的车、许可数与扣着的车；可在任意线程调用）及信号员事件（`SignallerDutyStartEvent`、`SignallerDutyEndedEvent`，带 `getParentZoneCode()`：中心工位上的临时小区所属的大区）；`SignallerApi.SignalBoxView` 带 `parentZoneCode`，`boxes()` 也列出中心工位上的临时小区。`DriveApi#records` 不含信号员的班次（驾驶记录里 `mode` 为 `SIGNALLER` 的那些）；站牌行为不变 |
 | 1.14.0 | 新增 `FetaruteApi#guard()` 与 `GuardApi`（车掌任务、值乘、记录）及车掌事件（`GuardTaskClaimEvent`、`GuardDutyStartEvent`、`GuardStopWorkedEvent`、`GuardDepartureSignalEvent`、`GuardEmergencyStopEvent`、`GuardIncidentReportEvent`、`GuardTripScoredEvent`、`GuardTaskFinishedEvent`、`GuardDutyEndedEvent`）。`DriveApi#records` 照旧返回该玩家的全部记录，车掌的记录 `mode` 为 `GUARD`。新增 `FetaruteApi#call()` 与 `CallApi`（车站上能叫车的方向、叫车单）及叫车事件（`TrainCallPlacedEvent`、`TrainCallDispatchedEvent`、`TrainCallArrivedEvent`、`TrainCallEndedEvent`）。`TimetableApi.Duty` 加 `splitFromTripCode`（由解编开始的交路：从哪一班的列车上解下）与 `joinsTripCode`（以联挂结束的交路：并入哪一班的列车），旧构造器保留。`EtaApi.BoardRow` 加 `division`（运行中列车在本站或前方分行，或刚在本站拆开；新记录 `EtaApi.Division`、`EtaApi.DivisionPart`）与 `joining`（回程支线的车在前方联挂、`destination` 为联挂后主干的终点，或主干在本站联挂；新记录 `EtaApi.Joining`），保留 1.9.0 起的全参构造器（不分行、不联挂）。会分行的列车 `destination` 写开得更远的一段 |
 | 1.9.0 | 站牌行结构化。**记录新增字段**：`EtaApi.BoardRow` 增加 `etaEpochMillis`（附 `eta()`）、`phase`（新枚举 `EtaApi.BoardPhase`）、`stopSequence`、`passing`、`terminating`、`outOfService`、`trainName`、`delaySeconds`、`platformPending`、`platformCandidates`；保留 1.8.0 的全参构造器作为次级构造器（时刻为 0、阶段为 `EN_ROUTE`、序号为 -1、`outOfService` 按主目的地 ID 是否为 `OUT_OF_SERVICE` 推断），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量；`Optional` 分量传 `null` 时规整为空。`EtaApi.BoardRow` 另增 `platformPlanned` 与 `cars`（新记录 `EtaApi.CarLoad`，附 `vacantSeats()`）；`TimetableApi.Departure` 增加 `plannedNodeId`（动态站台的计划股道），保留 1.8.0 与 1.7.0 的构造器。`RouteApi.RouteDetail` 增加 `via`（显式配置的经由站码，未配置为空列表），保留 1.8.0 的五参构造器。**新方法**：`TimetableApi#cancellations(from, to)`（按计划始发时刻查已取消车次，新记录 `TimetableApi.CancelledTrip`）、
 `TrainApi#listAllActiveTrains(boolean includeEta)`（为 false 时不算 ETA，接口带默认实现）。**新事件**：`TrainPlatformAssignedEvent`（站台定下来或变了）。**行为变更**：`getBoard` 列出停在本站的列车（`AT_STATION`）；时刻表预测排除已取消的车次；动态站台尚未选台时 `platform` 为计划站台或 `-`（此前为占位股道）；折返站上已知下一趟的来车按下一趟列出 |

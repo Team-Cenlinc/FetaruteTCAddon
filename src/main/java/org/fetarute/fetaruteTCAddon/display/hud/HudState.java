@@ -48,7 +48,12 @@ public enum HudState {
    * 列车停在分行站、还没拆，乘客所在的这节车厢分行后不再载客。只在模板写了这一状态时代替 {@link #AT_STATION} 与 {@link #AT_LAST_STATION}，见
    * {@link HudStateTracker#applyCarEnd}。
    */
-  AT_CAR_END;
+  AT_CAR_END,
+  /**
+   * 列车正接近信号员令越过的那一站，从站台通过、不停车。只在模板写了这一状态时代替 {@link #IN_TRIP} 与 {@link #DEPARTING}，见 {@link
+   * HudStateTracker#applySkipPassing}。
+   */
+  SKIP_PASSING;
 
   /** 解析模板中的状态 key（大小写不敏感）。 */
   public static Optional<HudState> parse(String raw) {

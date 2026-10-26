@@ -92,6 +92,13 @@ STOP-retain 生成生命周期事件；只有 owner、route、headway、role、�
 
 同一轮全局 planner 只读取一次 occupancy claim 快照，并把这份不可变视图用于列车状态、保护性尾部证明、mutual-owner 诊断与执行前方向屏障。该视图不跨 tick 缓存；下一轮仍重新读取 live claims，避免运行图扩大后按列车重复复制整张占用表，也不引入图版本或进度失效问题。
 
+planner 的编排在协作者 `SmartPlannerCycle`（采集在 RDS 的嵌套类 `SmartPlannerHost`）：
+
+- 没有任何等待边时整轮早退：不采集列车状态、不调规划器，按与“空输入规划”逐项相同的结果走节流与 trace。列车状态只为等待边上的车（含名字解析后的别名闭包）采集；冲突 claim 先按车归组。trace 字符串只在调试开关打开时拼。强连通分量用迭代 Tarjan，结果与顺序与旧的逐点可达实现一致。
+- 插件启用时 `smartPlanner().useBackgroundExecutor()`：主线程拼好不可变 `PlannerInput` 交后台跑纯函数 `plan`，下一轮在主线程用 `isDone/resultNow` 取回，从不等待；上一份没算完就整轮跳过。方向审计、trace、节流、`smartDispatchExecutorSkipReason` 复核与写账本的执行都在主线程。结论因此最多晚一轮（默认约 2.5 秒）。
+- 取回时按这份规划实际依赖的东西判过期，任一条不成立就丢弃并留 `SMART_DISPATCH_PLAN_STALE_DISCARDED`：规划设置没变；被选车挡着谁、挡在哪个资源上的等待边按同一套入图规则此刻仍会进图；被选车与它挡着的车进度窗口没变。不用全网 `occupancyVersion`/`progressVersion` 做硬闸：繁忙线网两轮之间几乎必变，`ENFORCE` 下会把执行变相关掉；两个版本只写进丢弃那行 trace 备查。
+- 规划抛出的异常在回收时于主线程重抛，仍交给巡检的 fail-closed 边界。没接后台执行器时（测试默认）提交即算完、同一轮回收，行为与以前相同。
+
 随后每列车的局部信号评估仍由既有 runtime 流程完成：canonical `MovementPlanSnapshot` 与 canonical `ExpandedPathPlan` 继续作为 entry lookahead、占用申请和信号发布的事实来源。Runtime 会从同一 expanded path 派生短 `hardAuthorityWindow` 与更远的 `advisoryLookaheadWindow`；Smart Dispatcher 只在最终 visible aspect 发布前读取这些结果并输出监督建议。
 
 当前 route index 后存在非 `PASS` RouteStop 时，`ROUTE_STOP_OR_TERMINAL` 是停靠/折返行为边界，而不是前方实体 blocker。它只会产生速度建议（必要时为 `PROCEED_WITH_CAUTION`），不得仅因进入制动距离而发布 `STOP`；实际停靠仍由对应站点、终点或 TrainCarts destination 行为完成。没有 RouteStop 证明的裸交路终点，以及缺少路线、物理占用、方向或硬授权证据的情况继续 fail-closed 到 `STOP`。

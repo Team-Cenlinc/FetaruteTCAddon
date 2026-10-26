@@ -87,6 +87,18 @@ public final class CompanyQueryService {
     return repo.findByOperatorAndCode(operatorId, codeOrId);
   }
 
+  /** 在指定运营商下按站码查询站点，不分大小写（站码按原样存，命令里常写成另一种大小写）。 */
+  public Optional<Station> findStationIgnoreCase(UUID operatorId, String code) {
+    Objects.requireNonNull(operatorId, "operatorId");
+    if (code == null) {
+      return Optional.empty();
+    }
+    String wanted = code.trim();
+    return storageProvider.stations().listByOperator(operatorId).stream()
+        .filter(station -> station != null && station.code().equalsIgnoreCase(wanted))
+        .findFirst();
+  }
+
   /** 在指定线路下按 code/UUID 查询 Route。 */
   public Optional<Route> findRoute(UUID lineId, String codeOrId) {
     Objects.requireNonNull(lineId, "lineId");

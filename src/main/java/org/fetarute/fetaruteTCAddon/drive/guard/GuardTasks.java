@@ -31,8 +31,10 @@ public final class GuardTasks {
     DISABLED,
     /** 正在值乘：先离岗再领。 */
     ON_DUTY,
-    /** 正在驾驶：车掌与驾驶员不能同时当。 */
+    /** 正在驾驶或领了还没结束的驾驶任务：车掌与驾驶员不能同时当。 */
     DRIVING,
+    /** 正在值守信号楼：先下岗再领。 */
+    SIGNALLER_ON_DUTY,
     /** 已有未结束的车掌任务。 */
     ALREADY_HAS_TASK,
     /** 这一班的车掌已被别人领走。 */

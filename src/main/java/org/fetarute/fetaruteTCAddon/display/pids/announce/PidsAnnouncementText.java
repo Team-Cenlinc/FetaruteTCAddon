@@ -123,6 +123,7 @@ final class PidsAnnouncementText {
       }
       case PASSING -> "pids.announce.passing";
       case CANCELLED -> "pids.announce.cancelled";
+      case SKIPPED -> "pids.announce.skipped";
       case DELAYED -> "pids.announce.delayed";
       case PLATFORM_CHANGED -> "pids.announce.platform-changed";
     };

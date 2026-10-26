@@ -20,7 +20,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.logging.Logger;
+import org.bukkit.Location;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.api.line.LineApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletin;
@@ -48,6 +50,14 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardView;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardZones;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardScope;
+import org.fetarute.fetaruteTCAddon.signaller.console.ConsoleTarget;
+import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxConsole;
+import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -910,6 +920,299 @@ class PidsComposerTest {
           "没绑车站时到发页不出现");
     }
     assertEquals(0, snapshotCalls, "不取到发快照");
+  }
+
+  /** 站场图屏：画面只随站场图变，不取到发快照；没接入调度时写“调度图未就绪”。 */
+  @Test
+  void yardScreensDrawTheYardAndKeepTheirContentWhileNothingChanges() {
+    PidsScreen screen = registerPaged(PidsScreen.Mode.LIVE, "yard-3x5");
+    PidsContent idle = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    assertEquals(
+        Optional.of(new Names("调度图未就绪", "Rail graph not ready")),
+        assertInstanceOf(PidsComposer.YardKey.class, idle.key()).view().message());
+
+    YardPicture picture = YardPicture.unavailable(YardPicture.Problem.NOT_IN_GRAPH);
+    List<YardScope> asked = new ArrayList<>();
+    composer.setYards(
+        (scope, world, widget) -> {
+          asked.add(scope);
+          return picture;
+        });
+    PidsContent first = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    PidsContent second = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+
+    assertEquals(first.key(), second.key(), "站场图没变，画面不重发");
+    assertEquals(List.of(YardScope.station(HHU), YardScope.station(HHU)), asked);
+    assertEquals(640, first.image().get().getWidth());
+    assertEquals(0, snapshotCalls, "不取到发快照");
+  }
+
+  @Test
+  void yardScreensWithoutAStationShowTheTestCard() {
+    PidsScreen screen =
+        new PidsScreen(
+            UUID.randomUUID(),
+            WORLD,
+            new PidsScreen.Position(0, 64, 0),
+            PidsFacing.SOUTH,
+            3,
+            5,
+            List.of("yard-3x5"),
+            Optional.empty(),
+            Optional.of("SURC"),
+            Set.of(),
+            Set.of(),
+            PidsScreen.Appearance.AUTO,
+            PidsScreen.Mode.LIVE,
+            NOW,
+            NOW);
+    registry.put(screen);
+
+    assertInstanceOf(
+        PidsTestCard.class,
+        composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key());
+  }
+
+  /** 绑了控制区的站场图屏：按控制区成员取站场图，标题写控制区名；控制区找不到时写说明，不取站场图。 */
+  @Test
+  void yardScreensBoundToAZoneDrawTheZone() {
+    PidsScreen screen =
+        registerPaged(PidsScreen.Mode.LIVE, "yard-3x5")
+            .withOperator(HHU.operatorCode(), Set.of(), NOW)
+            .withZone(Optional.of("north"), NOW);
+    registry.put(screen);
+    List<YardScope> asked = new ArrayList<>();
+    composer.setYards(
+        (scope, world, widget) -> {
+          asked.add(scope);
+          return YardPicture.unavailable(YardPicture.Problem.NOT_IN_GRAPH);
+        });
+
+    PidsYardView missing =
+        assertInstanceOf(
+                PidsComposer.YardKey.class,
+                composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key())
+            .view();
+    assertEquals(new Names("NORTH", ""), missing.title());
+    assertEquals(Optional.of(new Names("未找到绑定的控制区", "Control zone not found")), missing.message());
+    assertTrue(asked.isEmpty(), "控制区找不到时不取站场图");
+
+    YardScope scope =
+        new YardScope(
+            "SURC", List.of(YardArea.Member.station("HHU"), YardArea.Member.depot("HHD")));
+    composer.setControlZones(
+        (operator, code) ->
+            operator.equals("SURC") && code.equals("NORTH")
+                ? Optional.of(new PidsYardZones.Zone("北区", Optional.of("North"), scope))
+                : Optional.empty());
+    PidsYardView found =
+        assertInstanceOf(
+                PidsComposer.YardKey.class,
+                composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key())
+            .view();
+    assertEquals(new Names("北区", "North"), found.title());
+    assertEquals(List.of(scope), asked);
+  }
+
+  /** 信号员控制台：按屏幕所属运营商与控制区取控制台数据；内容标识含控制台数据的全部字段，值相同不重画、选中车一变就重画；去向站码换成站名。 */
+  @Test
+  void signalboxScreensKeyOnTheConsoleState() {
+    PidsScreen screen =
+        registerPaged(PidsScreen.Mode.LIVE, "signalbox-3x5").withZone(Optional.of("north"), NOW);
+    registry.put(screen);
+    List<String> asked = new ArrayList<>();
+    SignalboxState[] current = {console(Optional.of("train-a"))};
+    composer.setSignalboxConsole(
+        new SignalboxConsole() {
+          @Override
+          public Optional<SignalboxState> state(String operator, String zone) {
+            asked.add(operator + "/" + zone);
+            return Optional.of(current[0]);
+          }
+
+          @Override
+          public void press(
+              Player player,
+              Location console,
+              String operator,
+              String zone,
+              ConsoleTarget target) {}
+        });
+
+    PidsContent first = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    PidsContent second = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    PidsComposer.SignalboxKey key = assertInstanceOf(PidsComposer.SignalboxKey.class, first.key());
+    assertEquals(first.key(), second.key(), "控制台数据没变，画面不重发");
+    assertEquals(List.of("SURC/NORTH", "SURC/NORTH"), asked);
+    assertEquals(Optional.of(current[0]), key.view().state());
+    assertEquals("新笛矢 · 壑湖", key.view().destinations().get("HHU"), "去向站码按运营商换成站名");
+    assertTrue(key.view().placeholder().isEmpty());
+    assertEquals(640, first.image().get().getWidth());
+
+    current[0] = console(Optional.of("train-b"));
+    assertNotEquals(
+        first.key(),
+        composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key(),
+        "选中车变了要重画");
+    current[0] = console(Optional.of("train-b"));
+    assertEquals(
+        composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key(),
+        composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key(),
+        "新取的数据值相同就不重画");
+    assertEquals(0, snapshotCalls, "不取到发快照");
+  }
+
+  /** 中心工位上有人值守：控制台按信号员模块给的区取数据（在岗那位的临时小区）；不是工位的屏照旧按绑定的区。 */
+  @Test
+  void aStaffedWorkstationDrawsItsHoldersZone() {
+    PidsScreen desk =
+        registerPaged(PidsScreen.Mode.LIVE, "signalbox-3x5")
+            .withZone(Optional.of("north"), NOW)
+            .withWorkstation(true, NOW);
+    registry.put(desk);
+    List<String> asked = new ArrayList<>();
+    composer.setSignalboxConsole(
+        new SignalboxConsole() {
+          @Override
+          public Optional<SignalboxState> state(String operator, String zone) {
+            asked.add(zone);
+            return Optional.of(console(Optional.empty()));
+          }
+
+          @Override
+          public void press(
+              Player player,
+              Location console,
+              String operator,
+              String zone,
+              ConsoleTarget target) {}
+
+          @Override
+          public String zoneFor(java.util.UUID screen, String operator, String zone) {
+            return screen.equals(desk.id()) ? "NORTH~2" : zone;
+          }
+        });
+
+    composer.content(Optional.of(desk.id()), 640, 384).orElseThrow();
+
+    assertEquals(List.of("NORTH~2"), asked);
+  }
+
+  @Test
+  void theStationATrainWouldSkipIsNamedToo() {
+    PidsScreen screen =
+        registerPaged(PidsScreen.Mode.LIVE, "signalbox-3x5").withZone(Optional.of("north"), NOW);
+    registry.put(screen);
+    SignalboxState base = console(Optional.of("train-a"));
+    SignalboxState page =
+        new SignalboxState(
+            base.mode(),
+            base.signaller(),
+            base.selected(),
+            List.of(),
+            base.buttons(),
+            base.call(),
+            false,
+            base.notice(),
+            base.preview(),
+            base.pending(),
+            base.signals(),
+            base.platforms(),
+            base.delegated(),
+            Optional.of(new SignalboxState.TrainOps(false, Optional.of("HHU"), false)));
+    composer.setSignalboxConsole(
+        new SignalboxConsole() {
+          @Override
+          public Optional<SignalboxState> state(String operator, String zone) {
+            return Optional.of(page);
+          }
+
+          @Override
+          public void press(
+              Player player,
+              Location console,
+              String operator,
+              String zone,
+              ConsoleTarget target) {}
+        });
+
+    PidsComposer.SignalboxKey key =
+        assertInstanceOf(
+            PidsComposer.SignalboxKey.class,
+            composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key());
+
+    assertEquals("新笛矢 · 壑湖", key.view().destinations().get("HHU"));
+  }
+
+  /** 控制台没绑控制区、信号员模块未接入或取数出错：只画站场图，列车表的位置写说明，不抛异常。 */
+  @Test
+  void signalboxScreensWithoutConsoleDataShowWhy() {
+    PidsScreen unbound = registerPaged(PidsScreen.Mode.LIVE, "signalbox-3x5");
+    PidsComposer.SignalboxKey noZone =
+        assertInstanceOf(
+            PidsComposer.SignalboxKey.class,
+            composer.content(Optional.of(unbound.id()), 640, 384).orElseThrow().key());
+    assertTrue(noZone.view().state().isEmpty());
+    assertEquals(
+        "未绑定控制区，请以 /fta signal console set <控制台> zone <控制区> 绑定",
+        noZone.view().placeholder().orElseThrow().primary());
+
+    PidsScreen bound = unbound.withZone(Optional.of("north"), NOW);
+    registry.put(bound);
+    PidsComposer.SignalboxKey notReady =
+        assertInstanceOf(
+            PidsComposer.SignalboxKey.class,
+            composer.content(Optional.of(bound.id()), 640, 384).orElseThrow().key());
+    assertEquals(
+        new Names("控制台未就绪", "Signal box console not ready"),
+        notReady.view().placeholder().orElseThrow());
+
+    composer.setSignalboxConsole(
+        new SignalboxConsole() {
+          @Override
+          public Optional<SignalboxState> state(String operator, String zone) {
+            throw new IllegalStateException("boom");
+          }
+
+          @Override
+          public void press(
+              Player player,
+              Location console,
+              String operator,
+              String zone,
+              ConsoleTarget target) {}
+        });
+    PidsContent failing = composer.content(Optional.of(bound.id()), 640, 384).orElseThrow();
+    assertTrue(
+        assertInstanceOf(PidsComposer.SignalboxKey.class, failing.key()).view().state().isEmpty());
+    assertEquals(640, failing.image().get().getWidth());
+  }
+
+  private static SignalboxState console(Optional<String> selected) {
+    return new SignalboxState(
+        SignalboxState.Mode.MANUAL,
+        Optional.of("Sinapole"),
+        selected,
+        List.of(
+            new SignalboxState.TrainRow(
+                "train-a",
+                "1234",
+                Optional.empty(),
+                Optional.of("HHU"),
+                SignalboxState.RowStatus.WAITING,
+                12,
+                OptionalLong.of(70),
+                0.5,
+                false,
+                false)),
+        java.util.Map.of(SignalboxState.Button.SET_ROUTE, true),
+        Optional.empty(),
+        false,
+        Optional.empty(),
+        Set.of(),
+        Set.of(),
+        List.of(),
+        List.of());
   }
 
   private PidsScreen registerPaged(PidsScreen.Mode mode, String... layouts) {

@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
-import java.awt.image.BufferedImage;
 import java.time.Instant;
 import java.time.InstantSource;
 import java.time.ZoneId;
@@ -16,9 +15,11 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
@@ -36,6 +37,10 @@ import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainPlatformAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
+import org.fetarute.fetaruteTCAddon.company.api.ControlZoneDirectory;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.GraphWorker;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
 import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletin;
@@ -44,8 +49,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrameCache;
+import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrameSource;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrames;
-import org.fetarute.fetaruteTCAddon.display.pids.map.PidsMapPalette;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsBulletinTypesetter;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsFonts;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsRenderer;
@@ -54,10 +59,18 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsWallFinder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.ApiPidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusViews;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardZones;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.TrainCartsYardTrains;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardProvider;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardScope;
+import org.fetarute.fetaruteTCAddon.signaller.console.ConsoleTarget;
+import org.fetarute.fetaruteTCAddon.signaller.console.SignalboxConsole;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -107,6 +120,9 @@ public final class PidsService {
   private final FetaruteApi api;
   private final InstantSource clock = InstantSource.system();
 
+  /** 站场图的占用标记与列车位置在多长时间内由各块屏幕共用（纳秒）。 */
+  private static final long YARD_SHARE_NANOS = 500_000_000L;
+
   /** 运营商补全缓存的有效期。 */
   private static final long OPERATOR_SUGGESTION_TTL_MILLIS = 30_000L;
 
@@ -117,6 +133,9 @@ public final class PidsService {
   private final PidsBulletinBoard bulletins = new PidsBulletinBoard();
   private final ApiPidsDirectory directory;
   private final PidsSnapshotProvider snapshots;
+
+  /** 控制区目录：站场图屏绑控制区时查成员与名称；不在本插件里运行（测试）时为空目录。 */
+  private final ControlZoneDirectory controlZones;
 
   /** 最近的站台变更：站台屏的行与站台广播共用。 */
   private final PidsPlatformChanges platformChanges = new PidsPlatformChanges();
@@ -130,13 +149,16 @@ public final class PidsService {
   private final PidsAccess access;
   private final PidsAnnouncer announcer;
 
-  /** 换算好的调色板帧，各屏共享；上限约等于 65 块 3×5 统屏或 340 块 1×3 站台屏的整帧。 */
-  private final PidsFrameCache frameCache = new PidsFrameCache(16L * 1024 * 1024);
+  /** 调色板帧：能复用的进共享缓存（上限约等于 65 块 3×5 统屏或 340 块 1×3 站台屏的整帧），缓存里没有的交渲染线程画；渲染线程随服务一起关闭。 */
+  private final PidsFrameSource frameSource;
 
   private final Listener cancellationListener = new CancellationListener();
 
   /** 本次运行中拆除的屏幕：区块加载时只自动还原这些屏幕的展示框。 */
   private final Set<UUID> removedThisRun = ConcurrentHashMap.newKeySet();
+
+  /** 信号员控制台的数据与点击的去处；信号员模块未接入时为 {@link SignalboxConsole#NONE}。 */
+  private volatile SignalboxConsole signalboxConsole = SignalboxConsole.NONE;
 
   private volatile boolean loaded;
   private volatile boolean directoryFailing;
@@ -157,11 +179,21 @@ public final class PidsService {
     this.settings = Objects.requireNonNull(settings, "settings");
     this.layouts = Objects.requireNonNull(layouts, "layouts");
     this.logger = Objects.requireNonNull(logger, "logger");
+    this.frameSource =
+        new PidsFrameSource(
+            new PidsFrameCache(16L * 1024 * 1024),
+            PidsService::shared,
+            () -> GraphWorker.start("FTA-PIDS-Render", logger::warn),
+            logger::warn);
     this.storage = storage.orElse(null);
     this.api = Objects.requireNonNull(api, "api");
     this.directory =
         new ApiPidsDirectory(
             api.operators(), api.lines(), api.stations(), api.routes(), api.graph(), logger::warn);
+    this.controlZones =
+        plugin instanceof org.fetarute.fetaruteTCAddon.FetaruteTCAddon addon
+            ? addon.getControlZoneDirectory()
+            : new ControlZoneDirectory();
     this.snapshots =
         new PidsSnapshotProvider(
             api.eta(),
@@ -171,6 +203,29 @@ public final class PidsService {
             clock,
             logger::debug,
             platformChanges);
+    if (plugin instanceof org.fetarute.fetaruteTCAddon.FetaruteTCAddon addon) {
+      // 调度服务与交路缓存可能晚于站台屏就绪，每次现取
+      this.snapshots.setSkippedRows(
+          PidsSnapshotProvider.SkippedRows.byRouteUuid(
+              routeId ->
+                  addon
+                      .getRouteDefinitionCache()
+                      .flatMap(
+                          routes ->
+                              routes.findUuid(
+                                  org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId.of(
+                                      routeId))),
+              (train, uuid, stopSequence) ->
+                  addon
+                      .getRuntimeDispatchService()
+                      .map(
+                          dispatch ->
+                              dispatch
+                                  .stationStops()
+                                  .stopSkips()
+                                  .skipped(train, uuid, stopSequence))
+                      .orElse(false)));
+    }
     this.lineStatuses =
         new PidsLineStatusProvider(api.trains(), api.timetables(), directory, logger::debug);
     this.composer =
@@ -209,7 +264,37 @@ public final class PidsService {
                                           calls.calledTrainNames(),
                                           calls.extraTrainNames())))
                   .orElse(PidsViewBuilder.Calls.NONE));
+      // 站场图：几何取自调度图快照、在异步任务里算；占用与列车位置在主线程现取，半秒内各屏共用
+      composer.setYards(
+          new YardProvider(
+              worldId ->
+                  Optional.ofNullable(addon.getRailGraphService())
+                      .flatMap(graphs -> graphs.getSnapshot(worldId))
+                      .map(RailGraphService.RailGraphSnapshot::graph),
+              () ->
+                  Optional.ofNullable(addon.getOccupancyManager())
+                      .map(OccupancyManager::snapshotClaims)
+                      .orElse(List.of()),
+              new TrainCartsYardTrains(
+                  addon::getTimetableService,
+                  (operator, line) ->
+                      directory.line(operator, line).map(PidsDirectory.LineStyle::color)),
+              stationId -> directory.stationName(stationId).map(PidsView.Names::primary),
+              task -> plugin.getServer().getScheduler().runTaskAsynchronously(plugin, task),
+              System::nanoTime,
+              YARD_SHARE_NANOS));
     }
+    composer.setControlZones(
+        (operator, code) ->
+            signalboxConsole
+                .transientZone(operator, code)
+                .map(
+                    found ->
+                        new PidsYardZones.Zone(
+                            found.name(),
+                            Optional.of(found.subtitle()).filter(text -> !text.isBlank()),
+                            new YardScope(operator, found.members())))
+                .or(() -> directoryZone(operator, code)));
     this.items = new PidsItems(plugin, locale);
     this.frames = new PidsFrames(plugin);
     this.access = new PidsAccess(storage, () -> api.operators().listAllOperators(), logger::warn);
@@ -265,6 +350,12 @@ public final class PidsService {
   public void continueFrom(PidsService previous) {
     announcer.continueFrom(previous.announcer);
     platformChanges.absorb(previous.platformChanges);
+    snapshots.continueFrom(previous.snapshots);
+  }
+
+  /** 信号员要取消这列车：删车之前调用，它的取消行按当前晚点顺延显示，见 {@link PidsSnapshotProvider#holdCancelled}。 */
+  public void holdCancelled(String trainName) {
+    snapshots.holdCancelled(trainName);
   }
 
   /** 作废取消行缓存：车次取消、重新绑定或越站之后调用，站台屏、站台广播与线路运行状况屏下一次取数即可看到。 */
@@ -297,6 +388,7 @@ public final class PidsService {
       directoryTask = null;
     }
     announcer.stop();
+    frameSource.stop();
     HandlerList.unregisterAll(cancellationListener);
   }
 
@@ -332,19 +424,17 @@ public final class PidsService {
    * @return 只读的帧，长度为 {@code width × height}；渲染尺寸不符时为空数组
    */
   public byte[] frame(PidsContent content, int width, int height) {
-    return frameCache.frame(
-        content.key(),
-        width,
-        height,
-        () -> {
-          BufferedImage image = content.image().get();
-          if (image.getWidth() != width || image.getHeight() != height) {
-            return new byte[0];
-          }
-          byte[] out = new byte[width * height];
-          PidsMapPalette.minecraft().convert(image, out);
-          return out;
-        });
+    return frameSource.frame(content, width, height);
+  }
+
+  /** 同 {@link #frame}，但缓存里没有的帧交给站台屏的渲染线程画、换算，不占主线程（见 {@link PidsFrameSource#frameLater}）。 */
+  public CompletableFuture<byte[]> frameLater(PidsContent content, int width, int height) {
+    return frameSource.frameLater(content, width, height);
+  }
+
+  /** 进共享帧缓存的内容。站场图车一动就是新帧、以后不会再用：不进共享缓存，免得把各站台屏可复用的帧挤掉； 控制台的选中与按钮状态随点击当拍变化，也不进共享缓存，免得串屏或滞后。 */
+  private static boolean shared(Object key) {
+    return !(key instanceof PidsComposer.YardKey || key instanceof PidsComposer.SignalboxKey);
   }
 
   public PidsItems items() {
@@ -760,6 +850,105 @@ public final class PidsService {
   public boolean isLineStatus(PidsScreen screen) {
     List<PidsLayout> pages = pagesOf(screen);
     return !pages.isEmpty() && pages.stream().allMatch(layout -> layout.lineStatus().isPresent());
+  }
+
+  /** 主布局是站场图（只有一页，不能组合翻页）。 */
+  public boolean isYard(PidsScreen screen) {
+    return layoutOf(screen).flatMap(PidsLayout::yard).isPresent();
+  }
+
+  /** 主布局是信号员控制台（{@code signalbox-*}）：右键是按、左键是取消选择，不叫车。 */
+  public boolean isSignalbox(PidsScreen screen) {
+    return layoutOf(screen).map(PidsLayout::signalbox).orElse(false);
+  }
+
+  /**
+   * 接入信号员控制台：控制台每秒最多取一次控制区的数据，玩家点击时把点到的东西交回去。
+   *
+   * @param console 信号员模块；null 恢复默认（控制台写“控制台未就绪”，点击无效）
+   */
+  public void setSignalboxConsole(SignalboxConsole console) {
+    SignalboxConsole shown = console == null ? SignalboxConsole.NONE : console;
+    this.signalboxConsole = shown;
+    composer.setSignalboxConsole(shown);
+  }
+
+  /** 当前接入的信号员控制台（未接入时为 {@link SignalboxConsole#NONE}）。 */
+  public SignalboxConsole signalboxConsole() {
+    return signalboxConsole;
+  }
+
+  /** 见 {@link PidsComposer#signalboxTarget}。 */
+  public ConsoleTarget signalboxTarget(PidsComposer.SignalboxKey key, int x, int y) {
+    return composer.signalboxTarget(key, x, y);
+  }
+
+  /**
+   * 玩家在控制台上点了一下：交给信号员模块（控制台位置取屏幕中间那块地图所在方块的中心）。
+   *
+   * @param player 点击的玩家
+   * @param screenId 被点的屏幕
+   * @param target 点到的东西（左键一律是取消选择）
+   * @return 交出去了（屏幕应当拍重画）；屏幕不存在、不在运行显示、不是控制台、没绑控制区或世界未加载时为 false
+   */
+  public boolean pressSignalbox(Player player, UUID screenId, ConsoleTarget target) {
+    Optional<PidsScreen> found = registry.find(screenId);
+    if (found.isEmpty()) {
+      return false;
+    }
+    PidsScreen screen = found.get();
+    if (screen.mode() != PidsScreen.Mode.LIVE
+        || screen.zone().isEmpty()
+        || screen.operatorCode().isEmpty()
+        || !isSignalbox(screen)) {
+      return false;
+    }
+    World world = Bukkit.getWorld(screen.worldId());
+    if (world == null) {
+      return false;
+    }
+    PidsScreen.Position center = screen.center();
+    Location console = new Location(world, center.x() + 0.5, center.y() + 0.5, center.z() + 0.5);
+    try {
+      signalboxConsole.press(
+          player,
+          console,
+          screen.id(),
+          screen.workstation(),
+          screen.operatorCode().get(),
+          screen.zone().get(),
+          target);
+    } catch (RuntimeException ex) {
+      logger.warn("信号员控制台处理点击失败: " + ex);
+      return false;
+    }
+    return true;
+  }
+
+  /** 控制区目录里的一片（站场图屏、控制台绑定的控制区）。 */
+  private Optional<PidsYardZones.Zone> directoryZone(String operator, String code) {
+    return controlZones
+        .find(operator, code)
+        .map(
+            found ->
+                new PidsYardZones.Zone(
+                    found.zone().name(),
+                    found.zone().secondaryName(),
+                    new YardScope(
+                        found.operatorCode(),
+                        found.members().stream()
+                            .map(m -> new YardArea.Member(m.kind(), m.code()))
+                            .toList())));
+  }
+
+  /** 屏幕所属运营商名下的控制区，按代码排序；屏幕没有所属运营商时为空。 */
+  public List<ControlZoneDirectory.Zone> zoneChoices(PidsScreen screen) {
+    return screen.operatorCode().map(controlZones::listByOperator).orElse(List.of());
+  }
+
+  /** 按运营商代码与控制区代码查找（都不分大小写）。 */
+  public Optional<ControlZoneDirectory.Zone> findZone(String operatorCode, String zoneCode) {
+    return controlZones.find(operatorCode, zoneCode);
   }
 
   /** 屏幕所用布局对站台数的上限（见 {@link PidsPlatformSelection#limit}）；布局缺失时按车站统屏处理。 */

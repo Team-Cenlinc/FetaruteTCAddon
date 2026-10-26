@@ -37,11 +37,13 @@ public final class PidsItems {
     ItemMeta meta = paper.getItemMeta();
     Map<String, String> placeholders =
         Map.of("layout", layout.name(), "size", layout.tileRows() + "×" + layout.tileCols());
-    meta.displayName(locale.component("pids.item.install.name", placeholders));
+    // 信号员控制台不是站台屏，安装纸另有名字与说明
+    String keys = layout.signalbox() ? "pids.item.install-console." : "pids.item.install.";
+    meta.displayName(locale.component(keys + "name", placeholders));
     meta.lore(
         List.of(
-            locale.component("pids.item.install.lore-1", placeholders),
-            locale.component("pids.item.install.lore-2", placeholders)));
+            locale.component(keys + "lore-1", placeholders),
+            locale.component(keys + "lore-2", placeholders)));
     meta.getPersistentDataContainer().set(installKey, PersistentDataType.STRING, layout.id());
     paper.setItemMeta(meta);
     return paper;

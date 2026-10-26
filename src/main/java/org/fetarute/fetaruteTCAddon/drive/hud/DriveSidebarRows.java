@@ -27,7 +27,7 @@ import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 
 /**
  * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压（机车含制动管，电制动出力时标“再生”）、警惕装置、
- * 当前故障与门旁路；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻、下一通过站与实时评分，折返换端时加换端一行。
+ * 当前故障与门旁路；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻、下一通过站与实时评分，折返换端时加换端一行，信号楼下了越站令时加调度命令一行。
  *
  * <p>车站一行平时显示下一站，进站时换成离停车点的距离，停妥后显示停站阶段。计分板不会被别的插件的动作栏消息顶掉，所以车站信息以这里为准，动作栏只提示要动手的操作。
  *
@@ -62,8 +62,12 @@ public final class DriveSidebarRows {
 
   private DriveSidebarRows() {}
 
-  /** 构建侧边栏全部行。 */
-  public static List<Row> build(DriveSession session, long nowTick) {
+  /**
+   * 构建侧边栏全部行。
+   *
+   * @param signallerWaiting 列车正停在人工控制的控制区入口等信号员排列进路：信号一行下面提示怎么呼叫信号员（车上有车掌时两短铃呼叫的是车掌，只能用命令）
+   */
+  public static List<Row> build(DriveSession session, long nowTick, boolean signallerWaiting) {
     Objects.requireNonNull(session, "session");
     List<Row> rows = new ArrayList<>();
     DriverLink link = session.driverLink();
@@ -78,6 +82,23 @@ public final class DriveSidebarRows {
           session.isAto()
               ? new Row("drive.sidebar.label.signal", "drive.sidebar.value.signal.ato", Map.of())
               : signalRow(link));
+      link.skipOrder()
+          .ifPresent(
+              station ->
+                  rows.add(
+                      new Row(
+                          "drive.sidebar.label.dispatch-order",
+                          "drive.sidebar.value.dispatch-order.skip",
+                          Map.of("station", station))));
+      if (signallerWaiting) {
+        rows.add(
+            new Row(
+                "drive.sidebar.label.signaller",
+                link.guardAboard()
+                    ? "drive.sidebar.value.signaller.waiting-guard"
+                    : "drive.sidebar.value.signaller.waiting",
+                Map.of()));
+      }
       // 终点站等开出下一趟：刚跑完那一趟的下一站、表定时刻与通过站已无意义（晚点会一直往上涨），只留“下一趟”。终到停站的操作提示照常显示。
       boolean awaitingNextTrip = link.turnbackPending();
       rows.add(

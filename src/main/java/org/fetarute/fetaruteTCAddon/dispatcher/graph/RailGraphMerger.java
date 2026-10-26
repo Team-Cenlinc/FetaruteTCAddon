@@ -328,6 +328,7 @@ public final class RailGraphMerger {
    *   <li>位置、类型：使用新节点的值（反映当前世界状态）
    *   <li>waypointMetadata：如果新节点有则用新的，否则保留旧的
    *   <li>trainCartsDestination：如果新节点有则用新的，否则保留旧的
+   *   <li>开门方向：使用新节点的值——它与位置一样来自本次扫到的牌子，牌子上删掉了就应随之清空
    * </ul>
    */
   private static RailNode mergeNodeAttributes(RailNode existing, RailNode update) {
@@ -348,7 +349,12 @@ public final class RailGraphMerger {
             : existingSign.trainCartsDestination();
 
     return new SignRailNode(
-        updateSign.id(), updateSign.type(), updateSign.worldPosition(), tcDest, waypointMeta);
+        updateSign.id(),
+        updateSign.type(),
+        updateSign.worldPosition(),
+        tcDest,
+        waypointMeta,
+        updateSign.doorDirection());
   }
 
   /**

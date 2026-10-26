@@ -118,6 +118,7 @@ public final class DriverLink {
   private DriverDoorSide requiredDoorSide = DriverDoorSide.NONE;
   private String targetLabel = "";
   private String nextStopLabel = "";
+  private String skipOrder = "";
   private String skippedStation;
   private int tripSkippedStops;
   private boolean doorsClosing;
@@ -954,6 +955,15 @@ public final class DriverLink {
 
   public void setNextStopLabel(String label) {
     this.nextStopLabel = label == null ? "" : label;
+  }
+
+  /** 信号楼令这趟车越过的站（站名），侧边栏的调度命令一行；没有越站令或已过站时为空。 */
+  public Optional<String> skipOrder() {
+    return skipOrder.isEmpty() ? Optional.empty() : Optional.of(skipOrder);
+  }
+
+  public void setSkipOrder(String station) {
+    this.skipOrder = station == null ? "" : station;
   }
 
   public void setTargetLabel(String label) {

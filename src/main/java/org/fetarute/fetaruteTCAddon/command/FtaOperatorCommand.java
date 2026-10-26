@@ -128,6 +128,7 @@ public final class FtaOperatorCommand {
                           now);
                   provider.operators().save(operator);
                   plugin.refreshStationDirectory();
+                  plugin.refreshControlZones();
                   sender.sendMessage(
                       locale.component(
                           "command.operator.create.success",
@@ -314,6 +315,7 @@ public final class FtaOperatorCommand {
                   // 仅替换变更字段，其他信息保持不变。
                   provider.operators().save(updated);
                   plugin.refreshStationDirectory();
+                  plugin.refreshControlZones();
                   sender.sendMessage(
                       locale.component(
                           "command.operator.set.success", Map.of("code", operator.code())));
@@ -371,6 +373,7 @@ public final class FtaOperatorCommand {
                   // 删除运营商后不再可用于线路与站点配置。
                   provider.operators().delete(operator.id());
                   plugin.refreshStationDirectory();
+                  plugin.refreshControlZones();
                   sender.sendMessage(
                       locale.component(
                           "command.operator.delete.success", Map.of("code", operator.code())));

@@ -1,0 +1,50 @@
+# 信号员控制台 4×8（1024×512，4 行 8 列地图）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 与 signalbox-3x5 同样的组件，画面更大：适合跨几个车站的控制区。站场图更宽更高，列车表多两行，按钮更大、字更大。
+# 第 1 行：控制区名，其后依次是模式牌、值守的信号员与呼叫牌，右侧是临时提示与当前时间；
+# 中间是站场图（另画选中车的计划进路、排列中的进路、控制区入口信号与可改停的股道）；左下是列车表，右下是操作按钮。
+# 绑定控制区后才是控制台：右键点击为“按”，左键点击为取消选择。不能与其他布局组合翻页。
+format: 1
+name: 信号员控制台 4×8
+tiles:
+  rows: 4
+  cols: 8
+widgets:
+  # 控制区名；模式牌、值守者与呼叫牌接在名字后面
+  - type: station-title
+    x: 8
+    y: 4
+    width: 400
+    sizes: [24, 20]
+    secondary: 12
+    gap: 8
+  # 右对齐时 x 为右缘；临时提示写在时钟左边
+  - type: clock
+    x: 1012
+    y: 8
+    size: 20
+    align: right
+  # inset：轨道距组件边缘的留白；label：股道号、车次窗与去向的字号
+  - type: yard
+    x: 4
+    y: 34
+    width: 1016
+    height: 300
+    inset: 6
+    label: 10
+  # 列车表：表头一行，每列车一行；columns 为各列左缘（相对列车表左缘），车次一列从 0 起
+  - type: train-list
+    x: 4
+    y: 338
+    width: 640
+    header: {height: 14, size: 10}
+    rows: {count: 6, height: 24, size: 12}
+    columns: {destination: 96, status: 256, delay: 560}
+  # 操作按钮：平时 2 列 × 3 行，回复呼叫时换成 1 列 × 4 行；回复时每条也放得下中英文两行，英文不压到框线
+  - type: signal-buttons
+    x: 652
+    y: 338
+    width: 368
+    height: 172
+    gap: {x: 8, y: 4}
+    label: {size: 20, secondary: 10, gap: 2}

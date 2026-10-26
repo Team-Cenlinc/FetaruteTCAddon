@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.display.pids;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.InstantSource;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -41,7 +42,11 @@ import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
  * <p>有效期取 {@code render.snapshot-ttl-seconds}，查询窗口取 {@code render.horizon-minutes}；同一车站的并发请求只算一次。
  * 查询失败时沿用上一份快照的行并留下调试日志，时间戳记为本次，等下一个有效期再重试，避免每块屏每次刷新都重试。
  *
- * <p>运行中列车的行按最近的站台变更（{@link PidsPlatformChanges}）标出变更前的站台；变更时整份缓存作废。
+ * <p>运行中列车的行按最近的站台变更（{@link PidsPlatformChanges}）标出变更前的站台；变更时整份缓存作废。 通过行按信号员的越站令（{@link
+ * SkippedRows}）标出本应停车。
+ *
+ * <p>信号员取消的车次（{@link #holdCancelled}）多半是晚点车，本站的计划到达常常已过：它的取消行显示到计划到达按取消时的晚点顺延、再加 {@link
+ * #CANCELLED_HOLD}，计划到发的回查窗口跟着放宽。
  *
  * <p>计划到发单独缓存 {@link #TIMETABLE_REFRESH}：要把全部已发布时刻表的车次与停靠点扫一遍，取消与末班又很少变。 取一整天（{@link
  * #TIMETABLE_WINDOW}）是为了比到当天最后一班；扫描量由车次与停靠点数决定，与窗口长短无关。车次取消或重新绑定（取消之后又有车接上）时由 {@link
@@ -61,6 +66,15 @@ public final class PidsSnapshotProvider {
   /** 计划到发缓存多久：只影响取消行进出显示窗口的时机（窗口 30 分钟级），取消本身由事件立即作废。 */
   static final Duration TIMETABLE_REFRESH = Duration.ofSeconds(60);
 
+  /** 信号员取消的车次，取消行在顺延后的到达时刻之后再显示多久。 */
+  static final Duration CANCELLED_HOLD = Duration.ofMinutes(5);
+
+  /** 顺延按的晚点上限：再晚的车也只顺延这么多，计划到发的回查窗口有界。 */
+  static final Duration CANCELLED_HOLD_MAX_DELAY = Duration.ofMinutes(30);
+
+  /** 登记保留多久：车次剩下的站都过了显示窗口即可丢，取得宽些。 */
+  static final Duration CANCELLED_HOLD_RETAIN = Duration.ofHours(3);
+
   private final EtaApi eta;
   private final TimetableApi timetables;
   private final RouteApi routes;
@@ -70,6 +84,43 @@ public final class PidsSnapshotProvider {
   private final PidsPlatformChanges platformChanges;
   private final ConcurrentMap<PidsStationKey, PidsSnapshot> cache = new ConcurrentHashMap<>();
   private final ConcurrentMap<PidsStationKey, TimetableRows> planned = new ConcurrentHashMap<>();
+  private volatile SkippedRows skippedRows = SkippedRows.NONE;
+  private final ConcurrentMap<HeldTrip, Held> held = new ConcurrentHashMap<>();
+
+  /** 信号员取消的一班车：时刻表、车次号、服务日。 */
+  private record HeldTrip(UUID timetableId, String tripCode, LocalDate serviceDate) {}
+
+  /** 取消时的晚点（秒，已截到 0 至上限）与登记时刻。 */
+  private record Held(long delaySeconds, Instant at) {}
+
+  /** 信号员令哪趟车越过哪一站：站牌上它已是通过行，这里只区分“本应停车”。 */
+  @FunctionalInterface
+  public interface SkippedRows {
+    SkippedRows NONE = (trainName, routeId, stopSequence) -> false;
+
+    /**
+     * @param trainName 列车名
+     * @param routeId 交路 ID（{@code 运营商:线路:交路}）
+     * @param stopSequence 停靠序号（交路节点的 0 起下标）
+     */
+    boolean skipped(String trainName, String routeId, int stopSequence);
+
+    /**
+     * 站台屏行上只有交路 ID，越站令按交路 UUID 记：先换成 UUID 再问。
+     *
+     * @param routeUuid 交路 ID → 交路 UUID；查不到时为空（不算越站）
+     * @param skipped 按交路 UUID 问越站令
+     */
+    static SkippedRows byRouteUuid(
+        Function<String, Optional<UUID>> routeUuid,
+        org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService.SkippedStops skipped) {
+      return (trainName, routeId, stopSequence) ->
+          routeUuid
+              .apply(routeId)
+              .filter(uuid -> skipped.skipped(trainName, uuid, stopSequence))
+              .isPresent();
+    }
+  }
 
   /**
    * @param eta ETA 接口
@@ -109,6 +160,11 @@ public final class PidsSnapshotProvider {
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
   }
 
+  /** 接上越站令的查询；已缓存的快照到期后才看得到。 */
+  public void setSkippedRows(SkippedRows skippedRows) {
+    this.skippedRows = skippedRows == null ? SkippedRows.NONE : skippedRows;
+  }
+
   /** 车站的当前快照；缓存未过期时直接返回。 */
   public PidsSnapshot snapshot(PidsStationKey station) {
     Objects.requireNonNull(station, "station");
@@ -129,6 +185,37 @@ public final class PidsSnapshotProvider {
     cache.clear();
   }
 
+  /**
+   * 信号员要取消这列车：在删车之前调用，记下它当前那一班和预计的晚点，它的取消行按晚点顺延显示。列车没有绑定车次时什么也不做。
+   *
+   * @param trainName 列车名
+   */
+  public void holdCancelled(String trainName) {
+    Optional<TimetableApi.TrainAssignment> found = timetables.getAssignment(trainName);
+    if (found.isEmpty()) {
+      return;
+    }
+    TimetableApi.TrainAssignment assignment = found.get();
+    // 预计晚点随扣车增长，到发晚点要到下一次到发才更新：先取预计
+    OptionalLong delay =
+        assignment.projectedDelaySeconds().isPresent()
+            ? assignment.projectedDelaySeconds()
+            : assignment.currentDelaySeconds();
+    long seconds = Math.min(Math.max(0L, delay.orElse(0L)), CANCELLED_HOLD_MAX_DELAY.toSeconds());
+    Instant now = clock.instant();
+    held.values().removeIf(entry -> !entry.at().plus(CANCELLED_HOLD_RETAIN).isAfter(now));
+    held.put(
+        new HeldTrip(assignment.timetableId(), assignment.tripCode(), assignment.serviceDate()),
+        new Held(seconds, now));
+    planned.clear();
+    cache.clear();
+  }
+
+  /** 接过重建前那一份的取消登记（{@code /fta reload} 重建站台屏服务时）。 */
+  public void continueFrom(PidsSnapshotProvider previous) {
+    held.putAll(previous.held);
+  }
+
   /** 丢弃各车站缓存的计划到发（取消行与末班）：车次取消或重新绑定时调用。 */
   public void invalidateCancellations() {
     planned.clear();
@@ -145,22 +232,40 @@ public final class PidsSnapshotProvider {
       }
       Instant until = now.plus(horizon);
       timetable.cancelled().stream()
-          .filter(row -> row.expectedAt().isAfter(now) && row.expectedAt().isBefore(until))
+          .filter(
+              cancelled ->
+                  cancelled.showUntil().isAfter(now)
+                      && cancelled.row().expectedAt().isBefore(until))
+          .map(CancelledRow::row)
           .forEach(rows::add);
       rows.sort(Comparator.comparing(PidsRow::expectedAt));
       return new PidsSnapshot(station, now, rows);
     } catch (RuntimeException ex) {
       debugLogger.accept("PIDS_SNAPSHOT_FAILED station=" + station + " error=" + ex);
+      TimetableRows timetable = planned.get(station);
       List<PidsRow> kept =
           previous == null
               ? List.of()
               : previous.rows().stream()
                   .filter(
                       row ->
-                          row.status() != PidsRow.Status.CANCELLED || row.expectedAt().isAfter(now))
+                          row.status() != PidsRow.Status.CANCELLED
+                              || cancelledStillShown(row, timetable, now))
                   .toList();
       return new PidsSnapshot(station, now, kept);
     }
+  }
+
+  /** 取数失败时沿用的取消行还显示不显示：与正常取数同一口径（顺延的按顺延后的时刻），查不到计划到发时按计划到达。 */
+  private static boolean cancelledStillShown(PidsRow row, TimetableRows timetable, Instant now) {
+    if (timetable != null) {
+      for (CancelledRow cancelled : timetable.cancelled()) {
+        if (cancelled.row().equals(row)) {
+          return cancelled.showUntil().isAfter(now);
+        }
+      }
+    }
+    return row.expectedAt().isAfter(now);
   }
 
   private PidsRow fromBoard(
@@ -197,7 +302,11 @@ public final class PidsSnapshotProvider {
                         joining.joiningCars(),
                         joining.joiningStanding(),
                         joining.continuesOnRouteId(),
-                        joining.continuesFromSequence())));
+                        joining.continuesFromSequence())),
+        row.passing()
+            && row.trainName()
+                .filter(train -> skippedRows.skipped(train, row.routeId(), row.stopSequence()))
+                .isPresent());
   }
 
   private static PidsRow.Division division(EtaApi.Division division) {
@@ -237,25 +346,41 @@ public final class PidsSnapshotProvider {
   }
 
   /**
-   * 一个车站的计划到发派生出的两样：取消行（不限窗口，取快照时再按计划到达与显示窗口筛）与末班。
+   * 一个车站的计划到发派生出的两样：取消行（不限窗口，取快照时再按显示到何时与查询窗口筛）与末班。
    *
    * @param takenAt 取数时刻
    * @param cancelled 取消行
    * @param lastTrains 末班；按表运行未启用、或计划到发取满可能截断时为空
    */
   private record TimetableRows(
-      Instant takenAt, List<PidsRow> cancelled, PidsLastTrains lastTrains) {
+      Instant takenAt, List<CancelledRow> cancelled, PidsLastTrains lastTrains) {
     private TimetableRows {
       cancelled = List.copyOf(cancelled);
     }
   }
 
+  /**
+   * 一条取消行与它显示到何时：一般是计划到达，信号员取消的车次按 {@link #holdCancelled} 顺延。
+   *
+   * @param row 取消行
+   * @param showUntil 显示到此刻（不含）
+   */
+  private record CancelledRow(PidsRow row, Instant showUntil) {}
+
   private TimetableRows timetableRows(PidsStationKey station, Instant now) {
+    held.values().removeIf(entry -> !entry.at().plus(CANCELLED_HOLD_RETAIN).isAfter(now));
+    Duration lookback = PLANNED_LOOKBACK;
+    for (Held entry : held.values()) {
+      Duration needed = Duration.ofSeconds(entry.delaySeconds()).plus(CANCELLED_HOLD);
+      if (needed.compareTo(lookback) > 0) {
+        lookback = needed;
+      }
+    }
     List<TimetableApi.Departure> found =
         timetables.departuresAt(
             null,
             station.stationCode(),
-            now.minus(PLANNED_LOOKBACK),
+            now.minus(lookback),
             TIMETABLE_WINDOW,
             DEPARTURE_LOOKUP_LIMIT);
     List<TimetableApi.Departure> departures =
@@ -263,16 +388,29 @@ public final class PidsSnapshotProvider {
     Map<UUID, Optional<RouteApi.RouteDetail>> details = new HashMap<>();
     Function<UUID, Optional<RouteApi.RouteDetail>> route =
         id -> details.computeIfAbsent(id, routes::getRoute);
-    List<PidsRow> cancelled =
+    List<CancelledRow> cancelled =
         departures.stream()
             .filter(TimetableApi.Departure::cancelled)
-            .map(departure -> cancelledRow(departure, route.apply(departure.routeId())))
+            .map(
+                departure ->
+                    new CancelledRow(
+                        cancelledRow(departure, route.apply(departure.routeId())),
+                        showUntil(departure)))
             .toList();
     PidsLastTrains lastTrains =
         timetables.enabled() && found.size() < DEPARTURE_LOOKUP_LIMIT
             ? PidsLastTrains.of(departures, route)
             : PidsLastTrains.NONE;
     return new TimetableRows(now, cancelled, lastTrains);
+  }
+
+  private Instant showUntil(TimetableApi.Departure departure) {
+    Held entry =
+        held.get(
+            new HeldTrip(departure.timetableId(), departure.tripCode(), departure.serviceDate()));
+    return entry == null
+        ? departure.plannedArrival()
+        : departure.plannedArrival().plusSeconds(entry.delaySeconds()).plus(CANCELLED_HOLD);
   }
 
   /** 站码可能跨运营商重名：按本站节点所属的运营商核对，节点未知时不计入。 */

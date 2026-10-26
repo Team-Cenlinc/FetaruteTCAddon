@@ -124,7 +124,8 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
             location.getBlockY(),
             location.getBlockZ(),
             definition.trainCartsDestination(),
-            definition.waypointMetadata());
+            definition.waypointMetadata(),
+            definition.doorDirection());
 
     provider()
         .ifPresent(
@@ -143,6 +144,7 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
                                       .listByPosition(
                                           worldId, record.x(), record.y(), record.z())) {
                                 if (existing.nodeId().equals(record.nodeId())) {
+                                  // 同一节点只改了开门方向不算图的变化：照常写库，内存里的节点等下次建图或刷新时换上
                                   unchanged = true;
                                 } else {
                                   // 同一位置原来的节点被顶掉：它的移除也要判在不在用。
@@ -464,10 +466,16 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
       return;
     }
     if (railGraphService.getSnapshot(world).isEmpty() || wasStale) {
-      railGraphService.loadFromStorage(provider, List.of(world));
-      if (wasStale && railGraphService.getStaleState(world).isEmpty()) {
-        notifyListener(() -> staleListener.onRecovered(world));
-      }
+      // 组装图与切换前准备可能交给后台：切换（或放弃）之后再看是否已恢复。
+      railGraphService.reloadFromStorage(
+          provider,
+          world,
+          checkScheduler::accept,
+          () -> {
+            if (wasStale && railGraphService.getStaleState(world).isEmpty()) {
+              notifyListener(() -> staleListener.onRecovered(world));
+            }
+          });
     }
   }
 
@@ -515,7 +523,8 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
             record.nodeId(),
             record.nodeType(),
             record.trainCartsDestination(),
-            record.waypointMetadata()),
+            record.waypointMetadata(),
+            record.doorDirection()),
         record.x(),
         record.y(),
         record.z(),

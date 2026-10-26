@@ -32,6 +32,7 @@ import java.util.OptionalLong;
  * @param lastTrain 当天从本站开往这个终点的最后一班（按已发布时刻表）
  * @param division 列车在本站或前方某站分行（运行中的列车按现场编组，还没出车的一班按表）；不分行时为空
  * @param joining 列车在前方的联挂站挂上主干、乘客留在车上继续前往主目的地；不联挂、本站就是联挂站时为空
+ * @param skipped 本站本应停车，信号员令这趟车越过（{@code passing} 同时为真）
  */
 public record PidsRow(
     Status status,
@@ -53,7 +54,8 @@ public record PidsRow(
     Optional<String> previousPlatform,
     boolean lastTrain,
     Optional<Division> division,
-    Optional<Joining> joining) {
+    Optional<Joining> joining,
+    boolean skipped) {
 
   public PidsRow {
     Objects.requireNonNull(status, "status");
@@ -70,6 +72,52 @@ public record PidsRow(
     previousPlatform = previousPlatform == null ? Optional.empty() : previousPlatform;
     division = division == null ? Optional.empty() : division;
     joining = joining == null ? Optional.empty() : joining;
+  }
+
+  /** 不是越站的行。 */
+  public PidsRow(
+      Status status,
+      String lineName,
+      String routeId,
+      String destination,
+      Optional<String> destinationId,
+      String platform,
+      Instant expectedAt,
+      OptionalLong delaySeconds,
+      int stopSequence,
+      boolean passing,
+      boolean terminating,
+      boolean outOfService,
+      Optional<String> trainName,
+      boolean platformPending,
+      List<String> platformCandidates,
+      List<Car> cars,
+      Optional<String> previousPlatform,
+      boolean lastTrain,
+      Optional<Division> division,
+      Optional<Joining> joining) {
+    this(
+        status,
+        lineName,
+        routeId,
+        destination,
+        destinationId,
+        platform,
+        expectedAt,
+        delaySeconds,
+        stopSequence,
+        passing,
+        terminating,
+        outOfService,
+        trainName,
+        platformPending,
+        platformCandidates,
+        cars,
+        previousPlatform,
+        lastTrain,
+        division,
+        joining,
+        false);
   }
 
   /** 不联挂的行。 */

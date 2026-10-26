@@ -62,6 +62,32 @@ final class AnnounceFixtures {
         List.of("1", "2"));
   }
 
+  /** 信号员令越过本站的同一行（本应停车，现在通过）。 */
+  static PidsRow skipped(PidsRow row) {
+    return new PidsRow(
+        row.status(),
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        row.platform(),
+        row.expectedAt(),
+        row.delaySeconds(),
+        row.stopSequence(),
+        true,
+        row.terminating(),
+        row.outOfService(),
+        row.trainName(),
+        row.platformPending(),
+        row.platformCandidates(),
+        row.cars(),
+        row.previousPlatform(),
+        row.lastTrain(),
+        row.division(),
+        row.joining(),
+        true);
+  }
+
   static PidsRow running(PidsRow.Status status, String train, int seconds) {
     return row(status, train, seconds, 0, false, false, false);
   }

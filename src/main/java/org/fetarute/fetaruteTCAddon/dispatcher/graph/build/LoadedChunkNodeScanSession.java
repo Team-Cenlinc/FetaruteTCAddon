@@ -147,7 +147,8 @@ public final class LoadedChunkNodeScanSession {
                         y,
                         z,
                         def.trainCartsDestination(),
-                        def.waypointMetadata());
+                        def.waypointMetadata(),
+                        def.doorDirection());
                 duplicateCollector.record(
                     def.nodeId(),
                     new DuplicateNodeId.Occurrence(

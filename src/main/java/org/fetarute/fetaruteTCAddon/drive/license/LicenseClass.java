@@ -5,7 +5,8 @@ import java.util.Locale;
 import java.util.Objects;
 
 /**
- * 一级驾驶证：叫什么、要先有哪几级、怎么考、考过给哪些权限节点。车掌考法的一项不是更高一级的驾驶资格，而是驾驶证上的附注（见 {@link #endorsement()}）。
+ * 操作许可证上的一项资格：叫什么、要先有哪几项、怎么考、考过给哪些权限节点。驾驶、车掌、信号员三个岗位并列（见 {@link #post()}）：驾驶分级（见习、正式……，按配置先后排级数），
+ * 车掌与信号员各是一项资格，不占驾驶的级数。
  *
  * @param id 等级标识（配置里的键，小写）
  * @param name 显示名
@@ -13,12 +14,13 @@ import java.util.Objects;
  * @param enabled 是否开放考试与发证
  * @param requires 考这一级前要先持有的等级
  * @param exam 考试方式
- * @param examStops 路考区间要开过几个停车站（{@link Exam#ROAD_TEST}）；车掌考试要做满几站作业（{@link Exam#GUARD}）
- * @param minPoints 路考与车掌考试的及格分（0–100）
+ * @param examStops 路考区间要开过几个停车站（{@link Exam#ROAD_TEST}）；车掌考试要做满几站作业（{@link
+ *     Exam#GUARD}）；信号员考试要亲手排满几列车（{@link Exam#SIGNALLER}）
+ * @param minPoints 路考、车掌与信号员考试的及格分（0–100）
  * @param allowEmergency 路考中触发紧急制动是否仍可及格
  * @param allowOverrun 路考中停过头、越站是否仍可及格
  * @param allowWrongDoor 路考、车掌考试中开错门是否仍可及格
- * @param trainingRuns 报名路考或车掌考试前至少要完整做完几次练习（0 为不强制）
+ * @param trainingRuns 报名路考、车掌或信号员考试前至少要完整做完几次练习（0 为不强制）
  * @param grants 持证时给的权限节点（子节点随之生效）
  * @param drillSeconds 车掌考试中夹人夹物演练的处置时限（秒）；0 为不安排演练（{@link Exam#GUARD}）
  */
@@ -48,7 +50,9 @@ public record LicenseClass(
     /** 路考：驾驶一段调度列车的区间任务，按成绩判定。 */
     ROAD_TEST,
     /** 车掌：在调度列车上值乘，做满几站作业后按车掌成绩判定。 */
-    GUARD;
+    GUARD,
+    /** 信号员：在控制台上值守、转人工，亲手排满几列车的进路后按扣分判定。 */
+    SIGNALLER;
 
     /** 按配置写法解析（旧写法 {@code dispatch} 照认）；认不出时为空。 */
     public static Exam parse(String raw) {
@@ -59,6 +63,7 @@ public record LicenseClass(
         case "tutorial" -> TUTORIAL;
         case "road-test", "dispatch" -> ROAD_TEST;
         case "guard" -> GUARD;
+        case "signaller" -> SIGNALLER;
         default -> null;
       };
     }
@@ -78,9 +83,28 @@ public record LicenseClass(
     drillSeconds = Math.max(0, drillSeconds);
   }
 
-  /** 是驾驶证上的附注（车掌）：不排进准驾等级，驾驶证上单列“附注”一栏。 */
-  public boolean endorsement() {
-    return exam == Exam.GUARD;
+  /** 岗位：操作许可证上并列的三项。 */
+  public enum Post {
+    /** 驾驶：分级，见习、正式……按配置先后排级数。 */
+    DRIVER,
+    /** 车掌。 */
+    GUARD,
+    /** 信号员。 */
+    SIGNALLER
+  }
+
+  /** 这一项属于哪个岗位：按考法定，教程与路考是驾驶。 */
+  public Post post() {
+    return switch (exam) {
+      case TUTORIAL, ROAD_TEST -> Post.DRIVER;
+      case GUARD -> Post.GUARD;
+      case SIGNALLER -> Post.SIGNALLER;
+    };
+  }
+
+  /** 是驾驶的一级：排进级数（“第 N 级”）；车掌、信号员不占级数。 */
+  public boolean graded() {
+    return post() == Post.DRIVER;
   }
 
   /** 演练时限按考法取默认：车掌考试 {@link #DEFAULT_DRILL_SECONDS} 秒，其余不演练。 */

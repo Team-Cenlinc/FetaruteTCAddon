@@ -13,7 +13,7 @@ import org.fetarute.fetaruteTCAddon.drive.license.TrainingRecord;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 
-/** JDBC 实现的驾驶证仓库。 */
+/** JDBC 实现的操作许可证仓库。 */
 public final class JdbcLicenseRepository extends JdbcRepositorySupport
     implements LicenseRepository {
 

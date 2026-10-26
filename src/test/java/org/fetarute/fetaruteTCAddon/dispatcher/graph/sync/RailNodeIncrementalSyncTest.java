@@ -4,7 +4,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
@@ -121,7 +120,7 @@ final class RailNodeIncrementalSyncTest {
     RailGraphService.RailGraphStaleState stale = staleCaptor.getValue();
     assertEquals("deadbeef", stale.snapshotSignature());
     assertEquals(currentSignature, stale.currentSignature());
-    verify(railGraphService, never()).loadFromStorage(any(), anyList());
+    verify(railGraphService, never()).reloadFromStorage(any(), any(), any(), any());
   }
 
   @Test
@@ -183,7 +182,7 @@ final class RailNodeIncrementalSyncTest {
 
     verify(nodeRepo).deleteByPosition(worldId, 1, 64, 2);
     verify(nodeRepo).upsert(any(RailNodeRecord.class));
-    verify(railGraphService).loadFromStorage(provider, List.of(world));
+    verify(railGraphService).reloadFromStorage(eq(provider), eq(world), any(), any());
     verify(railGraphService, never()).markStale(any(), any());
   }
 
@@ -605,6 +604,7 @@ final class RailNodeIncrementalSyncTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getStaleState(world))
         .thenReturn(Optional.of(staleState()), Optional.empty());
+    runReloadCallbackInline(railGraphService);
     GraphStaleListener listener = mock(GraphStaleListener.class);
     RailNodeIncrementalSync sync =
         new RailNodeIncrementalSync(
@@ -612,7 +612,7 @@ final class RailNodeIncrementalSyncTest {
 
     sync.upsert(mockBlock(world, 1, 64, 2), definition);
 
-    verify(railGraphService).loadFromStorage(any(), eq(List.of(world)));
+    verify(railGraphService).reloadFromStorage(any(), eq(world), any(), any());
     verify(listener).onRecovered(world);
     verify(listener, never()).onStale(any(), any(), any(), any());
   }
@@ -677,6 +677,7 @@ final class RailNodeIncrementalSyncTest {
                     Optional.empty())));
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getStaleState(world)).thenReturn(Optional.of(staleState()));
+    runReloadCallbackInline(railGraphService);
     GraphStaleListener listener = mock(GraphStaleListener.class);
     RailNodeIncrementalSync sync =
         new RailNodeIncrementalSync(
@@ -684,7 +685,7 @@ final class RailNodeIncrementalSyncTest {
 
     sync.upsert(mockBlock(world, 1, 64, 2), definition);
 
-    verify(railGraphService).loadFromStorage(any(), eq(List.of(world)));
+    verify(railGraphService).reloadFromStorage(any(), eq(world), any(), any());
     verify(listener, never()).onRecovered(any());
   }
 
@@ -705,6 +706,52 @@ final class RailNodeIncrementalSyncTest {
     sync.delete(mockBlock(world, 1, 64, 2), definition);
 
     verify(railGraphService, never()).markStale(any(), any());
+    verify(listener, never()).onStale(any(), any(), any(), any());
+  }
+
+  @Test
+  void doorDirectionOnlyChangeIsWrittenButDoesNotCountAsAGraphChange() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    SignNodeDefinition station =
+        new SignNodeDefinition(
+            NodeId.of("SURC:S:PPK:1"),
+            NodeType.STATION,
+            Optional.of("SURC:S:PPK:1"),
+            Optional.empty(),
+            Optional.of("NORTH"));
+    RailNodeRecord stored =
+        new RailNodeRecord(
+            worldId,
+            station.nodeId(),
+            station.nodeType(),
+            1,
+            64,
+            2,
+            station.trainCartsDestination(),
+            station.waypointMetadata(),
+            Optional.of("NORTH"));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getStaleState(world)).thenReturn(Optional.of(staleState()));
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    StorageManager storage = storageWith(worldId, List.of(stored), "deadbeef");
+    RailNodeRepository nodeRepo = storage.provider().orElseThrow().railNodes();
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(storage, railGraphService, null, listener);
+
+    // 原样重放：库没变，已失效的世界不再重复上报。
+    sync.upsert(mockBlock(world, 1, 64, 2), station);
+    verify(listener, never()).onStale(any(), any(), any(), any());
+
+    // 只改开门方向：照常写库，但不算图的变化，不上报、不移出旧图。
+    SignNodeDefinition both = station.withDoorDirection(Optional.of("BOTH"));
+    sync.upsert(mockBlock(world, 1, 64, 2), both);
+
+    ArgumentCaptor<RailNodeRecord> written = ArgumentCaptor.forClass(RailNodeRecord.class);
+    verify(nodeRepo, times(2)).upsert(written.capture());
+    assertEquals(Optional.of("NORTH"), written.getAllValues().get(0).doorDirection());
+    assertEquals(Optional.of("BOTH"), written.getAllValues().get(1).doorDirection());
     verify(listener, never()).onStale(any(), any(), any(), any());
   }
 
@@ -1074,5 +1121,16 @@ final class RailNodeIncrementalSyncTest {
 
   private StorageTransactionManager directTransactionManager() {
     return new DirectTransactionManager();
+  }
+
+  /** 模拟的服务在重载时当场执行"处理结束"回调（真实服务在没设执行器时也是同步执行）。 */
+  private static void runReloadCallbackInline(RailGraphService railGraphService) {
+    doAnswer(
+            invocation -> {
+              invocation.<Runnable>getArgument(3).run();
+              return null;
+            })
+        .when(railGraphService)
+        .reloadFromStorage(any(), any(), any(), any());
   }
 }

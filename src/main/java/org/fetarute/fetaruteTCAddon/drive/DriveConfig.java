@@ -50,7 +50,7 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveSoundConfig;
  * @param sounds 驾驶提示音与鸣笛
  * @param ebGraceTicks 驾驶员自己选到紧急制动后，多少 tick 内回拨可撤销（防误触）；0 表示立即锁定
  * @param supercap 超级电容车的储能与充电
- * @param license 驾驶证与考试
+ * @param license 操作许可证与考试
  * @param rewards 驾驶奖励（经验与服务器钱币）
  * @param guard 车掌
  */

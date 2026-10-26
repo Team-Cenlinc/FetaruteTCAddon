@@ -25,7 +25,7 @@
 | `port` | `8780` | 端口 |
 | `token` | `""` | 共享令牌：非空时请求须带 `Authorization: Bearer <令牌>` 或 `X-Fetarute-Token: <令牌>`，否则回 401。监听非本机地址且没设令牌时启动日志告警 |
 
-`/fta reload` 后按新配置启停或重启；地址、端口、令牌都没变时不动。端口被占用等启动失败只留告警，不影响插件。
+`/fta reload` 后按新配置启停或重启；地址、端口、令牌都没变时不动。`server-id` 改了也不重启：它是 `/v1/meta` 缓存键的一部分，下一次请求就换。端口被占用等启动失败只留告警，不影响插件。
 
 ## 接口
 
@@ -33,7 +33,7 @@
 
 | 路径 | 缓存 | 内容 |
 |---|---|---|
-| `/v1/meta` | 10 秒 | `apiVersion`、`generatedAt`、服务器时区 `timezone`（时刻表按它排）、`endpoints` |
+| `/v1/meta` | 10 秒 | `apiVersion`、本服的服务器 ID `serverId`（`config.yml` 的 `server-id`，没配时不输出；聚合几台服务器的中转据此核对来源，配错的来源不并进来。改了 `server-id` 后下一次请求即换，缓存键含 server-id）、`generatedAt`、服务器时区 `timezone`（时刻表按它排）、`endpoints` |
 | `/v1/operators` | 60 秒 | 运营商：`id`、`code`、`name`、`secondaryName`、`color`、`priority` |
 | `/v1/lines` | 60 秒 | 线路：`id`、`code`、`operatorId`、`operatorCode`、`name`、`secondaryName`、`serviceType`、`color`、`status`（主数据：规划中/运营/维护）、`liveStatus`（实时运行状况，与线路运行状况屏同一份：`condition` 为 `SUSPENDED`/`PART_SUSPENDED`/`SEVERE_DELAYS`/`MINOR_DELAYS`/`CANCELLATIONS`/`GOOD`/`ENDED`/`NO_TRAINS`，另带 `maxDelayMinutes`、`cancelledTrips`、`closedFrom`/`closedTo`、`nextServiceAt` 之一） |
 | `/v1/stations` | 60 秒 | 车站：`id`、`code`、`operatorCode`、`name`、`world`、`position{x,y,z}`、停靠线路 `lines`（经车站组换乘到达的写 `viaStationId`、`transferType`、`walkSeconds`）；车站组 `groups` |

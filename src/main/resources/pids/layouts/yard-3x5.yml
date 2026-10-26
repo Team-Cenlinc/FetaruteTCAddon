@@ -1,0 +1,39 @@
+# 站场图 3×5（640×384，3 行 5 块地图）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 第 1 行：站名与右上角当前时间；中间是本站站场的轨道（按占用着色，车身与车次窗叠在上面）；底部是图例。
+# 只读，绑定车站后显示；不能与其他布局组合翻页。
+format: 1
+name: 站场图 3×5
+tiles:
+  rows: 3
+  cols: 5
+widgets:
+  - type: station-title
+    x: 8
+    y: 4
+    width: 480
+    sizes: [24, 20]
+    secondary: 12
+    gap: 8
+  # 右对齐时 x 为右缘
+  - type: clock
+    x: 628
+    y: 8
+    size: 20
+    align: right
+  # inset：轨道距组件边缘的留白；label：股道号、车次窗与去向的字号
+  - type: yard
+    x: 0
+    y: 32
+    width: 640
+    height: 268
+    inset: 6
+    label: 10
+  # 两行样例加一行说明，贴着底边
+  - type: yard-legend
+    x: 0
+    y: 300
+    width: 640
+    height: 84
+    label: {size: 12, secondary: 10, gap: 6}
+    note: 10

@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.fetarute.fetaruteTCAddon.utils.PackModel;
 
 /**
- * 车掌菜单（F，三排 27 格）：传送入座、呼叫驾驶员、异常报告、结束值乘。
+ * 车掌菜单（F，三排 27 格）：传送入座、呼叫（有驾驶员时呼叫驾驶员，没有时呼叫信号员，同两短铃）、异常报告、结束值乘。
  *
  * <p>贴图沿用驾驶台面板：结束值乘用驾驶台的“结束驾驶”（{@code panel/end · end_confirm}），呼叫用发车铃，传送入座是 {@code guard/seat}。
  */
@@ -47,8 +47,9 @@ public final class GuardMenu {
    *
    * @param endConfirm 结束值乘已点过一次，等再次点击确认
    * @param reportUsed 本站报告次数已用完
+   * @param driverAboard 车上有驾驶员：呼叫按钮呼叫驾驶员，否则呼叫信号员
    */
-  public record View(boolean endConfirm, boolean reportUsed) {}
+  public record View(boolean endConfirm, boolean reportUsed, boolean driverAboard) {}
 
   /** 识别车掌菜单的窗口持有者。 */
   static final class Holder implements InventoryHolder {
@@ -111,7 +112,7 @@ public final class GuardMenu {
     meta.lore(
         List.of(
             locale
-                .component("drive.guard.menu.hint." + hintId(action))
+                .component("drive.guard.menu.hint." + hintId(action, view))
                 .decoration(TextDecoration.ITALIC, false)));
     PackModel.mark(meta, modelKey(action, view));
     if (action == Action.END && view.endConfirm()) {
@@ -145,16 +146,16 @@ public final class GuardMenu {
     String base = "drive.guard.menu.item.";
     return switch (action) {
       case SEAT -> base + "seat";
-      case CALL -> base + "call";
+      case CALL -> base + (view.driverAboard() ? "call" : "call-signaller");
       case REPORT -> base + (view.reportUsed() ? "report-used" : "report");
       case END -> base + (view.endConfirm() ? "end-confirm" : "end");
     };
   }
 
-  private static String hintId(Action action) {
+  private static String hintId(Action action, View view) {
     return switch (action) {
       case SEAT -> "seat";
-      case CALL -> "call";
+      case CALL -> view.driverAboard() ? "call" : "call-signaller";
       case REPORT -> "report";
       case END -> "end";
     };

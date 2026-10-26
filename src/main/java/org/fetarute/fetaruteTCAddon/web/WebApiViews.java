@@ -30,11 +30,20 @@ final class WebApiViews {
 
   private WebApiViews() {}
 
-  /** {@code /v1/meta}：版本、服务器时刻与时区、接口清单。 */
+  /**
+   * {@code /v1/meta}：版本、本服的服务器 ID、服务器时刻与时区、接口清单。
+   *
+   * @param serverId 配置里的 {@code server-id}；没配时不输出，多服聚合方据此认出、核对来源
+   */
   static Map<String, Object> meta(
-      String apiVersion, Instant now, ZoneId zone, List<String> endpoints) {
+      String apiVersion,
+      Optional<String> serverId,
+      Instant now,
+      ZoneId zone,
+      List<String> endpoints) {
     Map<String, Object> out = new LinkedHashMap<>();
     out.put("apiVersion", apiVersion);
+    serverId.ifPresent(value -> out.put("serverId", value));
     out.put(GENERATED_AT, now.toString());
     out.put("timezone", zone.getId());
     out.put("endpoints", List.copyOf(endpoints));

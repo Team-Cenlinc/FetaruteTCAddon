@@ -5,6 +5,7 @@ import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.ControlZoneRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
@@ -35,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberInv
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcConsistPlanRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcControlZoneRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcDriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepository;
@@ -77,6 +79,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final LineRepository lineRepository;
   private final StationRepository stationRepository;
   private final StationGroupRepository stationGroupRepository;
+  private final ControlZoneRepository controlZoneRepository;
   private final RouteRepository routeRepository;
   private final RouteStopRepository routeStopRepository;
   private final RailNodeRepository railNodeRepository;
@@ -116,6 +119,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcStationRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.stationGroupRepository =
         new JdbcStationGroupRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.controlZoneRepository =
+        new JdbcControlZoneRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.routeRepository = new JdbcRouteRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.routeStopRepository =
         new JdbcRouteStopRepository(dataSource, dialect, tablePrefix, logger::debug);
@@ -199,6 +204,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public StationGroupRepository stationGroups() {
     return stationGroupRepository;
+  }
+
+  @Override
+  public ControlZoneRepository controlZones() {
+    return controlZoneRepository;
   }
 
   @Override

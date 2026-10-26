@@ -148,12 +148,19 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
   这一班的发车取 max(票面, 车就绪)，下游各站的预计与晚点随之推后。不知道是哪辆车时（间隔发车）仍按起点第一辆待命车估。
 
 ## 站牌查询统计（`/fta eta stats`）
-站牌查询（`EtaService#getBoard`）在主线程上同步执行，PIDS 上线后调用量会随屏幕数增长，因此先计量再决定优化方向。
+站牌查询（`EtaService#getBoard`）先给缓存，过期了在后台刷新（stale-while-revalidate）：
+
+- 1.5 秒内的结果直接返回；1.5–15 秒的先返回旧值，同时交后台刷新（同一块站牌同一时刻只有一个刷新任务，交出去 15 秒还没跑完视为丢了、重新交）。
+- 没有旧值、旧值超过 15 秒、调度图换过、或服务已 `close()` 时，在调用线程同步算，与以前一样。后台算到一半换了图，结果丢掉。
+- 主线程只拷一份不可变输入（`EtaBoardInput`：各车快照、停车状态、实际节点、选台、计划站台、待命登记、待发票据与预测、涉及的交路与车站目录条目、票据车型），计算本体在 `EtaCalculator`，后台不碰任何钩子、TrainCarts 对象或发车管理器。新加站牌计算读取的钩子时，要同步加进 `EtaBoardInput`，否则那一项按“未接入”处理并打 `ETA_BOARD_INPUT_MISS`（`EtaBoardInputTest` 守着这一点）。
+- 代价：站台屏经 `PidsSnapshotProvider` 每 5 秒取一次站牌，取到的多是上一轮后台刷出来的，屏上数据最旧约 10 秒；要更新可以调小 `pids.yml` 的 `render.snapshot-ttl-seconds`。
+- 单车与票据 ETA（`getForTrain`、`getForTicket` 等）仍在主线程同步算：只算一列车，HUD 也要靠它及时报“即将到站”。
+- 咽喉查询按（图实例，站台节点）缓存（`StationThroats`，图用弱引用持有）。
+- 后台线程是自带的单线程守护线程（`FetaruteTCAddon-ETA-Board-N`，空闲 30 秒退出），插件停用时 `close()`。
 
 站牌计算不读库：终点站名查车站目录（`StationDirectory`，经 `attachStationLookup` 接入），交路运营类型、交路实体与停靠表查交路缓存
 （`RouteDefinitionCache#findRecord/findById/listStops`）。两份缓存随改库命令刷新（车站、运营商改库后 `refreshStationDirectory`，交路改库后刷新交路缓存）。
-剩下的只有 CPU：遍历全网列车快照与待发票据、估算走行。整段搬到异步线程还不行——待发票据队列与出车预测读的是主线程在改的普通集合，
-车库牌子要在主线程读方块；要异步需先给发车管理器发布只读快照。
+剩下的只有 CPU：遍历全网列车快照与待发票据、估算走行；待发票据队列、出车预测与车库牌子都在主线程拷进输入，后台只算。
 
 - `/fta eta stats`：自上次清零以来的调用次数、缓存命中率、重算次数、重算平均/最长耗时。
 - `/fta eta stats reset`：清零统计，起算时刻改为现在；权限同其它 ETA 诊断命令（`fetarute.eta`）。
@@ -161,7 +168,7 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
 - 单次重算超过 5 ms 时，在 `debug.enabled=true` 下输出 `ETA_BOARD_SLOW station=… ms=… rows=…`，便于把慢查询对上具体车站。
 - 统计只在内存中累积：`/fta reload` 不清零，插件重启后从零开始。
 
-实测建议：高峰时段先 `reset`，运行 10~15 分钟后查看平均与最长重算耗时；若明显影响 TPS，再考虑把计算挪到异步线程。
+实测建议：高峰时段先 `reset`，运行 10~15 分钟后查看平均与最长重算耗时（后台刷新的耗时不在主线程上）。
 
 ## 站牌为空的常见原因
 `/fta eta board` 会合并三类来源：运行中列车快照 + 已生成但未发车的票据 + 未出票服务预测。出现 “rows=0” 常见原因如下：

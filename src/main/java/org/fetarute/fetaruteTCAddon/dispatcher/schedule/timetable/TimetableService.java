@@ -2245,6 +2245,20 @@ public final class TimetableService implements ScheduledDeparturePlan {
         .orElse(OptionalLong.empty());
   }
 
+  /**
+   * 晚点读数的“版本”：当前车次加上已记的到发次数。两次读 {@link #currentDelaySeconds}
+   * 之间版本没变，说明其间没停过站、读数没更新（例如只经过道岔区）。没有车次时为空。
+   */
+  public Optional<String> delayStamp(String trainName) {
+    if (!settings.enabled()) {
+      return Optional.empty();
+    }
+    String key = keyOf(trainName);
+    return matcher
+        .get(key)
+        .map(assignment -> assignment.tripId() + "#" + delays.marks(key, assignment.tripId()));
+  }
+
   /** 查询某辆车的交路进度。 */
   public Optional<DutyProgress> dutyProgressOf(String trainName) {
     return ledger.progressOf(keyOf(trainName));

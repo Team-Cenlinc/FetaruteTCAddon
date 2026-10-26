@@ -2,7 +2,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -28,6 +27,9 @@ import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 public final class SmartWaitForPlanner {
 
   private static final Comparator<String> TEXT_ORDER = String.CASE_INSENSITIVE_ORDER;
+
+  /** 关掉 trace 时传下去的哑列表：写入直接丢弃。拼字符串之前先问 {@link #tracing}，连拼都省掉。 */
+  private static final List<String> NO_TRACES = new DiscardingTraces();
 
   /** Planner 输入配置。 */
   public record PlannerSettings(
@@ -223,14 +225,38 @@ public final class SmartWaitForPlanner {
     }
   }
 
-  /** 一轮 planner 输入。 */
+  /**
+   * 一轮 planner 输入。
+   *
+   * <p>{@code collectTraces} 只决定要不要拼 trace 字符串；关掉时 {@link PlanResult#traceLines()} 为空，其余结论逐项不变。
+   */
   public record PlannerInput(
       Instant capturedAt,
       PlannerSettings settings,
       List<InputEdge> edges,
       Map<String, TrainState> trainStates,
       Set<String> activeCycleReservations,
-      Set<String> activeReservationTrains) {
+      Set<String> activeReservationTrains,
+      boolean collectTraces) {
+
+    /** 旧调用点：一律拼 trace。 */
+    public PlannerInput(
+        Instant capturedAt,
+        PlannerSettings settings,
+        List<InputEdge> edges,
+        Map<String, TrainState> trainStates,
+        Set<String> activeCycleReservations,
+        Set<String> activeReservationTrains) {
+      this(
+          capturedAt,
+          settings,
+          edges,
+          trainStates,
+          activeCycleReservations,
+          activeReservationTrains,
+          true);
+    }
+
     public PlannerInput {
       capturedAt = capturedAt == null ? Instant.now() : capturedAt;
       settings =
@@ -503,6 +529,49 @@ public final class SmartWaitForPlanner {
     }
   }
 
+  /**
+   * 没有任何输入边时的规划结果，与 {@link #plan} 对空边输入给出的结果逐项相同。
+   *
+   * <p>空图上没有环、没有候选，结论与设置和时刻都无关；调用方据此跳过列车状态采集与整趟规划，节流与 trace 仍按同一个结果走。
+   *
+   * @param collectTraces 是否带上 {@code SMART_WAIT_FOR_GRAPH} 那一行
+   */
+  public static PlanResult emptyGraphResult(boolean collectTraces) {
+    String graphHash = graphHash(List.of());
+    return new PlanResult(
+        graphHash,
+        "-",
+        throttleKey(graphHash, "-", "-"),
+        collectTraces ? List.of(waitForGraphTrace(0, 0, 0, 0, graphHash)) : List.of(),
+        List.of(),
+        Optional.empty(),
+        false,
+        false);
+  }
+
+  /**
+   * 按 {@link #plan} 的同一套入图规则筛出会进等待图的边。
+   *
+   * <p>纯函数，供调用方在回收一份较早的规划结果时核对：结果要释放的那几条边在此刻的输入里是否仍会进图。
+   *
+   * @param edges 一轮完整的输入边
+   * @param settings 入图规则所用的设置
+   * @return 会进图的边，保持输入顺序
+   */
+  public static List<InputEdge> admittedEdges(List<InputEdge> edges, PlannerSettings settings) {
+    if (edges == null || edges.isEmpty() || settings == null) {
+      return List.of();
+    }
+    Set<String> blockedUnderStrictRules = strictlyBlockedTrains(edges, settings);
+    List<InputEdge> admitted = new ArrayList<>();
+    for (InputEdge edge : edges) {
+      if (inputEdgeRejection(edge, settings, blockedUnderStrictRules).isBlank()) {
+        admitted.add(edge);
+      }
+    }
+    return List.copyOf(admitted);
+  }
+
   /** 生成只读调度计划。 */
   public PlanResult plan(PlannerInput input) {
     if (input == null
@@ -510,7 +579,8 @@ public final class SmartWaitForPlanner {
         || input.settings().mode() == SmartDispatcherPlannerMode.OFF) {
       return new PlanResult("-", "-", "-", List.of(), List.of(), Optional.empty(), false, false);
     }
-    List<String> traces = new ArrayList<>();
+    boolean tracing = input.collectTraces();
+    List<String> traces = tracing ? new ArrayList<>() : NO_TRACES;
     List<Edge> activeEdges = new ArrayList<>();
     int rejected = 0;
     int stale = 0;
@@ -524,10 +594,15 @@ public final class SmartWaitForPlanner {
         if ("STALE_EDGE".equals(rejection)) {
           stale++;
         }
-        traces.add(inputEdgeRejectedTrace(edge, rejection, input.settings()));
+        if (tracing) {
+          traces.add(inputEdgeRejectedTrace(edge, rejection, input.settings()));
+        }
         continue;
       }
       activeEdges.add(new Edge(edge));
+      if (!tracing) {
+        continue;
+      }
       traces.add(inputEdgeTrace(edge));
       if (!edge.activeForNormalAdmission()) {
         // 这条边只因为放宽才进的图。单独留痕，便于下一轮直接数出放宽被用了多少次、
@@ -546,18 +621,12 @@ public final class SmartWaitForPlanner {
       }
     }
     String graphHash = graphHash(activeEdges);
-    traces.add(
-        "SMART_WAIT_FOR_GRAPH nodes="
-            + graphNodes(activeEdges).size()
-            + " edges="
-            + activeEdges.size()
-            + " rejectedEdges="
-            + rejected
-            + " staleEdges="
-            + stale
-            + " graphHash="
-            + graphHash);
-    if (activeEdges.isEmpty() && !input.edges().isEmpty()) {
+    if (tracing) {
+      traces.add(
+          waitForGraphTrace(
+              graphNodes(activeEdges).size(), activeEdges.size(), rejected, stale, graphHash));
+    }
+    if (tracing && activeEdges.isEmpty() && !input.edges().isEmpty()) {
       traces.add(
           "SMART_DISPATCH_FALLBACK_NOT_READY reason=NO_FRESH_BLOCKER_EDGES rejectedEdges="
               + rejected
@@ -583,7 +652,7 @@ public final class SmartWaitForPlanner {
     boolean hardEvidenceStrong =
         patterns.stream()
             .anyMatch(pattern -> pattern.hardCycle() && knownDirections(activeEdges, pattern));
-    if (selected.isPresent()) {
+    if (tracing && selected.isPresent()) {
       UnlockCandidate plan = selected.get();
       String effectClass = input.settings().enforceMinimalForward() ? "OCCUPANCY_MUTATION" : "NONE";
       traces.add(
@@ -601,7 +670,7 @@ public final class SmartWaitForPlanner {
               + effectClass
               + " selectedPlanHash="
               + plan.planHash());
-    } else if (!patterns.isEmpty()) {
+    } else if (tracing && !patterns.isEmpty()) {
       String recommendation =
           onlySwitcherMergePatterns
               ? "SWITCHER_MERGE_EXECUTOR_NOT_READY"
@@ -634,20 +703,35 @@ public final class SmartWaitForPlanner {
     }
     String selectedPlanHash = selected.map(UnlockCandidate::planHash).orElse("-");
     String throttleKey =
-        graphHash
-            + ":"
-            + selected.map(UnlockCandidate::cycleId).orElse("-")
-            + ":"
-            + selectedPlanHash;
+        throttleKey(
+            graphHash, selected.map(UnlockCandidate::cycleId).orElse("-"), selectedPlanHash);
     return new PlanResult(
         graphHash,
         selectedPlanHash,
         throttleKey,
-        traces,
+        tracing ? traces : List.of(),
         candidates,
         selected,
         directionAuditNeeded,
         hardEvidenceStrong);
+  }
+
+  private static String throttleKey(String graphHash, String cycleId, String selectedPlanHash) {
+    return graphHash + ":" + cycleId + ":" + selectedPlanHash;
+  }
+
+  private static String waitForGraphTrace(
+      int nodes, int edges, int rejected, int stale, String graphHash) {
+    return "SMART_WAIT_FOR_GRAPH nodes="
+        + nodes
+        + " edges="
+        + edges
+        + " rejectedEdges="
+        + rejected
+        + " staleEdges="
+        + stale
+        + " graphHash="
+        + graphHash;
   }
 
   private static List<UnlockCandidate> buildCandidates(
@@ -662,7 +746,7 @@ public final class SmartWaitForPlanner {
       boolean acceptedForPattern = false;
       String firstRejectReason = "NO_RELEASABLE_BLOCKER_RESOURCE";
       UnlockCandidate decisionCandidate = null;
-      List<String> patternTraces = new ArrayList<>();
+      List<String> patternTraces = traceListLike(traces);
       for (String blocker : pattern.blockers()) {
         List<Edge> releaseEdges = blockedByTrain.get(blocker);
         if (releaseEdges == null || releaseEdges.isEmpty()) {
@@ -678,13 +762,17 @@ public final class SmartWaitForPlanner {
         }
         if (candidate.accepted()) {
           acceptedForPattern = true;
-          patternTraces.add(candidateTrace(candidate));
-          patternTraces.add(simulationTrace(candidate));
+          if (tracing(patternTraces)) {
+            patternTraces.add(candidateTrace(candidate));
+            patternTraces.add(simulationTrace(candidate));
+          }
         } else {
           firstRejectReason = candidate.rejectReason();
-          patternTraces.add(rejectedCandidateTrace(candidate));
-          patternTraces.add(rejectedPlanTrace(candidate));
-          patternTraces.addAll(invariantTraces(candidate));
+          if (tracing(patternTraces)) {
+            patternTraces.add(rejectedCandidateTrace(candidate));
+            patternTraces.add(rejectedPlanTrace(candidate));
+            patternTraces.addAll(invariantTraces(candidate));
+          }
         }
       }
       if ("SAME_LINE_CASCADE".equals(pattern.type())) {
@@ -724,6 +812,9 @@ public final class SmartWaitForPlanner {
           }
         }
       }
+      if (!tracing(traces)) {
+        continue;
+      }
       traces.add(candidateDecisionTrace(input, pattern, decisionCandidate, generatedForPattern));
       traces.addAll(patternTraces);
       if (!generatedForPattern || !acceptedForPattern) {
@@ -759,6 +850,9 @@ public final class SmartWaitForPlanner {
       }
       SwitcherMergeEvidence evidence = evidenceOpt.get();
       evidenceByPattern.put(pattern.id(), evidence);
+      if (!tracing(traces)) {
+        continue;
+      }
       traces.add(
           "SMART_DISPATCH_SWITCHER_MERGE_DETECTED cycleId="
               + pattern.id()
@@ -888,6 +982,9 @@ public final class SmartWaitForPlanner {
             yieldCandidateForHeadOn(
                 input.settings(), graphEdges, entry.getValue(), pattern, yieldState, true);
         candidates.add(candidate);
+        if (!tracing(traces)) {
+          continue;
+        }
         traces.add(
             "SMART_DISPATCH_HEAD_ON_YIELD_DETECTED chainHead="
                 + chainHead
@@ -973,6 +1070,9 @@ public final class SmartWaitForPlanner {
     UnlockCandidate candidate =
         yieldCandidateForHeadOn(
             input.settings(), graphEdges, List.of(releaseEdge), pattern, yieldState, false);
+    if (!tracing(traces)) {
+      return candidate;
+    }
     traces.add(
         "SMART_DISPATCH_MUTUAL_HEAD_ON_YIELD_DETECTED blockedTrain="
             + releaseEdge.blocked()
@@ -1066,9 +1166,10 @@ public final class SmartWaitForPlanner {
     List<String> reservationResources =
         distinctReleaseResources.stream().limit(settings.maxReservationResources()).toList();
     DirectionResolution directionResolution = resolveDirection(safeReleaseEdges, state);
-    if (directionResolution.known()) {
+    boolean tracing = tracing(traces);
+    if (tracing && directionResolution.known()) {
       traces.add(directionInferredTrace(state, directionResolution));
-    } else {
+    } else if (tracing) {
       traces.add(directionInferenceFailedTrace(state, directionResolution));
     }
     CorridorDirection direction = directionResolution.direction();
@@ -1101,19 +1202,27 @@ public final class SmartWaitForPlanner {
         && !hasCompleteConsistentSingleCorridorDirection(safeReleaseEdges)) {
       rejectReason = "INSUFFICIENT_DIRECTION_EVIDENCE";
       recommendation = "NEED_DIRECTION_AUDIT";
-      traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+      if (tracing) {
+        traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+      }
     } else if (canonicalPathRequired && directionResolution.forwardPathEvidence().isEmpty()) {
       rejectReason = "INSUFFICIENT_DIRECTION_EVIDENCE";
       recommendation = "NEED_DIRECTION_AUDIT";
-      traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+      if (tracing) {
+        traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+      }
     } else if (conflictDirectionRequired && !directionResolution.corridorKnown()) {
       rejectReason = "INSUFFICIENT_DIRECTION_EVIDENCE";
       recommendation = "NEED_DIRECTION_AUDIT";
-      traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+      if (tracing) {
+        traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+      }
     } else if (settings.requireSameDirection() && !directionResolution.known()) {
       rejectReason = "INSUFFICIENT_DIRECTION_EVIDENCE";
       recommendation = "NEED_DIRECTION_AUDIT";
-      traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+      if (tracing) {
+        traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+      }
     } else if (!settings.allowReverse() && state.reverseCandidate()) {
       rejectReason = "REVERSE_DIRECTION";
     } else if (!settings.allowTurnbackBeforeBoundary() && state.turnbackReverseBeforeBoundary()) {
@@ -1265,6 +1374,9 @@ public final class SmartWaitForPlanner {
 
   private static void traceActiveReservationSkips(
       PlannerInput input, List<UnlockCandidate> candidates, List<String> traces) {
+    if (!tracing(traces)) {
+      return;
+    }
     for (UnlockCandidate candidate : candidates) {
       if (!candidate.accepted() || !hasActiveReservation(input, candidate)) {
         continue;
@@ -1300,8 +1412,10 @@ public final class SmartWaitForPlanner {
         if (mutualSeen.add(id)) {
           Pattern pattern = new Pattern(id, "MUTUAL", trains, trains, true);
           patterns.add(pattern);
-          traces.add(
-              "SMART_DISPATCH_CYCLE_DETECTED type=MUTUAL cycleId=" + id + " trains=" + trains);
+          if (tracing(traces)) {
+            traces.add(
+                "SMART_DISPATCH_CYCLE_DETECTED type=MUTUAL cycleId=" + id + " trains=" + trains);
+          }
         }
       }
     }
@@ -1312,11 +1426,13 @@ public final class SmartWaitForPlanner {
       String id = "scc:" + String.join("|", sortedSet(component));
       Pattern pattern = new Pattern(id, "SCC", component, component, true);
       patterns.add(pattern);
-      traces.add(
-          "SMART_DISPATCH_CYCLE_DETECTED type=SCC cycleId="
-              + id
-              + " trains="
-              + sortedSet(component));
+      if (tracing(traces)) {
+        traces.add(
+            "SMART_DISPATCH_CYCLE_DETECTED type=SCC cycleId="
+                + id
+                + " trains="
+                + sortedSet(component));
+      }
     }
     Map<String, Set<String>> blockedByBlocker = new TreeMap<>(TEXT_ORDER);
     for (Edge edge : edges) {
@@ -1333,13 +1449,15 @@ public final class SmartWaitForPlanner {
       trains.addAll(entry.getValue());
       String id = "bottleneck:" + entry.getKey();
       patterns.add(new Pattern(id, "BOTTLENECK", trains, Set.of(entry.getKey()), false));
-      traces.add(
-          "SMART_DISPATCH_BOTTLENECK_DETECTED blocker="
-              + entry.getKey()
-              + " blockedCount="
-              + entry.getValue().size()
-              + " trains="
-              + trains);
+      if (tracing(traces)) {
+        traces.add(
+            "SMART_DISPATCH_BOTTLENECK_DETECTED blocker="
+                + entry.getKey()
+                + " blockedCount="
+                + entry.getValue().size()
+                + " trains="
+                + trains);
+      }
       TrainState leader = states.get(entry.getKey());
       if (leader != null && leader.stalled()) {
         patterns.add(
@@ -1349,13 +1467,15 @@ public final class SmartWaitForPlanner {
                 trains,
                 Set.of(entry.getKey()),
                 false));
-        traces.add(
-            "SMART_DISPATCH_STALLED_LEADER_CHAIN_DETECTED leader="
-                + entry.getKey()
-                + " followers="
-                + entry.getValue()
-                + " routeFamily="
-                + leader.routeFamily());
+        if (tracing(traces)) {
+          traces.add(
+              "SMART_DISPATCH_STALLED_LEADER_CHAIN_DETECTED leader="
+                  + entry.getKey()
+                  + " followers="
+                  + entry.getValue()
+                  + " routeFamily="
+                  + leader.routeFamily());
+        }
       }
     }
     for (List<String> chain : sameLineChains(edges, states)) {
@@ -1366,11 +1486,13 @@ public final class SmartWaitForPlanner {
       String id = "cascade:" + String.join("|", trains);
       patterns.add(
           new Pattern(id, "SAME_LINE_CASCADE", trains, Set.of(chain.get(chain.size() - 1)), false));
-      traces.add(
-          "SMART_DISPATCH_SAME_LINE_CASCADE_DETECTED chain="
-              + chain
-              + " routeFamily="
-              + states.getOrDefault(chain.get(0), defaultState(chain.get(0))).routeFamily());
+      if (tracing(traces)) {
+        traces.add(
+            "SMART_DISPATCH_SAME_LINE_CASCADE_DETECTED chain="
+                + chain
+                + " routeFamily="
+                + states.getOrDefault(chain.get(0), defaultState(chain.get(0))).routeFamily());
+      }
     }
     return List.copyOf(patterns);
   }
@@ -1402,50 +1524,137 @@ public final class SmartWaitForPlanner {
     return chains;
   }
 
-  private static Set<Set<String>> stronglyConnectedComponents(Map<String, Set<String>> graph) {
-    Set<Set<String>> result = new LinkedHashSet<>();
-    Set<String> nodes = new TreeSet<>(TEXT_ORDER);
-    nodes.addAll(graph.keySet());
-    graph.values().forEach(nodes::addAll);
+  /**
+   * 等待图里规模大于 1 的强连通分量，按各分量在 {@link #TEXT_ORDER} 下的最小成员排序。
+   *
+   * <p>用 Tarjan 一趟求出，O(N + E) 次查表。节点身份与 {@link #adjacency} 一致：按 {@link #TEXT_ORDER}
+   * 不分大小写，成员取邻接表键上的写法。单点自环不算环，与「至少两车互相可达」的判据一致。
+   */
+  static List<Set<String>> stronglyConnectedComponents(Map<String, Set<String>> graph) {
+    List<String> nodes = new ArrayList<>(graph.keySet());
+    Map<String, Integer> index = new TreeMap<>(TEXT_ORDER);
     for (String node : nodes) {
-      Set<String> reachable = reachable(graph, node);
-      Set<String> component = new TreeSet<>(TEXT_ORDER);
-      for (String other : nodes) {
-        if (reachable.contains(other) && reachable(graph, other).contains(node)) {
-          component.add(other);
+      index.putIfAbsent(node, index.size());
+    }
+    for (Set<String> targets : graph.values()) {
+      for (String target : targets) {
+        if (!index.containsKey(target)) {
+          index.put(target, nodes.size());
+          nodes.add(target);
         }
       }
-      if (component.size() > 1) {
-        result.add(component);
-      }
     }
-    return result;
-  }
-
-  private static Set<String> reachable(Map<String, Set<String>> graph, String start) {
-    Set<String> seen = new TreeSet<>(TEXT_ORDER);
-    ArrayDeque<String> queue = new ArrayDeque<>();
-    queue.add(start);
-    while (!queue.isEmpty()) {
-      String node = queue.removeFirst();
-      if (!seen.add(node)) {
+    int[][] successors = new int[nodes.size()][];
+    for (int i = 0; i < nodes.size(); i++) {
+      Set<String> targets = graph.getOrDefault(nodes.get(i), Set.of());
+      int[] row = new int[targets.size()];
+      int filled = 0;
+      for (String target : targets) {
+        row[filled++] = index.get(target);
+      }
+      successors[i] = row;
+    }
+    List<Set<String>> components = new ArrayList<>();
+    for (int[] component : new TarjanComponents(successors).run()) {
+      if (component.length <= 1) {
         continue;
       }
-      for (String next : graph.getOrDefault(node, Set.of())) {
-        if (!seen.contains(next)) {
-          queue.addLast(next);
+      Set<String> members = new TreeSet<>(TEXT_ORDER);
+      for (int member : component) {
+        members.add(nodes.get(member));
+      }
+      components.add(members);
+    }
+    components.sort(
+        Comparator.comparing((Set<String> component) -> component.iterator().next(), TEXT_ORDER));
+    return components;
+  }
+
+  /** Tarjan 强连通分量；显式栈迭代，不受等待图规模牵连调用栈深度。 */
+  private static final class TarjanComponents {
+    private final int[][] successors;
+    private final int[] order;
+    private final int[] lowLink;
+    private final boolean[] onStack;
+    private final int[] stack;
+    private int stackSize;
+    private int nextOrder = 1;
+
+    private TarjanComponents(int[][] successors) {
+      this.successors = successors;
+      this.order = new int[successors.length];
+      this.lowLink = new int[successors.length];
+      this.onStack = new boolean[successors.length];
+      this.stack = new int[successors.length];
+    }
+
+    private List<int[]> run() {
+      List<int[]> components = new ArrayList<>();
+      int[] callNode = new int[successors.length];
+      int[] callEdge = new int[successors.length];
+      for (int root = 0; root < successors.length; root++) {
+        if (order[root] != 0) {
+          continue;
+        }
+        int depth = 0;
+        callNode[0] = root;
+        callEdge[0] = 0;
+        visit(root);
+        while (depth >= 0) {
+          int node = callNode[depth];
+          if (callEdge[depth] < successors[node].length) {
+            int next = successors[node][callEdge[depth]++];
+            if (order[next] == 0) {
+              visit(next);
+              depth++;
+              callNode[depth] = next;
+              callEdge[depth] = 0;
+            } else if (onStack[next]) {
+              lowLink[node] = Math.min(lowLink[node], order[next]);
+            }
+            continue;
+          }
+          if (lowLink[node] == order[node]) {
+            components.add(popComponent(node));
+          }
+          depth--;
+          if (depth >= 0) {
+            int parent = callNode[depth];
+            lowLink[parent] = Math.min(lowLink[parent], lowLink[node]);
+          }
         }
       }
+      return components;
     }
-    return seen;
+
+    private void visit(int node) {
+      order[node] = nextOrder;
+      lowLink[node] = nextOrder;
+      nextOrder++;
+      stack[stackSize++] = node;
+      onStack[node] = true;
+    }
+
+    private int[] popComponent(int root) {
+      int start = stackSize;
+      do {
+        start--;
+      } while (stack[start] != root);
+      int[] component = new int[stackSize - start];
+      for (int i = start; i < stackSize; i++) {
+        component[i - start] = stack[i];
+        onStack[stack[i]] = false;
+      }
+      stackSize = start;
+      return component;
+    }
   }
 
   private static boolean hasCycle(List<Edge> edges, String cycleId) {
     if (edges.isEmpty() || "-".equals(cycleId)) {
       return false;
     }
-    Map<String, Set<String>> graph = adjacency(edges);
-    return stronglyConnectedComponents(graph).stream().anyMatch(component -> component.size() > 1);
+    return !stronglyConnectedComponents(adjacency(edges)).isEmpty();
   }
 
   private static boolean knownDirections(List<Edge> edges, Pattern pattern) {
@@ -2270,6 +2479,33 @@ public final class SmartWaitForPlanner {
       }
     }
     return List.copyOf(sorted);
+  }
+
+  private static boolean tracing(List<String> traces) {
+    return traces != NO_TRACES;
+  }
+
+  /** 与 {@code parent} 同开关的局部 trace 缓冲。 */
+  private static List<String> traceListLike(List<String> parent) {
+    return tracing(parent) ? new ArrayList<>() : NO_TRACES;
+  }
+
+  /** 什么都不留的 trace 列表；只在本类内部作开关用。 */
+  private static final class DiscardingTraces extends java.util.AbstractList<String> {
+    @Override
+    public String get(int index) {
+      throw new IndexOutOfBoundsException(index);
+    }
+
+    @Override
+    public int size() {
+      return 0;
+    }
+
+    @Override
+    public void add(int index, String element) {
+      // 丢弃
+    }
   }
 
   private static String normalize(String value, String fallback) {

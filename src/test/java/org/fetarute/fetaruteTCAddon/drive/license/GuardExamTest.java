@@ -287,7 +287,6 @@ class GuardExamTest {
     keys.add("drive.license.exam.guard-unavailable");
     for (String line :
         List.of(
-            "header",
             "held-exam",
             "held-admin",
             "exam-running",
@@ -298,9 +297,7 @@ class GuardExamTest {
             "closed")) {
       keys.add("drive.license.info.endorsement." + line);
     }
-    keys.add("drive.license.endorsement-name");
     keys.add("drive.license.next-endorsement");
-    keys.add("drive.license.card.endorsements");
     for (String part : List.of("title", "author", "given")) {
       keys.add("drive.handbook.guard." + part);
     }

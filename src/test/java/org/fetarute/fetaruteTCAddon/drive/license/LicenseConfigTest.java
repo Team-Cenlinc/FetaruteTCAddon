@@ -9,20 +9,21 @@ import java.util.List;
 import java.util.UUID;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
+import org.fetarute.fetaruteTCAddon.signaller.SignallerService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-@DisplayName("驾驶证配置")
+@DisplayName("操作许可证配置")
 class LicenseConfigTest {
 
   @Test
-  @DisplayName("默认两级：教程考见习驾驶证，路考正式驾驶证且要先有见习驾驶证")
+  @DisplayName("默认驾驶两级：教程考见习驾驶，路考正式驾驶且要先有见习驾驶")
   void defaults() {
     LicenseConfig config = LicenseConfig.defaults();
     LicenseClass learner = config.find("learner").orElseThrow();
     LicenseClass driver = config.find("DRIVER").orElseThrow();
-    assertEquals("见习驾驶证", learner.name());
-    assertEquals("正式驾驶证", driver.name());
+    assertEquals("见习驾驶", learner.name());
+    assertEquals("正式驾驶", driver.name());
     assertEquals(LicenseClass.Exam.TUTORIAL, learner.exam());
     assertEquals(List.of(DrivePermissions.BASE), learner.grants());
     assertEquals(LicenseClass.Exam.ROAD_TEST, driver.exam());
@@ -98,7 +99,7 @@ class LicenseConfigTest {
   }
 
   @Test
-  @DisplayName("车掌附注：不占准驾等级，不要求驾驶证，先练习一次再在调度列车上值乘考，考过给车掌权限；随插件附带的 drive.yml 与默认值一致")
+  @DisplayName("车掌与驾驶并列：不占驾驶的级数，不要求驾驶资格，先练习一次再在调度列车上值乘考，考过给车掌权限；随插件附带的 drive.yml 与默认值一致")
   void guardClass() throws Exception {
     LicenseClass guard = LicenseConfig.defaults().find("guard").orElseThrow();
     assertEquals(LicenseClass.Exam.GUARD, guard.exam());
@@ -118,8 +119,9 @@ class LicenseConfigTest {
         LicenseConfig.from(bundled.getConfigurationSection("license"), warnings::add);
     assertEquals(List.of(), warnings);
     assertEquals(guard, parsed.find("guard").orElseThrow());
-    assertTrue(guard.endorsement(), "车掌是驾驶证附注，不是更高一级");
-    assertEquals(0, parsed.levelOf("guard"), "附注不占级数");
+    assertEquals(LicenseClass.Post.GUARD, guard.post());
+    assertFalse(guard.graded(), "车掌与驾驶并列，不是驾驶的更高一级");
+    assertEquals(0, parsed.levelOf("guard"), "车掌不占驾驶的级数");
     assertEquals(2, parsed.levelOf("driver"));
 
     YamlConfiguration custom = new YamlConfiguration();
@@ -143,8 +145,54 @@ class LicenseConfigTest {
   }
 
   @Test
-  @DisplayName("附注不论排在哪里都不占级数，准驾等级照顺序编号")
-  void endorsementsDoNotCountAsLevels() throws Exception {
+  @DisplayName("信号员与驾驶、车掌并列：不要求别的资格，先练习一次再考，亲手排满 5 列、70 分及格，考过给信号员权限；随插件附带的 drive.yml 与默认值一致")
+  void signallerClass() throws Exception {
+    LicenseClass signaller = LicenseConfig.defaults().find("signaller").orElseThrow();
+    assertEquals(LicenseClass.Exam.SIGNALLER, signaller.exam());
+    assertEquals(LicenseClass.Post.SIGNALLER, signaller.post());
+    assertFalse(signaller.graded());
+    assertEquals(List.of(), signaller.requires());
+    assertEquals(List.of(SignallerService.PERMISSION), signaller.grants());
+    assertEquals(1, signaller.trainingRuns());
+    assertEquals(5, signaller.examStops(), "考试要亲手排满的车数");
+    assertEquals(70, signaller.minPoints());
+    assertEquals(0, signaller.drillSeconds());
+    assertEquals(LicenseClass.Exam.SIGNALLER, LicenseClass.Exam.parse(" Signaller "));
+
+    YamlConfiguration bundled = new YamlConfiguration();
+    try (var stream = getClass().getClassLoader().getResourceAsStream("drive.yml")) {
+      bundled.loadFromString(
+          new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+    }
+    LicenseConfig parsed = LicenseConfig.from(bundled.getConfigurationSection("license"), m -> {});
+    assertEquals(signaller, parsed.find("signaller").orElseThrow());
+    assertEquals(
+        List.of("learner", "driver", "guard", "signaller"),
+        parsed.classes().stream().map(LicenseClass::id).toList());
+    assertEquals(
+        LicenseConfig.defaults().classes().stream().map(LicenseClass::name).toList(),
+        parsed.classes().stream().map(LicenseClass::name).toList(),
+        "模板里的名称与默认值一致");
+    assertEquals(0, parsed.levelOf("signaller"));
+
+    YamlConfiguration custom = new YamlConfiguration();
+    custom.loadFromString(
+        """
+        classes:
+          signaller:
+            exam: signaller
+            exam-trains: 8
+            exam-stops: 2
+        """);
+    assertEquals(
+        8,
+        LicenseConfig.from(custom, m -> {}).find("signaller").orElseThrow().examStops(),
+        "信号员读 exam-trains，不读 exam-stops");
+  }
+
+  @Test
+  @DisplayName("车掌、信号员不论排在哪里都不占级数，驾驶各级照顺序编号")
+  void postsDoNotCountAsLevels() throws Exception {
     YamlConfiguration yaml = new YamlConfiguration();
     yaml.loadFromString(
         """
@@ -153,12 +201,15 @@ class LicenseConfigTest {
             exam: guard
           learner:
             exam: tutorial
+          signaller:
+            exam: signaller
           driver:
             exam: road-test
             requires: [learner]
         """);
     LicenseConfig config = LicenseConfig.from(yaml, message -> {});
     assertEquals(0, config.levelOf("guard"));
+    assertEquals(0, config.levelOf("signaller"));
     assertEquals(1, config.levelOf("learner"));
     assertEquals(2, config.levelOf("driver"));
     assertEquals(0, config.levelOf("missing"));

@@ -62,6 +62,13 @@ public final class OccupancyRequestBuilder {
   private final RearGuardAnchor rearGuardAnchor;
 
   /**
+   * 是否与同一图快照上的其他构建器共用展开计划（见 {@link ExpandedRoutePlans}）。
+   *
+   * <p>关掉时每次申请都现算，结果与共用时逐项相同；只用于逐次比对时算出对照的那一份。
+   */
+  private final boolean planCacheEnabled;
+
+  /**
    * 查询列车在某个交路索引上实际到达的图节点，用于把身后保护钉在实际走过的股道上。
    *
    * <p>运行时实现是 {@code RouteProgressRegistry#arrivalNodeAt}：没有同交路、同索引的到达证据时返回空。
@@ -147,7 +154,8 @@ public final class OccupancyRequestBuilder {
         0L,
         Long.MAX_VALUE,
         debugLogger,
-        null);
+        null,
+        true);
   }
 
   private OccupancyRequestBuilder(
@@ -162,9 +170,11 @@ public final class OccupancyRequestBuilder {
       long minConflictExitDistanceBlocks,
       long terminalDepotBerthBlocks,
       java.util.function.Consumer<String> debugLogger,
-      RearGuardAnchor rearGuardAnchor) {
+      RearGuardAnchor rearGuardAnchor,
+      boolean planCacheEnabled) {
     this.graph = Objects.requireNonNull(graph, "graph");
     this.rearGuardAnchor = rearGuardAnchor;
+    this.planCacheEnabled = planCacheEnabled;
     this.semanticDirectionResolver = new SemanticCorridorDirectionResolver(this.graph);
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
     if (lookaheadEdges <= 0) {
@@ -232,7 +242,8 @@ public final class OccupancyRequestBuilder {
         distanceBlocks,
         terminalDepotBerthBlocks,
         debugLogger,
-        rearGuardAnchor);
+        rearGuardAnchor,
+        planCacheEnabled);
   }
 
   /**
@@ -267,7 +278,8 @@ public final class OccupancyRequestBuilder {
         minConflictExitDistanceBlocks,
         berthBlocks,
         debugLogger,
-        rearGuardAnchor);
+        rearGuardAnchor,
+        planCacheEnabled);
   }
 
   /**
@@ -296,7 +308,51 @@ public final class OccupancyRequestBuilder {
         minConflictExitDistanceBlocks,
         terminalDepotBerthBlocks,
         debugLogger,
-        anchor);
+        anchor,
+        planCacheEnabled);
+  }
+
+  /**
+   * 同一组设置、只换诊断日志出口的构建器。
+   *
+   * <p>逐次比对时，共用计划的一份与现算的一份各自把日志收进自己的列表，再逐条比较。
+   */
+  OccupancyRequestBuilder withDebugLogger(java.util.function.Consumer<String> logger) {
+    return new OccupancyRequestBuilder(
+        graph,
+        effectiveLookaheadEdges,
+        0,
+        rearGuardEdges,
+        switcherZoneEdges,
+        minLookaheadDistanceBlocks,
+        maxLookaheadEdges,
+        minRearGuardDistanceBlocks,
+        minConflictExitDistanceBlocks,
+        terminalDepotBerthBlocks,
+        logger,
+        rearGuardAnchor,
+        planCacheEnabled);
+  }
+
+  /** 同一组设置、不与其他构建器共用展开计划的构建器：每次申请都现算。 */
+  OccupancyRequestBuilder withoutPlanCache() {
+    if (!planCacheEnabled) {
+      return this;
+    }
+    return new OccupancyRequestBuilder(
+        graph,
+        effectiveLookaheadEdges,
+        0,
+        rearGuardEdges,
+        switcherZoneEdges,
+        minLookaheadDistanceBlocks,
+        maxLookaheadEdges,
+        minRearGuardDistanceBlocks,
+        minConflictExitDistanceBlocks,
+        terminalDepotBerthBlocks,
+        debugLogger,
+        rearGuardAnchor,
+        false);
   }
 
   /**
@@ -422,6 +478,67 @@ public final class OccupancyRequestBuilder {
       Instant now,
       int priority,
       AuthorizationPurpose purpose) {
+    if (planCacheEnabled && ExpandedRoutePlans.verifying()) {
+      return buildContextVerified(
+          trainName, routeId, nodes, directionContextNodes, currentIndex, now, priority, purpose);
+    }
+    return buildContextWithPlans(
+        trainName, routeId, nodes, directionContextNodes, currentIndex, now, priority, purpose);
+  }
+
+  /**
+   * 逐次比对：共用计划算一份、全部现算再算一份，请求、路径上下文与诊断日志必须逐项相同，否则抛 {@link AssertionError}。
+   *
+   * <p>只在打开 {@link ExpandedRoutePlans#VERIFY_PROPERTY} 时走这里；返回共用计划的那一份，并按原顺序补发它的日志。
+   */
+  private Optional<OccupancyRequestContext> buildContextVerified(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      List<NodeId> directionContextNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose) {
+    List<String> sharedLog = new ArrayList<>();
+    List<String> freshLog = new ArrayList<>();
+    Optional<OccupancyRequestContext> shared =
+        withDebugLogger(sharedLog::add)
+            .buildContextWithPlans(
+                trainName,
+                routeId,
+                nodes,
+                directionContextNodes,
+                currentIndex,
+                now,
+                priority,
+                purpose);
+    Optional<OccupancyRequestContext> fresh =
+        withDebugLogger(freshLog::add)
+            .withoutPlanCache()
+            .buildContextWithPlans(
+                trainName,
+                routeId,
+                nodes,
+                directionContextNodes,
+                currentIndex,
+                now,
+                priority,
+                purpose);
+    ExpandedRoutePlans.assertSameBuild(shared, fresh, sharedLog, freshLog);
+    sharedLog.forEach(debugLogger);
+    return shared;
+  }
+
+  private Optional<OccupancyRequestContext> buildContextWithPlans(
+      String trainName,
+      Optional<RouteId> routeId,
+      List<NodeId> nodes,
+      List<NodeId> directionContextNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      AuthorizationPurpose purpose) {
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(routeId, "routeId");
     Objects.requireNonNull(nodes, "nodes");
@@ -441,17 +558,24 @@ public final class OccupancyRequestBuilder {
     for (int i = currentIndex; i < nodes.size(); i++) {
       pathNodes.add(nodes.get(i));
     }
-    List<NodeId> fullExpanded = expandPathNodes(pathNodes);
+    // 展开、切分、逐段取边与整段方向判定只取决于图与这串节点，交给计划共用；截断窗口及其后各步仍按本构建器的设置现算。
+    ExpandedRoutePlan livePlan = planFor(pathNodes);
+    List<NodeId> fullExpanded = expandedPath(livePlan);
     if (fullExpanded.isEmpty()) {
       debugLogger.accept("构建请求失败: expandPathNodes 返回空 (路径不连通?) nodes=" + pathNodes);
       return Optional.empty();
     }
-    fullExpanded =
-        splitAtRepeatedOppositeTraversal(
-            trainName, routeId.map(RouteId::value).orElse("-"), purpose, fullExpanded);
-    List<NodeId> directionExpanded =
+    fullExpanded = splitPath(livePlan, trainName, routeId.map(RouteId::value).orElse("-"), purpose);
+    DirectionContextPath directionPath =
         expandDirectionContextPath(
-            trainName, routeId, directionContextNodes, currentIndex, purpose, fullExpanded);
+            trainName,
+            routeId,
+            directionContextNodes,
+            currentIndex,
+            purpose,
+            fullExpanded,
+            livePlan);
+    List<NodeId> directionExpanded = directionPath.nodes();
     Optional<ExpandedPathPlan> canonicalRearRetainPathPlan =
         resolveCanonicalRearRetainPathPlan(
             trainName,
@@ -461,7 +585,7 @@ public final class OccupancyRequestBuilder {
             currentIndex,
             directionExpanded,
             purpose);
-    List<RailEdge> fullEdges = resolveEdges(fullExpanded);
+    List<RailEdge> fullEdges = splitEdges(livePlan);
     if (fullEdges.isEmpty()) {
       debugLogger.accept("构建请求失败: full resolveEdges 返回空 (边未找到?) nodes=" + fullExpanded);
       return Optional.empty();
@@ -546,9 +670,9 @@ public final class OccupancyRequestBuilder {
     applySwitcherZoneConflicts(resources, intents, expandedNodes, atomicWindow.resolved());
     appendRearGuardResources(resources, intents, rearExpanded, rearEdges);
     CorridorDirectionResolution windowDirections =
-        resolveCorridorDirectionResolution(expandedNodes);
+        livePlan.prefixDirections(expandedNodes, this::resolveCorridorDirectionResolution);
     CorridorDirectionResolution planDirections =
-        resolveCorridorDirectionResolution(directionExpanded);
+        directionPath.plan().directions(this::resolveCorridorDirectionResolution);
     Map<String, CorridorDirection> corridorDirections =
         requestCorridorDirections(resources, windowDirections, planDirections);
     Set<String> unresolvedDirectionKeys =
@@ -602,24 +726,30 @@ public final class OccupancyRequestBuilder {
    * 展开仅用于方向解析的 canonical route 后缀。
    *
    * <p>该路径绝不参与资源收集、联锁窗口或 rear guard；解析失败时返回实时路径，保持既有 fail-closed 行为。
+   *
+   * @param livePlan 实时路径所在的计划；回退到实时路径时，整段方向判定也取自它
+   * @return 方向解析用的路径及其所在计划
    */
-  private List<NodeId> expandDirectionContextPath(
+  private DirectionContextPath expandDirectionContextPath(
       String trainName,
       Optional<RouteId> routeId,
       List<NodeId> directionContextNodes,
       int currentIndex,
       AuthorizationPurpose purpose,
-      List<NodeId> liveExpanded) {
+      List<NodeId> liveExpanded,
+      ExpandedRoutePlan livePlan) {
+    DirectionContextPath live = new DirectionContextPath(liveExpanded, livePlan);
     if (directionContextNodes == null
         || currentIndex < 0
         || currentIndex >= directionContextNodes.size() - 1) {
-      return liveExpanded;
+      return live;
     }
     List<NodeId> suffix = new ArrayList<>();
     for (int index = currentIndex; index < directionContextNodes.size(); index++) {
       suffix.add(directionContextNodes.get(index));
     }
-    List<NodeId> expanded = expandPathNodes(suffix);
+    ExpandedRoutePlan plan = planFor(suffix);
+    List<NodeId> expanded = expandedPath(plan);
     if (expanded.isEmpty()) {
       debugLogger.accept(
           "方向上下文回退实时路径: train="
@@ -628,12 +758,11 @@ public final class OccupancyRequestBuilder {
               + routeId.map(RouteId::value).orElse("-")
               + " reason=expand-failed nodes="
               + suffix);
-      return liveExpanded;
+      return live;
     }
     List<NodeId> split =
-        splitAtRepeatedOppositeTraversal(
-            trainName, routeId.map(RouteId::value).orElse("-"), purpose, expanded);
-    if (split.size() < 2 || resolveEdges(split).isEmpty()) {
+        splitPath(plan, trainName, routeId.map(RouteId::value).orElse("-"), purpose);
+    if (split.size() < 2 || splitEdges(plan).isEmpty()) {
       debugLogger.accept(
           "方向上下文回退实时路径: train="
               + trainName
@@ -641,9 +770,76 @@ public final class OccupancyRequestBuilder {
               + routeId.map(RouteId::value).orElse("-")
               + " reason=edges-missing nodes="
               + split);
-      return liveExpanded;
+      return live;
     }
-    return split;
+    return new DirectionContextPath(split, plan);
+  }
+
+  /**
+   * 方向解析用的路径与它所在的计划。
+   *
+   * <p>{@code nodes} 恒等于 {@code plan} 切分后的路径，整段方向判定因此可以直接取计划里共用的那一份。
+   */
+  private record DirectionContextPath(List<NodeId> nodes, ExpandedRoutePlan plan) {}
+
+  /** 本构建器所在图快照上这串节点的展开计划：能共用时取共用的，否则现算。 */
+  private ExpandedRoutePlan planFor(List<NodeId> nodes) {
+    return ExpandedRoutePlans.planFor(this, graph, nodes, planCacheEnabled);
+  }
+
+  /**
+   * 现算一串节点的展开计划：逐段展开、在重复反向区间处切分、取切分后路径的各段图边。
+   *
+   * <p>与直接调用 {@link #expandPathNodes}、{@link #splitAtRepeatedOppositeTraversal}、{@link
+   * #resolveEdges} 同一套代码；过程中的日志只记进计划，由使用计划的构建器按原顺序输出。
+   */
+  ExpandedRoutePlan computePlan(List<NodeId> nodes) {
+    List<String> expandLog = new ArrayList<>(1);
+    List<NodeId> expanded = expandPathNodes(nodes, expandLog::add);
+    Optional<TurnbackSplit> split = findRepeatedOppositeTraversal(expanded);
+    List<NodeId> splitPath = split.map(TurnbackSplit::segment).orElse(expanded);
+    List<String> edgesLog = new ArrayList<>(1);
+    List<RailEdge> splitEdges = resolveEdges(splitPath, edgesLog::add);
+    return new ExpandedRoutePlan(
+        nodes, expanded, expandLog, split, splitPath, splitEdges, edgesLog);
+  }
+
+  /**
+   * 后台预算一串节点的展开计划，连同整段方向判定一起放进共用缓存。
+   *
+   * <p>只读本构建器的图（不可变快照或其覆盖视图），不输出日志。展开失败或切分后不可用的计划不会被当作方向路径使用，不预算方向。
+   *
+   * @return 是否真的算了什么（计划与方向判定都已在缓存里则为 false）
+   */
+  boolean prewarmPlan(List<NodeId> nodes) {
+    boolean known = ExpandedRoutePlans.remembers(graph, nodes);
+    ExpandedRoutePlan plan = planFor(nodes);
+    if (plan.expanded().isEmpty() || plan.splitPath().size() < 2 || plan.splitEdges().isEmpty()) {
+      return !known;
+    }
+    boolean directionsMissing = !plan.hasDirections();
+    plan.directions(this::resolveCorridorDirectionResolution);
+    return !known || directionsMissing;
+  }
+
+  /** 输出计划展开时的失败日志（与现算时同一条），返回展开结果。 */
+  private List<NodeId> expandedPath(ExpandedRoutePlan plan) {
+    plan.expandLog().forEach(debugLogger);
+    return plan.expanded();
+  }
+
+  /** 按本次的列车、交路与用途输出切分日志（与现算时同样几条），返回切分后的路径。 */
+  private List<NodeId> splitPath(
+      ExpandedRoutePlan plan, String trainName, String route, AuthorizationPurpose purpose) {
+    plan.split()
+        .ifPresent(split -> logTurnbackSplit(debugLogger, trainName, route, purpose, split));
+    return plan.splitPath();
+  }
+
+  /** 输出计划取边时的失败日志（与现算时同一条），返回切分后路径的各段图边。 */
+  private List<RailEdge> splitEdges(ExpandedRoutePlan plan) {
+    plan.splitEdgesLog().forEach(debugLogger);
+    return plan.splitEdges();
   }
 
   /**
@@ -1846,6 +2042,11 @@ public final class OccupancyRequestBuilder {
   }
 
   private List<RailEdge> resolveEdges(List<NodeId> pathNodes) {
+    return resolveEdges(pathNodes, debugLogger);
+  }
+
+  private List<RailEdge> resolveEdges(
+      List<NodeId> pathNodes, java.util.function.Consumer<String> log) {
     List<RailEdge> edges = new ArrayList<>();
     for (int i = 0; i < pathNodes.size() - 1; i++) {
       NodeId from = pathNodes.get(i);
@@ -1853,7 +2054,7 @@ public final class OccupancyRequestBuilder {
       Optional<RailEdge> edgeOpt = findEdge(from, to);
       if (edgeOpt.isEmpty()) {
         // 任一相邻节点不可达时，直接失败并返回空列表。
-        debugLogger.accept("resolveEdges 失败: 边不可达 from=" + from.value() + " to=" + to.value());
+        log.accept("resolveEdges 失败: 边不可达 from=" + from.value() + " to=" + to.value());
         return List.of();
       }
       edges.add(edgeOpt.get());
@@ -1862,6 +2063,11 @@ public final class OccupancyRequestBuilder {
   }
 
   private List<NodeId> expandPathNodes(List<NodeId> nodes) {
+    return expandPathNodes(nodes, debugLogger);
+  }
+
+  private List<NodeId> expandPathNodes(
+      List<NodeId> nodes, java.util.function.Consumer<String> log) {
     if (nodes == null || nodes.size() < 2) {
       return List.of();
     }
@@ -1881,7 +2087,7 @@ public final class OccupancyRequestBuilder {
       Optional<RailGraphPath> pathOpt =
           pathFinder.shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance());
       if (pathOpt.isEmpty()) {
-        debugLogger.accept("expandPathNodes 失败: 最短路未找到 from=" + from.value() + " to=" + to.value());
+        log.accept("expandPathNodes 失败: 最短路未找到 from=" + from.value() + " to=" + to.value());
         return List.of();
       }
       List<NodeId> segment = pathOpt.get().nodes();
@@ -1900,8 +2106,25 @@ public final class OccupancyRequestBuilder {
       String route,
       AuthorizationPurpose purpose,
       List<NodeId> expandedPathNodes) {
+    if (expandedPathNodes == null) {
+      return List.of();
+    }
+    Optional<TurnbackSplit> split = findRepeatedOppositeTraversal(expandedPathNodes);
+    if (split.isEmpty()) {
+      return expandedPathNodes;
+    }
+    logTurnbackSplit(debugLogger, trainName, route, purpose, split.get());
+    return split.get().segment();
+  }
+
+  /**
+   * 路径上第一次反向重走同一区间的位置：在那之前的一段就是折返前的 A 段。
+   *
+   * <p>只取决于路径本身；节点少于 3 个或没有反向重走时为空。
+   */
+  static Optional<TurnbackSplit> findRepeatedOppositeTraversal(List<NodeId> expandedPathNodes) {
     if (expandedPathNodes == null || expandedPathNodes.size() < 3) {
-      return expandedPathNodes == null ? List.of() : expandedPathNodes;
+      return Optional.empty();
     }
     Map<EdgeId, DirectedTraversalContext.DirectedEdge> seen = new LinkedHashMap<>();
     for (int i = 0; i < expandedPathNodes.size() - 1; i++) {
@@ -1924,48 +2147,78 @@ public final class OccupancyRequestBuilder {
       if (!opposite) {
         continue;
       }
-      NodeId boundary = from;
-      List<NodeId> segment = List.copyOf(expandedPathNodes.subList(0, i + 1));
-      debugLogger.accept(
-          "SMART_ROUTE_REPEATED_EDGE_DIRECTION_CHANGE route="
-              + route
-              + " edge="
-              + edgeId
-              + " firstDirection="
-              + previous.fromNode().value()
-              + "->"
-              + previous.toNode().value()
-              + " secondDirection="
-              + current.fromNode().value()
-              + "->"
-              + current.toNode().value()
-              + " purpose="
-              + purpose);
-      debugLogger.accept(
-          "SMART_ROUTE_TURNBACK_BOUNDARY_DETECTED route=" + route + " station=" + boundary.value());
-      debugLogger.accept(
-          "SMART_ROUTE_SEGMENT_SPLIT_AT_TURNBACK train="
-              + trainName
-              + " station="
-              + boundary.value()
-              + " segmentAEnd="
-              + boundary.value()
-              + " segmentBStart="
-              + current.toNode().value());
-      debugLogger.accept(
-          "SMART_TURNBACK_SEGMENT_AUTHORITY train="
-              + trainName
-              + " segment=A"
-              + " from="
-              + segment.get(0).value()
-              + " to="
-              + boundary.value()
-              + " resourceCount="
-              + Math.max(0, segment.size() - 1));
-      return segment;
+      return Optional.of(
+          new TurnbackSplit(
+              edgeId, previous, current, from, List.copyOf(expandedPathNodes.subList(0, i + 1))));
     }
-    return expandedPathNodes;
+    return Optional.empty();
   }
+
+  /** 输出在折返处切分路径的诊断日志；共用计划时每次使用都按本次的列车、交路与用途重新输出。 */
+  private static void logTurnbackSplit(
+      java.util.function.Consumer<String> log,
+      String trainName,
+      String route,
+      AuthorizationPurpose purpose,
+      TurnbackSplit split) {
+    EdgeId edgeId = split.edgeId();
+    DirectedTraversalContext.DirectedEdge previous = split.previous();
+    DirectedTraversalContext.DirectedEdge current = split.current();
+    NodeId boundary = split.boundary();
+    List<NodeId> segment = split.segment();
+    log.accept(
+        "SMART_ROUTE_REPEATED_EDGE_DIRECTION_CHANGE route="
+            + route
+            + " edge="
+            + edgeId
+            + " firstDirection="
+            + previous.fromNode().value()
+            + "->"
+            + previous.toNode().value()
+            + " secondDirection="
+            + current.fromNode().value()
+            + "->"
+            + current.toNode().value()
+            + " purpose="
+            + purpose);
+    log.accept(
+        "SMART_ROUTE_TURNBACK_BOUNDARY_DETECTED route=" + route + " station=" + boundary.value());
+    log.accept(
+        "SMART_ROUTE_SEGMENT_SPLIT_AT_TURNBACK train="
+            + trainName
+            + " station="
+            + boundary.value()
+            + " segmentAEnd="
+            + boundary.value()
+            + " segmentBStart="
+            + current.toNode().value());
+    log.accept(
+        "SMART_TURNBACK_SEGMENT_AUTHORITY train="
+            + trainName
+            + " segment=A"
+            + " from="
+            + segment.get(0).value()
+            + " to="
+            + boundary.value()
+            + " resourceCount="
+            + Math.max(0, segment.size() - 1));
+  }
+
+  /**
+   * 路径在折返处的切分：同一区间第一次被反向重走的位置。
+   *
+   * @param edgeId 被重走的区间
+   * @param previous 第一次走它的方向
+   * @param current 反向重走的方向
+   * @param boundary 折返点（反向重走的起点）
+   * @param segment 切下来的 A 段：从路径起点到折返点
+   */
+  record TurnbackSplit(
+      EdgeId edgeId,
+      DirectedTraversalContext.DirectedEdge previous,
+      DirectedTraversalContext.DirectedEdge current,
+      NodeId boundary,
+      List<NodeId> segment) {}
 
   /**
    * 按实际边数截断展开后的节点列表。
@@ -2425,10 +2678,12 @@ public final class OccupancyRequestBuilder {
    *
    * <p>{@code directions} 保存已证明方向；{@code blockedKeys} 保存语义解析明确拒绝 fallback、且不满足 terminal throat
    * 有序路径例外的资源 key。
+   *
+   * <p>只取决于图与路径节点，可由展开计划在多次申请之间共用（见 {@link ExpandedRoutePlan#directions}）。
    */
-  private record CorridorDirectionResolution(
+  record CorridorDirectionResolution(
       Map<String, CorridorDirection> directions, Set<String> blockedKeys) {
-    private CorridorDirectionResolution {
+    CorridorDirectionResolution {
       directions = directions == null ? Map.of() : Map.copyOf(directions);
       blockedKeys = blockedKeys == null ? Set.of() : Set.copyOf(blockedKeys);
     }

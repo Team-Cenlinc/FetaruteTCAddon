@@ -143,6 +143,18 @@ public final class TrainHudContextResolver {
   private final Map<TrainHudContext, Map<RowKey, UpcomingStop>> upcomingStopMemo =
       new IdentityHashMap<>();
 
+  /** 信号员令越过的停车站（下一站跳过它）。 */
+  private volatile EtaService.SkippedStops skippedStops = (train, route, index) -> false;
+
+  /**
+   * 接入信号员令越过的停车站。
+   *
+   * @param next 来源；传 null 表示断开
+   */
+  public void setSkippedStops(EtaService.SkippedStops next) {
+    this.skippedStops = next == null ? (train, route, index) -> false : next;
+  }
+
   /** 分行时各段车厢自己的前方停靠列表，见 {@link #upcomingStops(TrainHudContext, int)}。 */
   private final Map<TrainHudContext, Map<CarKey, List<StopInfo>>> carStopsMemo =
       new IdentityHashMap<>();
@@ -150,7 +162,12 @@ public final class TrainHudContextResolver {
   private static final String ETA_STATUS_PREFIX = "display.hud.eta.status.";
   private static final EtaStatusTemplates DEFAULT_ETA_STATUS =
       new EtaStatusTemplates(
-          "Arriving", "Delayed {minutes}m", "Scheduled {minutes}m", "{minutes}m", "-");
+          "Arriving",
+          "Delayed {minutes}m",
+          "Scheduled {minutes}m",
+          "{minutes}m",
+          "-",
+          "Not stopping");
 
   public TrainHudContextResolver(
       FetaruteTCAddon plugin,
@@ -299,8 +316,13 @@ public final class TrainHudContextResolver {
         routeOpt.isPresent()
             && RouteTerminals.outOfService(operationType.orElse(null), routeStops, routeIndex);
     // 越过运营终点后不再有载客停靠站：不能退回去显示已经过的终点站。
+    // 信号员越站按调度逻辑名记：有进度时用进度里的名字
+    String logicalName =
+        progressEntry.map(RouteProgressRegistry.RouteProgressEntry::trainName).orElse(trainName);
     Optional<NextStop> nextStopOpt =
-        outOfService ? Optional.empty() : resolveNextStop(routeOpt, routeIndex);
+        outOfService ? Optional.empty() : resolveNextStop(routeOpt, routeIndex, logicalName);
+    Optional<StopInfo> skip =
+        outOfService ? Optional.empty() : resolveSkip(routeOpt, routeIndex, logicalName);
     StationDisplay nextStation = nextStopOpt.map(NextStop::display).orElse(StationDisplay.empty());
     String nextStationTrack = nextStopOpt.map(next -> trackFor(trainName, next.info())).orElse("-");
     boolean terminalNextStop =
@@ -384,7 +406,9 @@ public final class TrainHudContextResolver {
                 .orElse(OptionalInt.empty()),
             joinStation,
             nextTrip.map(this::resolveNextTripDestination).orElse(StationDisplay.empty()),
-            nextTrip.map(TimetableService.DueTrip::departure));
+            nextTrip.map(TimetableService.DueTrip::departure),
+            skip.map(StopInfo::display).orElse(StationDisplay.empty()),
+            skip.map(info -> OptionalInt.of(info.index())).orElse(OptionalInt.empty()));
     return Optional.of(context);
   }
 
@@ -728,7 +752,8 @@ public final class TrainHudContextResolver {
         info.line(),
         transfersOf(info, context.currentLine()),
         etaService.arrivalDeviationSeconds(context.trainName(), info.index()),
-        info.terminal());
+        info.terminal(),
+        context.skipIndex().equals(OptionalInt.of(info.index())));
   }
 
   /** 站台号：动态站台按这趟车的选台结果，尚未选台时为 {@code -}，不显示占位股道。 */
@@ -888,6 +913,22 @@ public final class TrainHudContextResolver {
     placeholders.put("join_station", joining ? join.label() : "-");
     placeholders.put("join_station_code", joining ? join.code() : "-");
     placeholders.put("join_station_lang2", joining ? join.lang2() : "-");
+    StationDisplay skip = context.skipStation().sanitized();
+    boolean skipping = !context.skipStation().isEmpty();
+    placeholders.put("skip_station", skipping ? skip.label() : "-");
+    placeholders.put("skip_station_code", skipping ? skip.code() : "-");
+    placeholders.put("skip_station_lang2", skipping ? skip.lang2() : "-");
+    // 正接近被越的站：模板据此报“列车通过本站”
+    boolean passing =
+        skipping
+            && context.skipIndex().isPresent()
+            && etaService
+                .getForTrain(
+                    context.trainName(), new EtaTarget.StopIndex(context.skipIndex().getAsInt()))
+                .arriving();
+    placeholders.put("skip_passing", passing ? skip.label() : "-");
+    placeholders.put("skip_passing_code", passing ? skip.code() : "-");
+    placeholders.put("skip_passing_lang2", passing ? skip.lang2() : "-");
     StationDisplay nextTrip = context.nextTripDestination().sanitized();
     placeholders.put("next_trip_destination", nextTrip.label());
     placeholders.put("next_trip_destination_code", nextTrip.code());
@@ -1135,7 +1176,25 @@ public final class TrainHudContextResolver {
     int minutes = row.eta().etaMinutesRounded();
     placeholders.put("eta_minutes", minutes >= 0 ? String.valueOf(minutes) : HudText.MISSING);
     applyEtaStatusPlaceholders(placeholders, row.eta());
-    applyStopPlaceholders(placeholders, row.transfers(), row.delaySeconds());
+    if (row.skipped()) {
+      // 信号员令越过的站：不写到站时间，写“不停车”
+      String localeTag = locale == null ? null : locale.getCurrentLocale();
+      String skipped = resolveEtaStatusTemplates(localeTag).skipped();
+      placeholders.put("eta", skipped);
+      placeholders.put("eta_status", skipped);
+      placeholders.put("eta_minutes", HudText.MISSING);
+      for (String localeKey : resolveLocaleCandidates()) {
+        if (localeKey != null && !localeKey.isBlank()) {
+          placeholders.put(
+              "eta_status_" + localeKey, resolveEtaStatusTemplates(localeKey).skipped());
+        }
+      }
+    }
+    // 被越的站不在那里下车：不写换乘与晚点
+    applyStopPlaceholders(
+        placeholders,
+        row.skipped() ? List.of() : row.transfers(),
+        row.skipped() ? OptionalLong.empty() : row.delaySeconds());
     // 分行站、联挂站那一行：本节车厢分行后去哪、联挂后接着开往哪里（与全局的分行、联挂占位符同一来源）
     boolean divides = sameStation(base.get("division_station_code"), row.display().code());
     placeholders.put(
@@ -1514,7 +1573,9 @@ public final class TrainHudContextResolver {
     String unavailable =
         readEtaTemplate(
             config, ETA_STATUS_PREFIX + "unavailable", DEFAULT_ETA_STATUS.unavailable());
-    return new EtaStatusTemplates(arriving, delayed, scheduled, minutes, unavailable);
+    String skipped =
+        readEtaTemplate(config, ETA_STATUS_PREFIX + "skipped", DEFAULT_ETA_STATUS.skipped());
+    return new EtaStatusTemplates(arriving, delayed, scheduled, minutes, unavailable, skipped);
   }
 
   private String readEtaTemplate(YamlConfiguration config, String key, String fallback) {
@@ -1762,9 +1823,33 @@ public final class TrainHudContextResolver {
   }
 
   private record EtaStatusTemplates(
-      String arriving, String delayed, String scheduled, String minutes, String unavailable) {}
+      String arriving,
+      String delayed,
+      String scheduled,
+      String minutes,
+      String unavailable,
+      String skipped) {}
 
-  private Optional<NextStop> resolveNextStop(Optional<RouteDefinition> routeOpt, int routeIndex) {
+  /** 前方信号员令越过的那一站（停靠表里的那一行）；没有越站令时为空。 */
+  private Optional<StopInfo> resolveSkip(
+      Optional<RouteDefinition> routeOpt, int routeIndex, String trainName) {
+    if (routeOpt == null || routeOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<UUID> routeUuid = routeDefinitions.findUuid(routeOpt.get().id());
+    if (routeUuid.isEmpty()) {
+      return Optional.empty();
+    }
+    return stopTable(routeOpt.get()).stream()
+        .flatMap(table -> table.infos().stream())
+        .filter(info -> info.index() > routeIndex)
+        .filter(info -> skippedStops.skipped(trainName, routeUuid.get(), info.index()))
+        .findFirst();
+  }
+
+  /** 下一站：进度下标之后第一个可显示的停车点；信号员令越过的站不算。 */
+  private Optional<NextStop> resolveNextStop(
+      Optional<RouteDefinition> routeOpt, int routeIndex, String trainName) {
     if (routeOpt == null || routeOpt.isEmpty()) {
       return Optional.empty();
     }
@@ -1778,8 +1863,11 @@ public final class TrainHudContextResolver {
     }
     // 停靠表与 waypoints 下标对齐：下一站就是进度下标之后第一个可显示的停车点。
     List<StopInfo> infos = table.get().infos();
+    Optional<UUID> routeUuid = routeDefinitions.findUuid(route.id());
     for (StopInfo info : infos) {
-      if (info.index() > routeIndex) {
+      if (info.index() > routeIndex
+          && !(routeUuid.isPresent()
+              && skippedStops.skipped(trainName, routeUuid.get(), info.index()))) {
         return Optional.of(new NextStop(info, true));
       }
     }
@@ -2470,6 +2558,7 @@ public final class TrainHudContextResolver {
    * @param transfers 该站可换乘的线路（不含本车在该站所属的线路）
    * @param delaySeconds 按表运行时到达该站的偏差秒数（正数为晚点）；不按表运行时为空
    * @param terminal 是否为本交路最后一个停靠站
+   * @param skipped 信号员令越过这一站（列表里保留，到站时间写“不停车”）
    */
   public record UpcomingStop(
       int sequence,
@@ -2479,7 +2568,22 @@ public final class TrainHudContextResolver {
       Optional<RouteLineChanges.LineRef> line,
       List<TrainHudContext.Transfer> transfers,
       OptionalLong delaySeconds,
-      boolean terminal) {
+      boolean terminal,
+      boolean skipped) {
+
+    /** 不越站的停靠站。 */
+    public UpcomingStop(
+        int sequence,
+        StationDisplay display,
+        EtaResult eta,
+        String track,
+        Optional<RouteLineChanges.LineRef> line,
+        List<TrainHudContext.Transfer> transfers,
+        OptionalLong delaySeconds,
+        boolean terminal) {
+      this(sequence, display, eta, track, line, transfers, delaySeconds, terminal, false);
+    }
+
     public UpcomingStop {
       Objects.requireNonNull(display, "display");
       Objects.requireNonNull(eta, "eta");
