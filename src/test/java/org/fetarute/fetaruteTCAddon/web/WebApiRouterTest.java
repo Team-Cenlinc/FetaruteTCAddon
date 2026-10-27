@@ -29,6 +29,8 @@ import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
 import org.fetarute.fetaruteTCAddon.api.station.StationApi;
 import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
+import org.fetarute.fetaruteTCAddon.web.gtfs.GtfsFeedService;
+import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -149,13 +151,24 @@ class WebApiRouterTest {
   private final FakeData data = new FakeData();
   private final AtomicReference<Optional<String>> serverId =
       new AtomicReference<>(Optional.empty());
+  private static final ZoneId ZONE = ZoneId.of("America/Chicago");
+
+  private final GtfsFeedService gtfs =
+      new GtfsFeedService(() -> Optional.empty(), Clock.fixed(NOW, ZONE), message -> {});
+
+  private final GtfsRealtimeService realtime =
+      new GtfsRealtimeService(
+          gtfs, now -> Optional.empty(), Clock.fixed(NOW, ZONE), () -> key -> "", message -> {});
+
   private final WebApiRouter router =
       new WebApiRouter(
           data,
           new WebResponseCache(millis::get),
-          Clock.fixed(NOW, ZoneId.of("America/Chicago")),
+          Clock.fixed(NOW, ZONE),
           "1.14.0",
-          serverId::get);
+          serverId::get,
+          gtfs,
+          realtime);
 
   private static WebRequest get(String path, Map<String, String> query) {
     return new WebRequest("GET", path, query);

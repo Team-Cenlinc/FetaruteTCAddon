@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -75,6 +76,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
   /** 已发布表的计划站台：车次 → 停靠序号 → 股道节点。与 {@link #snapshot} 同在 {@link #reload} 里换。 */
   private volatile Map<UUID, Map<Integer, String>> platformPlans = Map.of();
+
+  /** 计划站台的内容版本：只在计划表内容真的变化时递增，供 GTFS 之类的外部缓存判断要不要重建。 */
+  private final AtomicLong platformPlansVersion = new AtomicLong();
 
   /** 车次绑定与 trip 占用。 */
   private final TripMatcher matcher;
@@ -375,6 +379,24 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
+   * 某趟车某一天越站的全部停靠序号（只读）。
+   *
+   * <p>GTFS-Realtime 的 {@code TripUpdate} 要按车次实例逐站标 {@code SKIPPED}。逐站查询会在 web 线程上按站数乘哈希扫一遍；
+   * 这里一次取回不可变副本，语义与 {@link #stopSkipped} 相同。
+   *
+   * @param timetableId 时刻表
+   * @param tripId 车次 UUID
+   * @param serviceDate 起点发车所在日期
+   * @return 停靠序号；没有越站时为空集
+   */
+  public Set<Integer> skippedStops(UUID timetableId, UUID tripId, LocalDate serviceDate) {
+    if (timetableId == null || tripId == null || serviceDate == null) {
+      return Set.of();
+    }
+    return skippedStops.sequences(timetableId, tripId, serviceDate);
+  }
+
+  /**
    * 装上"这张票还在等车"的探针。
    *
    * <p>续班票等着本交路的车时不按时刻作废（{@link #awaitsOwnVehicle}），所以"过了容差"不再等于"接不上"：回库闸要问出票侧这张票还在不在。
@@ -444,7 +466,13 @@ public final class TimetableService implements ScheduledDeparturePlan {
       this.snapshot = next;
       dutyRecoveryPending = dutyStore != null;
       unboundRecoveryPending = true;
-      plans.ifPresent(loaded -> this.platformPlans = loaded);
+      plans.ifPresent(
+          loaded -> {
+            if (!loaded.equals(this.platformPlans)) {
+              this.platformPlans = loaded;
+              platformPlansVersion.incrementAndGet();
+            }
+          });
       dropClaimsOutsideSnapshot(next);
       debugLogger.accept(
           "TIMETABLE_RELOAD timetables="
@@ -698,6 +726,17 @@ public final class TimetableService implements ScheduledDeparturePlan {
                     .filter(plan -> plan.stops().size() - 1 == stopIndex)
                     .isPresent())
         .flatMap(duty -> plannedPlatform(duty.tripIds().get(0), 0));
+  }
+
+  /**
+   * 计划站台的内容版本。
+   *
+   * <p>只在 {@link #reload} 读到的计划表与上一份不同时递增；60 秒一次的周期刷新即使内容没变也不会让外部缓存误判。
+   *
+   * @return 单调递增的版本号；服务启动后从未加载成功时为 0
+   */
+  public long platformPlansVersion() {
+    return platformPlansVersion.get();
   }
 
   /** 当前缓存里的已发布时刻表。 */

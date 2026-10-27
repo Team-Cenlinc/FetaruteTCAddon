@@ -39,6 +39,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * <p>{@code motion} 是采样时车上的车种与加减速标签（{@link Motion}）。走行估算按它取本车的加减速，与控车同一个车种；没有标签时按默认车种。
  *
  * <p>{@code consist} 是采样时车上的车型键（出车写的 {@code FTA_SPAWN_PATTERN}，归一后）；没有这个标签时为空。
+ *
+ * <p>{@code position} 是采样时车头实际所在的世界坐标与朝向（{@link Position}）。GTFS-Realtime 的 VehiclePositions
+ * 直接用它换算经纬度：按上一节点与下一节点之间插值会在弯道和道岔区偏离轨道，采样车头则本来就准。同样只能在主线程读、随快照带出。
  */
 public record TrainRuntimeSnapshot(
     long updatedTick,
@@ -60,7 +63,22 @@ public record TrainRuntimeSnapshot(
     Optional<RouteLineChanges.LineRef> lineTag,
     Optional<TrainLoad> load,
     Motion motion,
-    Optional<String> consist) {
+    Optional<String> consist,
+    Optional<Position> position) {
+
+  /**
+   * 车头在世界里的位置与行进方向。
+   *
+   * <p>方向取车头沿轨道的运动向量，不取实体朝向：TrainCarts 写进实体的 yaw 是模型朝向（与轨道方向差 90°，车厢反挂、换端时还会再差
+   * 180°），不是列车往哪开。停车时运动向量保留最后一次的方向；从没动过时两个分量都是 0。
+   *
+   * @param x 世界 x（方块）
+   * @param y 世界 y（方块）
+   * @param z 世界 z（方块）
+   * @param headingX 运动方向的 x 分量（+x 向东）
+   * @param headingZ 运动方向的 z 分量（+z 向南）
+   */
+  public record Position(double x, double y, double z, double headingX, double headingZ) {}
 
   /**
    * 车上的车种与加减速标签，与 {@link TrainConfigResolver#resolve} 读的是同一组。
@@ -144,6 +162,53 @@ public record TrainRuntimeSnapshot(
     load = load == null ? Optional.empty() : load;
     motion = motion == null ? Motion.NONE : motion;
     consist = consist == null ? Optional.empty() : consist;
+    position = position == null ? Optional.empty() : position;
+  }
+
+  /** 兼容调用：不带车头坐标（GTFS 静态包、站台屏等不读位置）。 */
+  public TrainRuntimeSnapshot(
+      long updatedTick,
+      Instant updatedAt,
+      UUID worldId,
+      UUID routeUuid,
+      RouteId routeId,
+      int routeIndex,
+      Optional<NodeId> currentNodeId,
+      Optional<NodeId> lastPassedNodeId,
+      Optional<Integer> dwellRemainingSec,
+      Optional<SignalAspect> signalAspect,
+      Optional<String> ticketId,
+      OptionalDouble currentSpeedBps,
+      OptionalInt distanceToNextBlocks,
+      OptionalInt edgeLengthBlocks,
+      OptionalDouble traveledSinceLastPassedBlocks,
+      HoldTimeline holdTimeline,
+      Optional<RouteLineChanges.LineRef> lineTag,
+      Optional<TrainLoad> load,
+      Motion motion,
+      Optional<String> consist) {
+    this(
+        updatedTick,
+        updatedAt,
+        worldId,
+        routeUuid,
+        routeId,
+        routeIndex,
+        currentNodeId,
+        lastPassedNodeId,
+        dwellRemainingSec,
+        signalAspect,
+        ticketId,
+        currentSpeedBps,
+        distanceToNextBlocks,
+        edgeLengthBlocks,
+        traveledSinceLastPassedBlocks,
+        holdTimeline,
+        lineTag,
+        load,
+        motion,
+        consist,
+        Optional.empty());
   }
 
   /** 兼容调用：不带车型。 */

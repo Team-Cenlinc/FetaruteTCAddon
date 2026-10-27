@@ -5,6 +5,7 @@ import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.signactions.SignAction;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -150,6 +151,11 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
+import org.fetarute.fetaruteTCAddon.web.WebApiServer;
+import org.fetarute.fetaruteTCAddon.web.gtfs.GtfsSnapshotFactory;
+import org.fetarute.fetaruteTCAddon.web.gtfs.GtfsSource;
+import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeSnapshotFactory;
+import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeSource;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.exception.InvalidSyntaxException;
 
@@ -3100,16 +3106,42 @@ public final class FetaruteTCAddon extends JavaPlugin {
     applyWebApi();
   }
 
-  /** 按配置启停只读 HTTP 接口（启用与重载时调用）。 */
+  /**
+   * 按配置启停只读 HTTP 接口（启用与重载时调用）。
+   *
+   * <p>GTFS 与 GTFS-Realtime 的数据源都由插件侧装配：只传各服务的读取入口，生成过程不回调主线程。发布方名称与地址每次取当前配置，重载后立即生效。
+   */
   private void applyWebApi() {
     if (webApiServer == null) {
+      Clock clock = Clock.systemDefaultZone();
+      GtfsSource gtfsSource =
+          new GtfsSnapshotFactory(
+              () -> getStationDirectory().map(StationDirectory::snapshot),
+              () -> Optional.ofNullable(routeDefinitionCache),
+              () -> Optional.ofNullable(timetableService),
+              () -> Optional.ofNullable(railGraphService),
+              ServerIdentity::id,
+              () -> configManager.current().webApiSettings(),
+              this::getSpawnManager,
+              () -> Optional.ofNullable(configManager).map(ConfigManager::current),
+              clock);
+      GtfsRealtimeSource realtimeSource =
+          new GtfsRealtimeSnapshotFactory(
+              FetaruteApi::get,
+              () -> Optional.ofNullable(trainSnapshotStore),
+              this::getPidsService,
+              () -> Optional.ofNullable(timetableService),
+              () -> Optional.ofNullable(getEtaService()),
+              () -> Optional.ofNullable(routeDefinitionCache));
       webApiServer =
-          new org.fetarute.fetaruteTCAddon.web.WebApiServer(
+          new WebApiServer(
               getLogger()::info,
               getLogger()::warning,
               () -> getStationDirectory().map(StationDirectory::snapshot),
-              (operator, line) ->
-                  getPidsService().flatMap(pids -> pids.lineStatus(operator, line)));
+              (operator, line) -> getPidsService().flatMap(pids -> pids.lineStatus(operator, line)),
+              gtfsSource,
+              realtimeSource,
+              () -> localeManager == null ? null : localeManager::text);
     }
     webApiServer.apply(configManager.current().webApiSettings());
   }

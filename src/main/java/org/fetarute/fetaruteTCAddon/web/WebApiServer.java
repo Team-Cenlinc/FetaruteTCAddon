@@ -29,6 +29,10 @@ import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
+import org.fetarute.fetaruteTCAddon.web.gtfs.GtfsFeedService;
+import org.fetarute.fetaruteTCAddon.web.gtfs.GtfsSource;
+import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeService;
+import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeSource;
 
 /**
  * 只读 HTTP 接口的服务：JDK 自带的 {@link HttpServer}，请求在插件自己的两条后台线程上处理，不碰服务器主线程。按配置启停，配置变了时重启。
@@ -49,11 +53,16 @@ public final class WebApiServer {
   private final Consumer<String> warn;
   private final Supplier<Optional<StationDirectory.Snapshot>> directory;
   private final BiFunction<String, String, Optional<PidsLineStatus>> lineStatus;
+  private final GtfsSource gtfsSource;
+  private final GtfsRealtimeSource realtimeSource;
+  private final Supplier<java.util.function.Function<String, String>> localeTexts;
   private HttpServer server;
   private ExecutorService executor;
   private ConfigManager.WebApiSettings running;
 
   /**
+   * 只接 JSON 接口的构造：GTFS 与 GTFS-Realtime 都不可用（测试、未接线时用）。
+   *
    * @param info 普通日志
    * @param warn 警告日志
    * @param directory 车站目录快照（运营商、线路、车站从这里取）
@@ -64,13 +73,43 @@ public final class WebApiServer {
       Consumer<String> warn,
       Supplier<Optional<StationDirectory.Snapshot>> directory,
       BiFunction<String, String, Optional<PidsLineStatus>> lineStatus) {
+    this(
+        info,
+        warn,
+        directory,
+        lineStatus,
+        () -> Optional.empty(),
+        now -> Optional.empty(),
+        () -> null);
+  }
+
+  /**
+   * @param info 普通日志
+   * @param warn 警告日志
+   * @param directory 车站目录快照（运营商、线路、车站从这里取）
+   * @param lineStatus 线路运行状况（运营商代码、线路代码；站台屏没启用时为空）
+   * @param gtfsSource 静态 GTFS 的数据源
+   * @param realtimeSource GTFS-Realtime 的数据源
+   * @param localeTexts 语言文件读取（线路运行状况告警文案复用站台屏）；本地化未就绪时返回 {@code null}
+   */
+  public WebApiServer(
+      Consumer<String> info,
+      Consumer<String> warn,
+      Supplier<Optional<StationDirectory.Snapshot>> directory,
+      BiFunction<String, String, Optional<PidsLineStatus>> lineStatus,
+      GtfsSource gtfsSource,
+      GtfsRealtimeSource realtimeSource,
+      Supplier<java.util.function.Function<String, String>> localeTexts) {
     this.info = Objects.requireNonNull(info, "info");
     this.warn = Objects.requireNonNull(warn, "warn");
     this.directory = Objects.requireNonNull(directory, "directory");
     this.lineStatus = Objects.requireNonNull(lineStatus, "lineStatus");
+    this.gtfsSource = Objects.requireNonNull(gtfsSource, "gtfsSource");
+    this.realtimeSource = Objects.requireNonNull(realtimeSource, "realtimeSource");
+    this.localeTexts = localeTexts == null ? () -> null : localeTexts;
   }
 
-  /** 按配置启停：关掉时停下；开着且地址、端口、令牌都没变时什么也不做；变了时重启。启动、重载时在主线程调用。 */
+  /** 按配置启停：关掉时停下；开着且地址、端口、令牌、GTFS 发布方都没变时什么也不做；变了时重启。启动、重载时在主线程调用。 */
   public synchronized void apply(ConfigManager.WebApiSettings settings) {
     if (settings == null || !settings.enabled()) {
       stop();
@@ -80,13 +119,19 @@ public final class WebApiServer {
       return;
     }
     stop();
+    Clock clock = Clock.systemDefaultZone();
+    GtfsFeedService gtfsFeedService = new GtfsFeedService(gtfsSource, clock, warn);
+    GtfsRealtimeService realtimeService =
+        new GtfsRealtimeService(gtfsFeedService, realtimeSource, clock, localeTexts, warn);
     WebApiRouter router =
         new WebApiRouter(
             WebApiData.of(FetaruteApi::get, directory, lineStatus),
             new WebResponseCache(System::currentTimeMillis),
-            Clock.systemDefaultZone(),
+            clock,
             FetaruteApi.API_VERSION,
-            ServerIdentity::id);
+            ServerIdentity::id,
+            gtfsFeedService,
+            realtimeService);
     HttpServer created;
     try {
       created = HttpServer.create(new InetSocketAddress(settings.host(), settings.port()), 32);
@@ -143,7 +188,6 @@ public final class WebApiServer {
   private void handle(HttpExchange exchange, WebApiRouter router, byte[] token) {
     try (exchange) {
       Headers headers = exchange.getResponseHeaders();
-      headers.set("Content-Type", "application/json; charset=utf-8");
       headers.set("Access-Control-Allow-Origin", "*");
       headers.set("X-Content-Type-Options", "nosniff");
       String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
@@ -153,6 +197,10 @@ public final class WebApiServer {
       } else {
         URI uri = exchange.getRequestURI();
         response = router.route(new WebRequest(method, uri.getPath(), query(uri.getRawQuery())));
+      }
+      headers.set("Content-Type", response.contentType());
+      if (!response.contentDisposition().isEmpty()) {
+        headers.set("Content-Disposition", response.contentDisposition());
       }
       headers.set(
           "Cache-Control",
@@ -184,6 +232,8 @@ public final class WebApiServer {
       warn.accept("只读 HTTP 接口处理请求出错: " + ex);
       try {
         byte[] body = WebResponse.error(500, "internal").body();
+        exchange.getResponseHeaders().set("Content-Type", WebResponse.JSON);
+        exchange.getResponseHeaders().remove("Content-Disposition");
         exchange.getResponseHeaders().set("Cache-Control", "no-store");
         exchange.getResponseHeaders().remove("ETag");
         exchange.sendResponseHeaders(500, body.length);

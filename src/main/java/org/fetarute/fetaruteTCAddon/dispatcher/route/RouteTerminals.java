@@ -153,6 +153,29 @@ public final class RouteTerminals {
   }
 
   /**
+   * 列车是否还没到交路的第一个载客站（出库途中）：与 {@link #outOfService} 对称，一个管开始载客之前，一个管结束载客之后。
+   *
+   * <p>载客站是停车（STOP/TERMINATE）且 {@link #isStationStop} 的停靠点；车库、区间点、咽喉都不算。进度下标是“已抵达节点”，
+   * 到了这一站才算开始载客。一个载客站都没有的交路（纯走行）整趟都算。
+   *
+   * @param stops 与 {@code currentIndex} 对齐的停靠表
+   * @param currentIndex 运行时进度下标；未知时传负数，视为尚未发车
+   * @return 还没开始载客时返回 true
+   */
+  public static boolean beforeService(List<RouteStop> stops, int currentIndex) {
+    if (stops == null) {
+      return true;
+    }
+    for (int i = 0; i < stops.size(); i++) {
+      RouteStop stop = stops.get(i);
+      if (stop.passType() != RouteStopPassType.PASS && isStationStop(stop)) {
+        return currentIndex < i;
+      }
+    }
+    return true;
+  }
+
+  /**
    * stop 是否是车站：绑定了 stationId、DYNAMIC 车站规范，或 waypoint 是车站本体节点（{@code OP:S:CODE:TRACK}）。
    *
    * <p>车站咽喉（{@code OP:S:CODE:TRACK:SEQ}）、区间点、车库都不算。

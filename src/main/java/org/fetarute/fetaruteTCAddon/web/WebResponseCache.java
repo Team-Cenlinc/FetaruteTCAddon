@@ -29,13 +29,38 @@ final class WebResponseCache {
    * 一次算出的回应。
    *
    * @param body 正文
+   * @param contentType 正文的 {@code Content-Type}
    * @param identity 算 ETag 用的内容：去掉生成时刻等每次都变、不代表内容变化的字段，内容没变时 ETag 不变，缓存方复验能拿到 304
+   * @param contentDisposition {@code Content-Disposition} 头的值；不需要时为空串
    */
-  record Rendered(String body, String identity) {
+  record Rendered(byte[] body, String contentType, String identity, String contentDisposition) {
 
-    /** 整个正文都算进 ETag。 */
-    static Rendered of(String body) {
-      return new Rendered(body, body);
+    Rendered {
+      Objects.requireNonNull(body, "body");
+      Objects.requireNonNull(identity, "identity");
+      contentType = contentType == null || contentType.isBlank() ? WebResponse.JSON : contentType;
+      contentDisposition = contentDisposition == null ? "" : contentDisposition;
+    }
+
+    /** JSON 正文：整个正文都算进 ETag。 */
+    static Rendered json(String body) {
+      return json(body, body);
+    }
+
+    /**
+     * JSON 正文，按另一份内容算 ETag。
+     *
+     * @param body 正文
+     * @param identity 算 ETag 用的内容（去掉生成时刻这类每次都会变的字段）
+     */
+    static Rendered json(String body, String identity) {
+      return new Rendered(body.getBytes(StandardCharsets.UTF_8), WebResponse.JSON, identity, "");
+    }
+
+    /** 二进制正文（zip、protobuf）。ETag 按 {@code identity} 算；两者都由同一份模型确定性生成，内容没变时正文逐字节一致。 */
+    static Rendered binary(
+        byte[] body, String contentType, String identity, String contentDisposition) {
+      return new Rendered(body, contentType, identity, contentDisposition);
     }
   }
 
@@ -68,13 +93,14 @@ final class WebResponseCache {
                 return previous;
               }
               Rendered rendered = render.get();
-              byte[] body = rendered.body().getBytes(StandardCharsets.UTF_8);
               return new Entry(
                   new WebResponse(
                       200,
-                      body,
+                      rendered.body(),
+                      rendered.contentType(),
                       maxAgeSeconds,
-                      etag(rendered.identity().getBytes(StandardCharsets.UTF_8))),
+                      etag(rendered.identity().getBytes(StandardCharsets.UTF_8)),
+                      rendered.contentDisposition()),
                   at + maxAgeSeconds * 1000L);
             });
     if (entries.size() > PRUNE_THRESHOLD) {
