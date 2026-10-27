@@ -183,7 +183,7 @@ public final class EtaRuntimeSampler {
   }
 
   /**
-   * 车头此刻的世界坐标与朝向；读不到实体（卸载中）时为空。
+   * 车头此刻的世界坐标与沿轨道的行进方向；读不到实体（卸载中）时为空。
    *
    * <p>GTFS-Realtime 的车辆位置用它，比在上一节点与下一节点之间插值准：弯道、道岔区不会偏离轨道，停站时也就在站台上。开销只是读一次实体坐标。
    */
@@ -196,9 +196,14 @@ public final class EtaRuntimeSampler {
     if (entity == null) {
       return Optional.empty();
     }
+    org.bukkit.util.Vector motion = head.getRailTracker().getMotionVector();
     return Optional.of(
         new TrainRuntimeSnapshot.Position(
-            entity.getX(), entity.getY(), entity.getZ(), entity.getYaw()));
+            entity.getX(),
+            entity.getY(),
+            entity.getZ(),
+            motion == null ? 0.0 : motion.getX(),
+            motion == null ? 0.0 : motion.getZ()));
   }
 
   /** 车上的车种、加减速与最高速度标签；只读标签，按配置补齐留给估算时做（配置可能已重载）。 */

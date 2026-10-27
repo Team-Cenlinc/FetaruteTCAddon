@@ -20,8 +20,8 @@ import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.FeedMessa
 /**
  * 三种 GTFS-Realtime feed 的生成入口：静态包版本、运行时快照、protobuf/JSON 编码都从这里出。
  *
- * <p>ETag 按「静态包版本 + 实体内容」算，不含报文头的时间戳：报文头每次生成都会变，但内容没变时中转应该拿到 304。三种 feed 各自的有效期由路由层决定 （TripUpdates
- * 10 秒、VehiclePositions 5 秒、Alerts 30 秒）。
+ * <p>ETag 按「静态包版本 + 报文头生成时刻 + 实体内容」算：时间戳是表示的一部分，消费者靠它判断新鲜度，304 不能让人一直拿着旧时间戳。 同一个缓存有效期内重复请求回
+ * 304，过期重新生成后回 200。三种 feed 各自的有效期由路由层决定（TripUpdates 10 秒、VehiclePositions 5 秒、Alerts 30 秒）。
  *
  * <p>静态包还没起来时返回空，路由层回 503；运行时服务没起来时按空快照发一版合法报文（没有实体），而不是让接口失败。
  */

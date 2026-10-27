@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -88,7 +89,7 @@ class GtfsFeedBuilderTest {
     assertEquals("24:00:00", arrivals.get(first + 1), "换线站 HHU 在零点后到站");
     assertEquals("sv:SURC:S:HHU:1", stopIds.get(first + 1));
     assertEquals("24:10:00", arrivals.get(second + 1), "动态站台林湾");
-    assertEquals("sv:SURC:S:LDF:1", stopIds.get(second + 1), "编表时排了计划股道就用它");
+    assertEquals("sv:SURC:S:LDF:2", stopIds.get(second + 1), "编表时排了计划股道就用它，不用同名的占位股道");
     assertEquals("sv:SURC:S:HHU:1", stopIds.get(second), "换线站同时属于两段");
   }
 
@@ -212,9 +213,9 @@ class GtfsFeedBuilderTest {
   }
 
   @Test
-  @DisplayName("feed_version 是 服务器-日期-内容摘要，并且写进 feed_info")
+  @DisplayName("feed_version 是 服务器-内容摘要，并且写进 feed_info")
   void writesFeedVersion() {
-    assertTrue(feed.version().startsWith("sv-20261025-"), feed.version());
+    assertTrue(feed.version().matches("sv-[0-9a-f]{12}"), feed.version());
     assertEquals(feed.version(), values("feed_info", "feed_version").get(0));
     assertEquals("sv:DAILY", feed.serviceId());
     assertEquals("20261024", values("calendar", "start_date").get(0));
@@ -415,5 +416,90 @@ class GtfsFeedBuilderTest {
     assertEquals(List.of(1), GtfsFeedBuilder.boundaries(List.of(ws, mt, is, is)), "相邻换线只留一处");
     assertTrue(GtfsFeedBuilder.boundaries(List.of(ws, mt)).isEmpty(), "末段只有一站：并回前一段");
     assertFalse(GtfsFeedBuilder.boundaries(List.of(ws, ws, ws)).contains(0));
+  }
+
+  @Test
+  @DisplayName("动态站台没有计划股道时用车站级 DYN：占位节点与起始股道同名，不能当成固定站台")
+  void dynamicStopWithoutPlanUsesStationLevelStop() {
+    GtfsFeed noPlan = GtfsFeedBuilder.build(withPlans(GtfsPlatformPlans.none(), Duration.ZERO));
+    GtfsFeed.Trip second =
+        noPlan.trips(GtfsTestFixtures.TIMETABLE_ID, GtfsTestFixtures.TRIP_CODE).get(1);
+
+    assertEquals("sv:SURC:S:LDF:DYN", second.stopTimes().get(1).stopId());
+    assertEquals("sv:SURC:S:HHU:1", second.stopTimes().get(0).stopId(), "固定站台照旧用图里的股道");
+  }
+
+  @Test
+  @DisplayName("交路停靠表与时刻表不对齐时，按交路里指向同站的 DYNAMIC 认出动态站台，不把占位节点当固定站台")
+  void dynamicStopIsRecognisedWhenTheRouteNoLongerAligns() {
+    GtfsSnapshot base = withPlans(GtfsPlatformPlans.none(), Duration.ZERO);
+    GtfsRouteRef route = base.routes().get(GtfsTestFixtures.ROUTE_WS);
+    List<RouteStop> edited = new java.util.ArrayList<>(route.stops());
+    edited.add(1, edited.get(1));
+    Map<UUID, GtfsRouteRef> routes = new java.util.HashMap<>(base.routes());
+    routes.put(
+        GtfsTestFixtures.ROUTE_WS,
+        new GtfsRouteRef(route.operatorCode(), route.lineCode(), route.routeCode(), edited));
+    GtfsSnapshot misaligned =
+        new GtfsSnapshot(
+            base.serverId(),
+            base.zone(),
+            base.publisherName(),
+            base.publisherUrl(),
+            base.generatedAt(),
+            base.timetableEnabled(),
+            base.operators(),
+            base.lines(),
+            base.stations(),
+            base.groups(),
+            base.platforms(),
+            base.timetables(),
+            routes,
+            base.plannedPlatforms(),
+            base.stationsOfPublishedLines(),
+            base.platformPlansVersion());
+
+    List<GtfsFeed.StopTime> stopTimes =
+        GtfsFeedBuilder.build(misaligned)
+            .trips(GtfsTestFixtures.TIMETABLE_ID, GtfsTestFixtures.TRIP_CODE)
+            .get(0)
+            .stopTimes();
+    GtfsFeed.StopTime ldf = stopTimes.get(stopTimes.size() - 1);
+
+    assertEquals(3, ldf.stopSequence());
+    assertEquals("sv:SURC:S:LDF:DYN", ldf.stopId());
+    assertEquals("sv:SURC:S:NTA:1", stopTimes.get(0).stopId(), "固定站台不受影响");
+  }
+
+  @Test
+  @DisplayName("内容没变时隔天版本号不变，日历窗口照常往后滚")
+  void feedVersionIgnoresTheDate() {
+    GtfsFeed nextDay =
+        GtfsFeedBuilder.build(
+            withPlans(GtfsTestFixtures.snapshot().plannedPlatforms(), Duration.ofDays(1)));
+
+    assertEquals(feed.version(), nextDay.version());
+    assertEquals(feed.calendarStart().plusDays(1), nextDay.calendarStart());
+  }
+
+  private static GtfsSnapshot withPlans(GtfsPlatformPlans plans, Duration shift) {
+    GtfsSnapshot base = GtfsTestFixtures.snapshot();
+    return new GtfsSnapshot(
+        base.serverId(),
+        base.zone(),
+        base.publisherName(),
+        base.publisherUrl(),
+        base.generatedAt().plus(shift),
+        base.timetableEnabled(),
+        base.operators(),
+        base.lines(),
+        base.stations(),
+        base.groups(),
+        base.platforms(),
+        base.timetables(),
+        base.routes(),
+        plans,
+        base.stationsOfPublishedLines(),
+        base.platformPlansVersion());
   }
 }

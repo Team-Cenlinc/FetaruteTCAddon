@@ -37,7 +37,7 @@ GTFS 的坐标原点固定（西经 30°、赤道），不设配置；具体口�
 
 | 路径 | 缓存 | 内容 |
 |---|---|---|
-| `/v1/meta` | 10 秒 | `apiVersion`、本服的服务器 ID `serverId`（`config.yml` 的 `server-id`，没配时不输出；聚合几台服务器的中转据此核对来源，配错的来源不并进来。改了 `server-id` 后下一次请求即换，缓存键含 server-id）、`generatedAt`、服务器时区 `timezone`（时刻表按它排）、静态包版本 `gtfs.feedVersion` 与 `gtfs.generatedAt`（静态包还没起来时不输出）、`endpoints` |
+| `/v1/meta` | 10 秒 | `apiVersion`、本服的服务器 ID `serverId`（`config.yml` 的 `server-id`，没配时不输出；聚合几台服务器的中转据此核对来源，配错的来源不并进来。改了 `server-id` 后下一次请求即换，缓存键含 server-id）、`generatedAt`、服务器时区 `timezone`（时刻表按它排）、静态包版本 `gtfs.feedVersion` 与 `gtfs.generatedAt`（与静态包同一个缓存：到期先比输入指纹，只有内容变了才重建；静态包还没起来时不输出）、`endpoints` |
 | `/v1/operators` | 60 秒 | 运营商：`id`、`code`、`name`、`secondaryName`、`color`、`priority` |
 | `/v1/lines` | 60 秒 | 线路：`id`、`code`、`operatorId`、`operatorCode`、`name`、`secondaryName`、`serviceType`、`color`、`status`（主数据：规划中/运营/维护）、`liveStatus`（实时运行状况，与线路运行状况屏同一份：`condition` 为 `SUSPENDED`/`PART_SUSPENDED`/`SEVERE_DELAYS`/`MINOR_DELAYS`/`CANCELLATIONS`/`GOOD`/`ENDED`/`NO_TRAINS`，另带 `maxDelayMinutes`、`cancelledTrips`、`closedFrom`/`closedTo`、`nextServiceAt` 之一） |
 | `/v1/stations` | 60 秒 | 车站：`id`、`code`、`operatorCode`、`name`、`world`、`position{x,y,z}`、停靠线路 `lines`（经车站组换乘到达的写 `viaStationId`、`transferType`、`walkSeconds`）；车站组 `groups` |

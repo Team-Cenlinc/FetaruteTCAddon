@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.web.gtfs;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -51,13 +52,20 @@ public final class GtfsFeedService {
    * 一次取出的静态包与 zip：版本与字节来自同一次生成，不会拿到半新半旧的组合。
    *
    * @param version 静态包版本
+   * @param calendarStart 日历起点：日期窗口每天往后滚，内容（版本）没变时 zip 也会变
    * @param zip zip 字节
    */
-  public record Packaged(String version, byte[] zip) {
+  public record Packaged(String version, LocalDate calendarStart, byte[] zip) {
 
     public Packaged {
       Objects.requireNonNull(version, "version");
+      Objects.requireNonNull(calendarStart, "calendarStart");
       zip = Objects.requireNonNull(zip, "zip").clone();
+    }
+
+    /** 算 ETag 的内容：版本加日历起点。只按版本算时，内容不变而日期窗口滚动的新包会被 304 挡住，复验的消费者手里的日历会一直不续期直到过期。 */
+    public String etagIdentity() {
+      return version + "@" + GtfsTime.date(calendarStart);
     }
 
     /** 返回副本：调用方拿到的数组不会反向改到缓存。 */
@@ -123,10 +131,16 @@ public final class GtfsFeedService {
 
   /** 当前的静态包版本与 zip；数据源未就绪且没有旧包时为空。 */
   public Optional<Packaged> packaged() {
-    return current().map(item -> new Packaged(item.feed().version(), item.zip()));
+    return current()
+        .map(item -> new Packaged(item.feed().version(), item.feed().calendarStart(), item.zip()));
   }
 
-  /** 当前 feed 的版本与生成时刻；数据源未就绪且没有旧包时为空。 */
+  /**
+   * 当前 feed 的版本与生成时刻；数据源未就绪且没有旧包时为空。
+   *
+   * <p>与静态包、实时源走同一个缓存：有效期内直接返回；到期时先比输入指纹（约 1 ms），只有内容真变了才重建—— 那正是 {@code /v1/meta}
+   * 必须报出新版本的时候。只读缓存不刷新的话，只轮询 meta 的中转会一直看到旧版本、永远不去拉新包。
+   */
   public Optional<Summary> summary() {
     return current().map(item -> new Summary(item.feed().version(), item.feed().generatedAt()));
   }

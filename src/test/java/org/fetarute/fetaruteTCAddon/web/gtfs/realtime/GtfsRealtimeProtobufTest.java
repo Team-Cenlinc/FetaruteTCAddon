@@ -106,7 +106,7 @@ class GtfsRealtimeProtobufTest {
 
     assertEquals("2.0", decoded.getHeader().getGtfsRealtimeVersion());
     assertEquals(TIMESTAMP, decoded.getHeader().getTimestamp());
-    assertEquals("sv-20261025-0123abcd", decoded.getHeader().getFeedVersion());
+    assertEquals("sv-0123456789ab", decoded.getHeader().getFeedVersion());
     assertEquals(2, decoded.getEntityCount());
 
     GtfsRealtime.TripUpdate update = decoded.getEntity(0).getTripUpdate();
@@ -309,6 +309,6 @@ class GtfsRealtimeProtobufTest {
 
   private static GtfsRealtimeFeed.FeedMessage message(Entity... entities) {
     return new FeedMessage(
-        new Header("2.0", TIMESTAMP, Optional.of("sv-20261025-0123abcd")), List.of(entities));
+        new Header("2.0", TIMESTAMP, Optional.of("sv-0123456789ab")), List.of(entities));
   }
 }

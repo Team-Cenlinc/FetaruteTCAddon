@@ -67,14 +67,18 @@ public record TrainRuntimeSnapshot(
     Optional<Position> position) {
 
   /**
-   * 车头在世界里的位置与朝向。
+   * 车头在世界里的位置与行进方向。
+   *
+   * <p>方向取车头沿轨道的运动向量，不取实体朝向：TrainCarts 写进实体的 yaw 是模型朝向（与轨道方向差 90°，车厢反挂、换端时还会再差
+   * 180°），不是列车往哪开。停车时运动向量保留最后一次的方向；从没动过时两个分量都是 0。
    *
    * @param x 世界 x（方块）
    * @param y 世界 y（方块）
    * @param z 世界 z（方块）
-   * @param yaw Minecraft 朝向角（度，0 向南、90 向西）；GTFS 的 bearing 由它换算
+   * @param headingX 运动方向的 x 分量（+x 向东）
+   * @param headingZ 运动方向的 z 分量（+z 向南）
    */
-  public record Position(double x, double y, double z, float yaw) {}
+  public record Position(double x, double y, double z, double headingX, double headingZ) {}
 
   /**
    * 车上的车种与加减速标签，与 {@link TrainConfigResolver#resolve} 读的是同一组。

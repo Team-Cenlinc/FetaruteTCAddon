@@ -3,8 +3,6 @@ package org.fetarute.fetaruteTCAddon.web.gtfs;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.HexFormat;
 import java.util.List;
@@ -21,10 +19,11 @@ final class GtfsFeedDigest {
   private GtfsFeedDigest() {}
 
   /**
-   * 算版本号：{@code {S}-{yyyyMMdd}-{摘要前 8 位}}；没配服务器 ID 时省掉前缀段。
+   * 算版本号：{@code {S}-{摘要前 12 位}}；没配服务器 ID 时只有摘要。
+   *
+   * <p>版本号里不放日期：内容没变时隔天也是同一个版本，与类注释“只覆盖内容”一致。
    *
    * @param ids ID 规则（提供服务器前缀）
-   * @param generatedAt 生成时刻（决定版本里的日期段）
    * @param zone 服务器时区
    * @param serviceId 日历服务 ID
    * @param publisherName 发布方名称
@@ -37,7 +36,6 @@ final class GtfsFeedDigest {
    */
   static String feedVersion(
       GtfsIds ids,
-      Instant generatedAt,
       ZoneId zone,
       String serviceId,
       String publisherName,
@@ -128,10 +126,8 @@ final class GtfsFeedDigest {
       field(canonical, transfer.toTripId().orElse(""));
     }
     String digest = shortDigest(canonical.toString());
-    String date = GtfsTime.date(LocalDate.ofInstant(generatedAt, zone));
     String prefix = ids.prefix();
-    String server = prefix.isEmpty() ? "" : prefix.substring(0, prefix.length() - 1) + "-";
-    return server + date + "-" + digest;
+    return prefix.isEmpty() ? digest : prefix.substring(0, prefix.length() - 1) + "-" + digest;
   }
 
   /** 字段写成「长度:内容;」：名字里出现任何分隔符都不会让两份不同的内容拼成同一个串。 */
@@ -144,7 +140,7 @@ final class GtfsFeedDigest {
     byte[] bytes = canonical.getBytes(StandardCharsets.UTF_8);
     try {
       byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
-      return HexFormat.of().formatHex(digest, 0, 4);
+      return HexFormat.of().formatHex(digest, 0, 6);
     } catch (NoSuchAlgorithmException ex) {
       return Integer.toHexString(java.util.Arrays.hashCode(bytes));
     }

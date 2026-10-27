@@ -27,16 +27,19 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
  *   <li>公告：站台屏公告板；线路运行状况：站台屏同一份汇总。
  * </ul>
  *
- * <p>{@code outOfServiceTrains} 是已经越过运营终点（EOP）的回库车：它们不再对乘客发布车次与位置（见设计稿 Q10）。
+ * <p>{@code outOfServiceTrains} 是已经越过运营终点（EOP）的回库车：它们不再对乘客发布车次与位置（见设计稿 Q10）。{@code
+ * beforeServiceTrains} 是还没到当前交路第一个载客站的车（出库途中）：只是不发布车辆位置，绑了车次的照常发布到站预测。
  *
  * @param generatedAt 快照时刻
  * @param assignments 当前车次绑定
  * @param cancellations 取消登记
  * @param trains 在线列车快照（列车名 → 快照）
  * @param outOfServiceTrains 已越过 EOP 的列车名
+ * @param beforeServiceTrains 还没到第一个载客站的列车名（出库途中）
  * @param bulletins 站台屏公告
  * @param lineStatus 线路运行状况（运营商代码、线路代码）；站台屏没启用时返回空
  * @param skippedStops 越站查询
+ * @param placedStops 已选定的实际股道查询（动态站台未选台时为空）
  */
 public record GtfsRealtimeSnapshot(
     Instant generatedAt,
@@ -44,9 +47,11 @@ public record GtfsRealtimeSnapshot(
     List<TimetableApi.CancelledTrip> cancellations,
     Map<String, TrainRuntimeSnapshot> trains,
     Set<String> outOfServiceTrains,
+    Set<String> beforeServiceTrains,
     List<PidsBulletin> bulletins,
     BiFunction<String, String, Optional<PidsLineStatus>> lineStatus,
-    SkippedStopsLookup skippedStops) {
+    SkippedStopsLookup skippedStops,
+    PlacedStopsLookup placedStops) {
 
   public GtfsRealtimeSnapshot {
     Objects.requireNonNull(generatedAt, "generatedAt");
@@ -54,9 +59,11 @@ public record GtfsRealtimeSnapshot(
     cancellations = cancellations == null ? List.of() : List.copyOf(cancellations);
     trains = trains == null ? Map.of() : Map.copyOf(trains);
     outOfServiceTrains = outOfServiceTrains == null ? Set.of() : Set.copyOf(outOfServiceTrains);
+    beforeServiceTrains = beforeServiceTrains == null ? Set.of() : Set.copyOf(beforeServiceTrains);
     bulletins = bulletins == null ? List.of() : List.copyOf(bulletins);
     lineStatus = lineStatus == null ? (operator, line) -> Optional.empty() : lineStatus;
     skippedStops = skippedStops == null ? SkippedStopsLookup.none() : skippedStops;
+    placedStops = placedStops == null ? PlacedStopsLookup.none() : placedStops;
   }
 
   /** 什么都没起来时的一版空快照：报文仍然合法，只是没有实体。 */
@@ -67,9 +74,11 @@ public record GtfsRealtimeSnapshot(
         List.of(),
         Map.of(),
         Set.of(),
+        Set.of(),
         List.of(),
         (operator, line) -> Optional.empty(),
-        SkippedStopsLookup.none());
+        SkippedStopsLookup.none(),
+        PlacedStopsLookup.none());
   }
 
   /** 按车次实例的越站查询。 */
@@ -87,6 +96,28 @@ public record GtfsRealtimeSnapshot(
     /** 没有越站来源：一律为空集。 */
     static SkippedStopsLookup none() {
       return (timetableId, tripId, serviceDate) -> Set.of();
+    }
+  }
+
+  /**
+   * 列车在某个停靠下标实际要停（或已停）的股道。
+   *
+   * <p>与车次绑定里的 {@code nextStopNodeId} 不同：动态站台未选台时那里给的是占位股道（与真实起始股道同名），这里给空， 实时源据此只在真正选定站台后才写 {@code
+   * assigned_stop_id}。
+   */
+  @FunctionalInterface
+  public interface PlacedStopsLookup {
+
+    /**
+     * @param trainName 列车名
+     * @param stopIndex 交路节点的 0 起下标
+     * @return 已选定的股道节点；未选台、不知道这趟车时为空
+     */
+    Optional<String> placed(String trainName, int stopIndex);
+
+    /** 没有选台来源：一律为空。 */
+    static PlacedStopsLookup none() {
+      return (trainName, stopIndex) -> Optional.empty();
     }
   }
 }

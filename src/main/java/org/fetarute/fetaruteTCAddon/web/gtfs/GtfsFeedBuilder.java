@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals.StationRef;
@@ -227,7 +228,6 @@ public final class GtfsFeedBuilder {
     String version =
         GtfsFeedDigest.feedVersion(
             ids,
-            snapshot.generatedAt(),
             snapshot.zone(),
             serviceId,
             publisherName,
@@ -383,7 +383,8 @@ public final class GtfsFeedBuilder {
       if (!stop.stops() || stop.stationCode().isEmpty()) {
         continue;
       }
-      Optional<StationStop> resolved = resolveStationStop(stop, trip);
+      boolean dynamic = dynamicStop(routeStops, aligned, stop);
+      Optional<StationStop> resolved = resolveStationStop(stop, trip, dynamic);
       if (resolved.isPresent()) {
         stationStops.add(resolved.get());
       }
@@ -482,6 +483,34 @@ public final class GtfsFeedBuilder {
     trips.addAll(built);
   }
 
+  /**
+   * 交路上这一站是不是动态站台（DYNAMIC）。
+   *
+   * <p>停靠表与时刻表对齐时按下标看；不对齐（编表后又改过交路）时下标不可信，改看交路里有没有指向同一座车站的 DYNAMIC 停靠—— 否则与起始股道同名的占位节点会被当成固定站台。
+   */
+  private static boolean dynamicStop(
+      List<RouteStop> routeStops, boolean aligned, TimetableStop stop) {
+    if (aligned) {
+      return stop.stopSequence() < routeStops.size()
+          && DynamicStopMatcher.parseDynamicSpec(routeStops.get(stop.stopSequence())).isPresent();
+    }
+    Optional<StationRef> station = stop.nodeId().flatMap(RouteTerminals::stationRefOfNode);
+    if (station.isEmpty()) {
+      return false;
+    }
+    for (RouteStop routeStop : routeStops) {
+      Optional<DynamicStopMatcher.DynamicSpec> spec =
+          DynamicStopMatcher.parseDynamicSpec(routeStop);
+      if (spec.isPresent()
+          && spec.get().isStation()
+          && spec.get().operatorCode().equalsIgnoreCase(station.get().operatorCode())
+          && spec.get().nodeName().equalsIgnoreCase(station.get().stationCode())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** 每站所属线路（按车站停靠点逐个取，与 route 路径点下标对齐）。 */
   private static List<RouteLineChanges.LineRef> lineAt(
       List<StationStop> stationStops, List<RouteLineChanges.LineRef> linesByIndex) {
@@ -544,7 +573,8 @@ public final class GtfsFeedBuilder {
     return out;
   }
 
-  private Optional<StationStop> resolveStationStop(TimetableStop stop, TimetableTrip trip) {
+  private Optional<StationStop> resolveStationStop(
+      TimetableStop stop, TimetableTrip trip, boolean dynamic) {
     Optional<StationRef> ref =
         stop.nodeId()
             .flatMap(RouteTerminals::stationRefOfNode)
@@ -570,7 +600,7 @@ public final class GtfsFeedBuilder {
           "车站 " + entry.operator().code() + ":" + entry.code() + " 没有坐标也没有股道，相关停靠点已跳过");
       return Optional.empty();
     }
-    return Optional.of(new StationStop(stop, entry, canonical));
+    return Optional.of(new StationStop(stop, entry, canonical, dynamic));
   }
 
   /** 停靠点没有节点 ID 时的兜底：按站码在本运营商的车站里找。 */
@@ -587,19 +617,16 @@ public final class GtfsFeedBuilder {
   }
 
   /**
-   * 停靠点的 {@code stop_id}：图里的股道直接用；动态站台用编表时排定的计划股道；都没有时用车站级的 {@code …:DYN}。
+   * 停靠点的 {@code stop_id}：编表时排了计划股道就用计划股道；动态站台没有计划时用车站级的 {@code …:DYN}；固定站台用图里的股道。
+   *
+   * <p>动态站台在时刻表里的节点是占位股道 {@code OP:S:CODE:fromTrack}，它与真实的起始股道同名、在图里也找得到，
+   * 所以必须先看计划与动态标记，不能按节点名直接当成固定站台。
    *
    * <p>解析的同时登记「这座车站被停靠」「这条股道要发布」，车站的其余股道在生成 stops.txt 时一并补上。
    */
   private String resolveStopId(TimetableTrip trip, StationStop stationStop) {
     usedStations.putIfAbsent(stationStop.stationKey(), stationStop.entry());
     tripServedStations.add(stationStop.stationKey());
-    String nodeId = stationStop.stop().nodeId().orElse("");
-    PlatformInfo fixed = platformsByNode.get(nodeId);
-    if (fixed != null && fixed.stationKey().equals(stationStop.stationKey())) {
-      usedPlatformNodes.putIfAbsent(fixed.nodeId(), stationStop.stationKey());
-      return ids.stop(fixed.nodeId());
-    }
     Optional<String> planned =
         snapshot.plannedPlatforms().plannedPlatform(trip.id(), stationStop.stop().stopSequence());
     if (planned.isPresent()) {
@@ -611,6 +638,13 @@ public final class GtfsFeedBuilder {
         usedPlatformNodes.putIfAbsent(plannedNode, stationStop.stationKey());
         return ids.stop(plannedNode);
       }
+    }
+    PlatformInfo fixed = platformsByNode.get(stationStop.stop().nodeId().orElse(""));
+    if (!stationStop.dynamic()
+        && fixed != null
+        && fixed.stationKey().equals(stationStop.stationKey())) {
+      usedPlatformNodes.putIfAbsent(fixed.nodeId(), stationStop.stationKey());
+      return ids.stop(fixed.nodeId());
     }
     return ids.dynamicStop(stationStop.entry().operator().code(), stationStop.entry().code());
   }
@@ -879,9 +913,12 @@ public final class GtfsFeedBuilder {
   /** 已发布线路及其运营商。 */
   private record FeedLine(Operator operator, Line line) {}
 
-  /** 一个停靠站：时刻表停站、车站目录条目与车站键。 */
+  /** 一个停靠站：时刻表停站、车站目录条目、车站键，以及交路上这一站是不是动态站台（DYNAMIC）。 */
   private record StationStop(
-      TimetableStop stop, StationDirectory.StationEntry entry, String stationKey) {}
+      TimetableStop stop,
+      StationDirectory.StationEntry entry,
+      String stationKey,
+      boolean dynamic) {}
 
   /** 车次终点显示：中文主文案与可选英文。 */
   private record Headsign(String primary, Optional<String> secondary) {}

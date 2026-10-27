@@ -12,7 +12,7 @@
 | `GET /v1/gtfs-rt/alerts` | 同上 | 30 秒 |
 | 三个 RT 端点加 `?format=json` | `application/json; charset=utf-8` | 同上 |
 
-全部随 `web-api.enabled` 开关；地址、端口、令牌、JSON 接口的说明见 [`docs/dev/web-api.md`](web-api.md)。`/v1/meta` 另报 `gtfs.feedVersion` 与 `gtfs.generatedAt`，中转据此核对静态包与实时源是不是同一版。
+全部随 `web-api.enabled` 开关；地址、端口、令牌、JSON 接口的说明见 [`docs/dev/web-api.md`](web-api.md)。`/v1/meta` 另报 `gtfs.feedVersion` 与 `gtfs.generatedAt`，中转据此核对静态包与实时源是不是同一版；它与静态包走同一个缓存，到期先比输入指纹（约 1 ms），只有内容真变了才重建，所以重新发布时刻表后 meta 会报出新版本。
 
 ```yaml
 web-api:
@@ -82,7 +82,7 @@ CSV 保留 7 位小数（约 1 cm）；GTFS-RT 的经纬度是 float32。多个�
 - **车站**：被车次停靠的车站，以及有非规划线路经过的车站，都发布（设计稿 Q4：没有时刻表的线路「线路和车站照常出」）；`…:DYN` 兜底停靠点只在车站真的有车次停靠时发布。
 - **时区**：只发布时区与服务器时区相同的时刻表；GTFS 的时刻一律按 `agency_timezone` 解释，跨时区换算要处理夏令时，宁可不发布也不出错。
 - **停靠点**：车站与股道两级；站咽喉、区间点、车库、道岔都不出。被停靠的车站发布**它的全部股道**，包括还没有车停的——动态站台的车进站前才选台，RT 的 `assigned_stop_id` 必须是静态包里有的停靠点。每条被停靠车站另有一行 `…:DYN` 兜底。
-- **计划股道**：编表时排了计划股道就用它；没有排上（或不是动态站台）时固定股道直接用节点 ID，动态站台用 `…:DYN`。
+- **计划股道**：编表时排了计划股道就用它；没有排上时，动态站台用 `…:DYN`，固定站台直接用节点 ID。动态站台在时刻表里的节点是占位股道 `OP:S:CODE:fromTrack`，与真实的起始股道同名、图里也找得到，所以先看计划与交路上的 DYNAMIC 标记，不按节点名当成固定站台。
 - **数据卫生**：车站缺坐标、站码查不到车站时，这个停靠点不出、整包继续；每类问题在日志里各记一次（每个 feed 版本只记一次）。
 
 ### 直通运转（`CHANGE`）
@@ -110,9 +110,9 @@ CSV 保留 7 位小数（约 1 cm）；GTFS-RT 的经纬度是 float32。多个�
 
 ### 版本与缓存
 
-`feed_version = {S}-{yyyyMMdd}-{内容摘要前 8 位}`。摘要覆盖运营商、线路、停靠点、车次、停靠时刻与换乘（含发布方与语言）；**日历起止日期与生成时刻不进摘要**。因此同一份内容在缓存刷新时版本不变，日期滚动只改版本里的日期段。
+`feed_version = {S}-{内容摘要前 12 位}`（没配服务器 ID 时只有摘要）。摘要覆盖运营商、线路、停靠点、车次、停靠时刻与换乘（含发布方与语言）；**日历起止日期与生成时刻不进摘要，版本号里也不放日期**：同一份内容隔天还是同一个版本，只有内容变了才换。
 
-zip 的条目顺序固定、条目时刻写死（`ZipEntry#setTimeLocal`），同一个 feed 两次生成逐字节一致；`ETag` 按 `feed_version` 算。
+zip 的条目顺序固定、条目时刻写死（`ZipEntry#setTimeLocal`），同一个 feed 两次生成逐字节一致；`ETag` 按 `feed_version` 加日历起点算：内容不变、日期窗口滚动时 zip 也变了，只按版本算会被 304 挡住，复验的消费者手里的日历会一直不续期直到过期。
 
 | 表 | 说明 |
 |---|---|
@@ -137,11 +137,13 @@ zip 的条目顺序固定、条目时刻写死（`ZipEntry#setTimeLocal`），�
 | 车次身份 | 绑定车次的时刻表、车次号、`serviceDate` → `trip_id` + `start_date` + `start_time`（与静态 `stop_times` 首站发车一致） |
 | 直通运转的段 | 运行时进度下标 ≥ 换线站下标时用 `~2` 那一段 |
 | 上一站实际偏差 | `TrainAssignment#currentDelaySeconds` → 上一站的 `departure.delay` |
-| 停站中的车 | 运行时 `dwellRemainingSec` → 上一站 `departure.time = now + 剩余秒数` |
+| 停站中的车 | 运行时 `dwellRemainingSec` → 上一站 `departure.time = max(now + 剩余秒数, 表定发车)`（按表等点时不会早于表定开出）；既没有停站剩余也没有偏差时不写上一站 |
 | 下一站预计 | `projectedDelaySeconds` → `arrival.time` / `departure.time`（静态时刻 + 偏差） |
-| 动态选台 | 实际股道与静态 `stop_id` 不同时只写 `stop_time_properties.assigned_stop_id`、不写 `stop_id`（规范首选；两者都写时必须相同，而实际股道不在这一趟的静态 `stop_times` 里） |
-| 越站 / 半途取消 | 该站 `schedule_relationship=SKIPPED`（越站来自 `TimetableService#skippedStops`） |
+| 动态选台 | 只认**已选定**的股道（`EtaService#placedStopNode`；未选台时车次绑定给的是与起始股道同名的占位股道，不算）。实际股道与静态 `stop_id` 不同时只写 `stop_time_properties.assigned_stop_id`、不写 `stop_id`（规范首选；两者都写时必须相同，而实际股道不在这一趟的静态 `stop_times` 里） |
+| 越站 / 半途取消 | 该站 `schedule_relationship=SKIPPED`（越站来自 `TimetableService#skippedStops`）；拆段后某一段一站都不再停时，这一段整段 `CANCELED` |
 | 整趟取消 | `TripDescriptor.schedule_relationship=CANCELED`，拆段的每一段各一条 |
+| 直通车跑在其中一段 | 只有车所在的那一段按运行中发布（按分段 `trip_id` + 日期认），其它段照常按取消登记发布 |
+| 一条站点更新都给不出 | 不发这趟车（未取消的车次至少要有一条站点更新）；消费者按静态时刻显示 |
 | 回库车过了 EOP | 不发布（Q10） |
 
 没有实时记录的车次，消费者按静态时刻显示，这是规范的默认语义。取消登记取现在前后各 3 小时。
@@ -153,13 +155,13 @@ zip 的条目顺序固定、条目时刻写死（`ZipEntry#setTimeLocal`），�
 | `vehicle.id` / `label` | 列车名 / 车次号（没绑车次时用列车名） |
 | `trip` | 绑了车次：`trip_id` + `start_date`；没绑：只填乘客线路 `route_id`；两者都没有时不填 |
 | `position` | 车头实际坐标与朝向（Q9 选 A，见下），速度取采样速度（格/秒即米/秒） |
-| `current_stop_sequence` / `stop_id` / `current_status` | 正在停站为 `STOPPED_AT`，车头已到下一站节点为 `INCOMING_AT`，其余 `IN_TRANSIT_TO` |
+| `current_stop_sequence` / `stop_id` / `current_status` | 正在停站为 `STOPPED_AT`，车头已到下一站节点为 `INCOMING_AT`，其余 `IN_TRANSIT_TO`；只报这一段静态 `stop_times` 里有的停靠（没有车站的停车点不算），`stop_id` 只在已选台时写实际股道 |
 | `occupancy_percentage` / `occupancy_status` | 各节车座位与在座（`TrainLoad`）：空车 `EMPTY`，空位过半年 `MANY_SEATS_AVAILABLE`，有空位 `FEW_SEATS_AVAILABLE`，坐满 `FULL`。车辆模型没有站位容量，100% 表示座位坐满，不代表不能再上车 |
 | `multi_carriage_details` | P3 |
 
-**Q9 车头坐标**：`EtaRuntimeSampler` 在主线程采样时顺手记下车头的 `x/y/z/yaw`（`TrainRuntimeSnapshot.Position`），HTTP 侧再按上面的投影换成经纬度，`bearing = floorMod(yaw + 180, 360)`（负数归一到 `[0, 360)`）。不在上一节点与下一节点之间插值：弯道和道岔区会偏离轨道，停站时位置也不在站台上。
+**Q9 车头坐标**：`EtaRuntimeSampler` 在主线程采样时顺手记下车头的 `x/y/z` 与沿轨道的运动向量（`RailTracker#getMotionVector`，`TrainRuntimeSnapshot.Position`），HTTP 侧再按上面的投影换成经纬度，`bearing = atan2(dx, −dz)` 归一到 `[0, 360)`（+x 向东为 90°，−z 向北为 0°）；从没动过时不写。不用实体 yaw：TrainCarts 写进实体的是模型朝向，与轨道方向差 90°，车厢反挂、换端时还会再差 180°。不在上一节点与下一节点之间插值：弯道和道岔区会偏离轨道，停站时位置也不在站台上。
 
-回库越过运营终点的车不发布（Q10）；`block_id` 不出（Q11）：插件的交路在终点折返时都是本站终到，写成可以不下车反而误导。
+回库越过运营终点的车不发布（Q10）；出库途中、还没到当前交路第一个载客站（`RouteTerminals#beforeService`，与回库的 `outOfService` 对称：停车且是车站本体的停靠点，咽喉不算）的车也不发布位置，纯走行交路整趟都不发布——绑了车次的照常发布到站预测，乘客要等的正是它的首站到达；`block_id` 不出（Q11）：插件的交路在终点折返时都是本站终到，写成可以不下车反而误导。
 
 ### ServiceAlerts
 

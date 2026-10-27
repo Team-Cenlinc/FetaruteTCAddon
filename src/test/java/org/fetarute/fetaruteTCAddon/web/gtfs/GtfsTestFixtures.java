@@ -72,10 +72,12 @@ public final class GtfsTestFixtures {
 
   public static final String HHU_PLATFORM = "SURC:S:HHU:1";
 
-  /** 动态站台的占位节点：不在图里，编表时排到了 {@link #LDF_PLANNED}。 */
-  public static final String LDF_PLACEHOLDER = "SURC:S:LDF:2";
+  /**
+   * 动态站台的占位节点 {@code OP:S:CODE:fromTrack}：与实服一样，它就是起始股道的真实节点、在图里找得到；编表时这一班排到了 {@link #LDF_PLANNED}。
+   */
+  public static final String LDF_PLACEHOLDER = "SURC:S:LDF:1";
 
-  public static final String LDF_PLANNED = "SURC:S:LDF:1";
+  public static final String LDF_PLANNED = "SURC:S:LDF:2";
 
   private GtfsTestFixtures() {}
 
@@ -125,7 +127,8 @@ public final class GtfsTestFixtures {
             new GtfsPlatformNode(NTA_PLATFORM, 100.0, 0.0),
             new GtfsPlatformNode(HHU_PLATFORM, 500.0, 200.0),
             new GtfsPlatformNode("SURC:S:HHU:2", 500.0, 210.0),
-            new GtfsPlatformNode(LDF_PLANNED, 900.0, -400.0),
+            new GtfsPlatformNode(LDF_PLACEHOLDER, 900.0, -400.0),
+            new GtfsPlatformNode(LDF_PLANNED, 900.0, -410.0),
             new GtfsPlatformNode("SURC:S:RVS:1", 1300.0, 300.0));
     GtfsRouteRef throughRoute = new GtfsRouteRef("SURC", "WS", "WS-1", throughStops());
     GtfsRouteRef createRoute = new GtfsRouteRef("SURC", "MT", "CR-1", createStops());
@@ -241,7 +244,8 @@ public final class GtfsTestFixtures {
         stop(ROUTE_WS, 0, NTA_PLATFORM, RouteStopPassType.STOP, ""),
         stop(ROUTE_WS, 1, "SURC:NTA:HHU:1:1", RouteStopPassType.PASS, ""),
         stop(ROUTE_WS, 2, HHU_PLATFORM, RouteStopPassType.STOP, "CHANGE:SURC:MT"),
-        stop(ROUTE_WS, 3, LDF_PLACEHOLDER, RouteStopPassType.TERMINATE, ""));
+        stop(
+            ROUTE_WS, 3, LDF_PLACEHOLDER, RouteStopPassType.TERMINATE, "DYNAMIC:SURC:S:LDF:[1:2]"));
   }
 
   private static List<RouteStop> createStops() {

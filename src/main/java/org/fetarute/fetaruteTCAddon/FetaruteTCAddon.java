@@ -3128,7 +3128,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
               FetaruteApi::get,
               () -> Optional.ofNullable(trainSnapshotStore),
               this::getPidsService,
-              () -> Optional.ofNullable(timetableService));
+              () -> Optional.ofNullable(timetableService),
+              () -> Optional.ofNullable(getEtaService()),
+              () -> Optional.ofNullable(routeDefinitionCache));
       webApiServer =
           new WebApiServer(
               getLogger()::info,

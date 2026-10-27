@@ -226,7 +226,7 @@ final class WebApiRouter {
             }
             GtfsFeedService.Packaged value = packaged.get();
             return WebResponseCache.Rendered.binary(
-                value.zip(), "application/zip", value.version(), disposition);
+                value.zip(), "application/zip", value.etagIdentity(), disposition);
           });
     } catch (WebUnavailableException ex) {
       return WebResponse.error(503, "gtfs-not-ready");

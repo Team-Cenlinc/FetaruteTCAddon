@@ -63,9 +63,59 @@ class GtfsRealtimeBuilderTest {
       List<PidsBulletin> bulletins,
       java.util.function.BiFunction<String, String, Optional<PidsLineStatus>> lineStatus,
       GtfsRealtimeSnapshot.SkippedStopsLookup skipped) {
-    return new GtfsRealtimeSnapshot(
-        NOW, assignments, cancellations, trains, outOfService, bulletins, lineStatus, skipped);
+    return snapshot(
+        assignments,
+        cancellations,
+        trains,
+        outOfService,
+        bulletins,
+        lineStatus,
+        skipped,
+        GtfsRealtimeSnapshot.PlacedStopsLookup.none());
   }
+
+  private static GtfsRealtimeSnapshot snapshot(
+      List<TimetableApi.TrainAssignment> assignments,
+      List<TimetableApi.CancelledTrip> cancellations,
+      Map<String, TrainRuntimeSnapshot> trains,
+      Set<String> outOfService,
+      List<PidsBulletin> bulletins,
+      java.util.function.BiFunction<String, String, Optional<PidsLineStatus>> lineStatus,
+      GtfsRealtimeSnapshot.SkippedStopsLookup skipped,
+      GtfsRealtimeSnapshot.PlacedStopsLookup placed) {
+    return new GtfsRealtimeSnapshot(
+        NOW,
+        assignments,
+        cancellations,
+        trains,
+        outOfService,
+        Set.of(),
+        bulletins,
+        lineStatus,
+        skipped,
+        placed);
+  }
+
+  /** 只跑运行中车次时的快照：没有取消、公告与越站。 */
+  private static GtfsRealtimeSnapshot running(
+      TimetableApi.TrainAssignment assignment,
+      TrainRuntimeSnapshot train,
+      List<TimetableApi.CancelledTrip> cancellations,
+      GtfsRealtimeSnapshot.PlacedStopsLookup placed) {
+    return snapshot(
+        List.of(assignment),
+        cancellations,
+        Map.of(TRAIN, train),
+        Set.of(),
+        List.of(),
+        (operator, line) -> Optional.empty(),
+        GtfsRealtimeSnapshot.SkippedStopsLookup.none(),
+        placed);
+  }
+
+  /** 列车在 LDF（第 3 站）已经选定了 1 道：与静态包的计划股道 2 道不同。 */
+  private static final GtfsRealtimeSnapshot.PlacedStopsLookup PLACED_LDF_1 =
+      (train, index) -> index == 3 ? Optional.of("SURC:S:LDF:1") : Optional.empty();
 
   private static TimetableApi.TrainAssignment assignment(
       int lastStop, int nextStop, String nextNode, long currentDelay, long projectedDelay) {
@@ -174,7 +224,30 @@ class GtfsRealtimeBuilderTest {
   @Test
   @DisplayName("直通列车到达换线站后按 ~2 的段发布；实时选台与静态计划不同时写 assigned_stop_id")
   void switchesToTheSecondSegmentAfterTheChangeStation() {
-    TimetableApi.TrainAssignment assignment = assignment(2, 3, "SURC:S:LDF:2", 0, 30);
+    TimetableApi.TrainAssignment assignment = assignment(2, 3, "SURC:S:LDF:1", 0, 30);
+    TrainRuntimeSnapshot train =
+        runtime(
+            2,
+            Optional.of(NodeId.of(GtfsTestFixtures.HHU_PLATFORM)),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty());
+    GtfsRealtimeFeed.FeedMessage message =
+        builder(running(assignment, train, List.of(), PLACED_LDF_1)).tripUpdates();
+
+    TripUpdate update =
+        entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001~2:20261025").tripUpdate().orElseThrow();
+    GtfsRealtimeFeed.StopTimeUpdate next = update.stopTimeUpdates().get(1);
+    assertEquals(3, next.stopSequence());
+    assertTrue(next.stopId().isEmpty(), "换台时只写 assigned_stop_id");
+    assertEquals(Optional.of("sv:SURC:S:LDF:1"), next.assignedStopId());
+  }
+
+  @Test
+  @DisplayName("动态站台还没选台：车次绑定给的占位股道与起始股道同名，不能当成实际站台写 assigned_stop_id")
+  void ignoresThePlaceholderBeforePlatformSelection() {
+    TimetableApi.TrainAssignment assignment =
+        assignment(2, 3, GtfsTestFixtures.LDF_PLACEHOLDER, 0, 30);
     TrainRuntimeSnapshot train =
         runtime(
             2,
@@ -184,22 +257,18 @@ class GtfsRealtimeBuilderTest {
             Optional.empty());
     GtfsRealtimeFeed.FeedMessage message =
         builder(
-                snapshot(
-                    List.of(assignment),
-                    List.of(),
-                    Map.of(TRAIN, train),
-                    Set.of(),
-                    List.of(),
-                    (operator, line) -> Optional.empty(),
-                    GtfsRealtimeSnapshot.SkippedStopsLookup.none()))
+                running(
+                    assignment, train, List.of(), GtfsRealtimeSnapshot.PlacedStopsLookup.none()))
             .tripUpdates();
 
-    TripUpdate update =
-        entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001~2:20261025").tripUpdate().orElseThrow();
-    GtfsRealtimeFeed.StopTimeUpdate next = update.stopTimeUpdates().get(1);
-    assertEquals(3, next.stopSequence());
-    assertTrue(next.stopId().isEmpty(), "换台时只写 assigned_stop_id");
-    assertEquals(Optional.of("sv:SURC:S:LDF:DYN"), next.assignedStopId());
+    GtfsRealtimeFeed.StopTimeUpdate next =
+        entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001~2:20261025")
+            .tripUpdate()
+            .orElseThrow()
+            .stopTimeUpdates()
+            .get(1);
+    assertEquals(Optional.of("sv:SURC:S:LDF:2"), next.stopId(), "照静态包的计划股道");
+    assertTrue(next.assignedStopId().isEmpty());
   }
 
   @Test
@@ -215,8 +284,12 @@ class GtfsRealtimeBuilderTest {
             Optional.empty());
     GtfsRealtimeSnapshot.SkippedStopsLookup skipped =
         (timetableId, tripId, serviceDate) -> Set.of(2);
+    // 车已经晚于表定发车：剩余停站时间决定发车
+    Instant late =
+        Instant.ofEpochSecond(SERVICE_DAY_BASE + GtfsTestFixtures.DEPARTURE_SECOND + 20L + 60L);
     GtfsRealtimeFeed.FeedMessage message =
-        builder(
+        new GtfsRealtimeBuilder(
+                FEED,
                 snapshot(
                     List.of(assignment),
                     List.of(),
@@ -224,13 +297,15 @@ class GtfsRealtimeBuilderTest {
                     Set.of(),
                     List.of(),
                     (operator, line) -> Optional.empty(),
-                    skipped))
+                    skipped),
+                late,
+                key -> key)
             .tripUpdates();
 
     TripUpdate update =
         entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001:20261025").tripUpdate().orElseThrow();
     GtfsRealtimeFeed.StopTimeUpdate last = update.stopTimeUpdates().get(0);
-    assertEquals(NOW.getEpochSecond() + 25, last.departure().orElseThrow().time().orElseThrow());
+    assertEquals(late.getEpochSecond() + 25, last.departure().orElseThrow().time().orElseThrow());
     GtfsRealtimeFeed.StopTimeUpdate next = update.stopTimeUpdates().get(1);
     assertEquals(StopScheduleRelationship.SKIPPED, next.scheduleRelationship());
     assertTrue(next.arrival().isEmpty());
@@ -305,7 +380,11 @@ class GtfsRealtimeBuilderTest {
         StopScheduleRelationship.SKIPPED, first.stopTimeUpdates().get(0).scheduleRelationship());
     TripUpdate second =
         entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001~2:20261025").tripUpdate().orElseThrow();
-    assertEquals(2, second.stopTimeUpdates().size());
+    assertEquals(
+        GtfsRealtimeFeed.TripScheduleRelationship.CANCELED,
+        second.trip().scheduleRelationship(),
+        "后一段一站都不再停：整段取消");
+    assertTrue(second.stopTimeUpdates().isEmpty());
   }
 
   @Test
@@ -326,7 +405,7 @@ class GtfsRealtimeBuilderTest {
             Optional.of("HHU"),
             OptionalLong.empty(),
             Optional.of(3),
-            Optional.of("SURC:S:LDF:2"),
+            Optional.of("SURC:S:LDF:1"),
             Optional.of("LDF"),
             OptionalLong.empty());
     TrainRuntimeSnapshot train =
@@ -337,16 +416,7 @@ class GtfsRealtimeBuilderTest {
             Optional.empty(),
             Optional.empty());
     GtfsRealtimeFeed.FeedMessage message =
-        builder(
-                snapshot(
-                    List.of(assignment),
-                    List.of(),
-                    Map.of(TRAIN, train),
-                    Set.of(),
-                    List.of(),
-                    (operator, line) -> Optional.empty(),
-                    GtfsRealtimeSnapshot.SkippedStopsLookup.none()))
-            .tripUpdates();
+        builder(running(assignment, train, List.of(), PLACED_LDF_1)).tripUpdates();
 
     TripUpdate update =
         entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001~2:20261025").tripUpdate().orElseThrow();
@@ -357,7 +427,7 @@ class GtfsRealtimeBuilderTest {
             .orElseThrow();
     assertEquals(StopScheduleRelationship.NO_DATA, next.scheduleRelationship());
     assertTrue(next.stopId().isEmpty(), "换台时只写 assigned_stop_id");
-    assertEquals(Optional.of("sv:SURC:S:LDF:DYN"), next.assignedStopId());
+    assertEquals(Optional.of("sv:SURC:S:LDF:1"), next.assignedStopId());
     assertTrue(next.arrival().isEmpty());
     assertTrue(next.departure().isEmpty());
   }
@@ -371,7 +441,7 @@ class GtfsRealtimeBuilderTest {
             0,
             Optional.of(NodeId.of(GtfsTestFixtures.NTA_PLATFORM)),
             Optional.of(25),
-            Optional.of(new TrainRuntimeSnapshot.Position(500.0, 64.0, 200.0, 270.0f)),
+            Optional.of(new TrainRuntimeSnapshot.Position(500.0, 64.0, 200.0, 0.4, 0.0)),
             Optional.of(
                 new TrainLoad(List.of(new TrainLoad.Car(40, 40), new TrainLoad.Car(20, 10)))));
     GtfsRealtimeFeed.FeedMessage message =
@@ -413,12 +483,182 @@ class GtfsRealtimeBuilderTest {
   }
 
   @Test
-  @DisplayName("朝向归一到 [0, 360)：Minecraft 的负 yaw 不会写出负 bearing")
-  void normalizesBearing() {
-    assertEquals(90.0, GtfsRealtimeBuilder.bearing(270.0f), 1e-9);
-    assertEquals(270.0, GtfsRealtimeBuilder.bearing(-270.0f), 1e-9);
-    assertEquals(0.0, GtfsRealtimeBuilder.bearing(180.0f), 1e-9);
-    assertEquals(180.0, GtfsRealtimeBuilder.bearing(0.0f), 1e-9);
+  @DisplayName("bearing 按行进方向算：+x 向东为 90、−z 向北为 0，落在 [0, 360)；没动过时不写")
+  void bearingFollowsTheDirectionOfTravel() {
+    assertEquals(90.0, GtfsRealtimeBuilder.bearing(1.0, 0.0).orElseThrow(), 1e-9);
+    assertEquals(0.0, GtfsRealtimeBuilder.bearing(0.0, -1.0).orElseThrow(), 1e-9);
+    assertEquals(180.0, GtfsRealtimeBuilder.bearing(0.0, 0.3).orElseThrow(), 1e-9);
+    assertEquals(270.0, GtfsRealtimeBuilder.bearing(-2.0, 0.0).orElseThrow(), 1e-9);
+    assertEquals(315.0, GtfsRealtimeBuilder.bearing(-1.0, -1.0).orElseThrow(), 1e-9);
+    assertTrue(GtfsRealtimeBuilder.bearing(0.0, 0.0).isEmpty());
+  }
+
+  @Test
+  @DisplayName("一条站点更新都给不出时不发这趟车：上一站没有偏差、下一站还没有预测")
+  void skipsTripUpdatesWithoutAnyStop() {
+    TimetableApi.TrainAssignment assignment =
+        new TimetableApi.TrainAssignment(
+            TRAIN,
+            GtfsTestFixtures.TIMETABLE_ID,
+            GtfsTestFixtures.TRIP_CODE,
+            GtfsTestFixtures.ROUTE_WS,
+            Optional.empty(),
+            SERVICE_DATE,
+            NOW,
+            0,
+            Optional.of(0),
+            Optional.of(GtfsTestFixtures.NTA_PLATFORM),
+            Optional.of("NTA"),
+            OptionalLong.empty(),
+            Optional.of(2),
+            Optional.of(GtfsTestFixtures.HHU_PLATFORM),
+            Optional.of("HHU"),
+            OptionalLong.empty());
+    TrainRuntimeSnapshot train =
+        runtime(
+            0,
+            Optional.of(NodeId.of("SURC:NTA:HHU:1:1")),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty());
+
+    GtfsRealtimeFeed.FeedMessage message =
+        builder(
+                running(
+                    assignment, train, List.of(), GtfsRealtimeSnapshot.PlacedStopsLookup.none()))
+            .tripUpdates();
+
+    assertTrue(message.entities().isEmpty(), message.entities().toString());
+  }
+
+  @Test
+  @DisplayName("停站中按表等点：预计发车不早于表定发车")
+  void dwellDepartureNeverBeforeTheTimetable() {
+    TimetableApi.TrainAssignment assignment = assignment(0, 2, GtfsTestFixtures.HHU_PLATFORM, 0, 0);
+    TrainRuntimeSnapshot train =
+        runtime(
+            0,
+            Optional.of(NodeId.of(GtfsTestFixtures.NTA_PLATFORM)),
+            Optional.of(5),
+            Optional.empty(),
+            Optional.empty());
+    long scheduled = SERVICE_DAY_BASE + GtfsTestFixtures.DEPARTURE_SECOND + 20L;
+    Instant early = Instant.ofEpochSecond(scheduled - 100L);
+
+    GtfsRealtimeFeed.FeedMessage message =
+        new GtfsRealtimeBuilder(
+                FEED,
+                running(
+                    assignment, train, List.of(), GtfsRealtimeSnapshot.PlacedStopsLookup.none()),
+                early,
+                key -> key)
+            .tripUpdates();
+
+    GtfsRealtimeFeed.StopTimeUpdate last =
+        entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001:20261025")
+            .tripUpdate()
+            .orElseThrow()
+            .stopTimeUpdates()
+            .get(0);
+    assertEquals(scheduled, last.departure().orElseThrow().time().orElseThrow());
+  }
+
+  @Test
+  @DisplayName("直通车在前一段运行时，后一段的取消照常发布")
+  void publishesCancellationsOfTheOtherSegmentWhileRunning() {
+    TimetableApi.TrainAssignment assignment = assignment(0, 2, GtfsTestFixtures.HHU_PLATFORM, 0, 0);
+    TrainRuntimeSnapshot train =
+        runtime(
+            0,
+            Optional.of(NodeId.of("SURC:NTA:HHU:1:1")),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty());
+    TimetableApi.CancelledTrip cancellation =
+        new TimetableApi.CancelledTrip(
+            GtfsTestFixtures.TIMETABLE_ID,
+            GtfsTestFixtures.TRIP_ID,
+            GtfsTestFixtures.TRIP_CODE,
+            GtfsTestFixtures.ROUTE_WS,
+            SERVICE_DATE,
+            NOW,
+            TimetableTripCancelledEvent.Scope.PARTIAL,
+            3,
+            TimetableTripCancelledEvent.Reason.VEHICLE_REMOVED,
+            Optional.of(TRAIN));
+
+    GtfsRealtimeFeed.FeedMessage message =
+        builder(
+                running(
+                    assignment,
+                    train,
+                    List.of(cancellation),
+                    GtfsRealtimeSnapshot.PlacedStopsLookup.none()))
+            .tripUpdates();
+
+    TripUpdate second =
+        entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001~2:20261025").tripUpdate().orElseThrow();
+    assertEquals(3, second.stopTimeUpdates().get(0).stopSequence());
+    assertEquals(
+        StopScheduleRelationship.SKIPPED, second.stopTimeUpdates().get(0).scheduleRelationship());
+    TripUpdate first =
+        entity(message, "tu:sv:SURC:WS:WS_TEMP:WS-001:20261025").tripUpdate().orElseThrow();
+    assertEquals(
+        GtfsRealtimeFeed.TripScheduleRelationship.SCHEDULED, first.trip().scheduleRelationship());
+  }
+
+  @Test
+  @DisplayName("车辆位置的当前站只报静态包里有的停靠：下一站是区间点时退回上一站")
+  void vehicleStopSequenceStaysOnPublishedStops() {
+    TimetableApi.TrainAssignment assignment = assignment(0, 1, "SURC:NTA:HHU:1:1", 0, 0);
+    TrainRuntimeSnapshot train =
+        runtime(
+            0,
+            Optional.of(NodeId.of(GtfsTestFixtures.NTA_PLATFORM)),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty());
+
+    GtfsRealtimeFeed.FeedMessage message =
+        builder(
+                running(
+                    assignment, train, List.of(), GtfsRealtimeSnapshot.PlacedStopsLookup.none()))
+            .vehiclePositions();
+
+    VehiclePosition position = entity(message, "vp:TRAIN-1").vehiclePosition().orElseThrow();
+    assertEquals(0, position.currentStopSequence().orElseThrow());
+    assertEquals(Optional.of("sv:SURC:S:NTA:1"), position.stopId());
+  }
+
+  @Test
+  @DisplayName("出库途中、还没到第一个载客站的车不发布位置，绑了车次的到站预测照常")
+  void hidesTrainsBeforeTheirFirstPassengerStop() {
+    TimetableApi.TrainAssignment assignment =
+        assignment(0, 2, GtfsTestFixtures.HHU_PLATFORM, 0, 30);
+    TrainRuntimeSnapshot train =
+        runtime(
+            0,
+            Optional.of(NodeId.of("SURC:NTA:HHU:1:1")),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty());
+    GtfsRealtimeSnapshot snapshot =
+        new GtfsRealtimeSnapshot(
+            NOW,
+            List.of(assignment),
+            List.of(),
+            Map.of(TRAIN, train),
+            Set.of(),
+            Set.of(TRAIN),
+            List.of(),
+            (operator, line) -> Optional.empty(),
+            GtfsRealtimeSnapshot.SkippedStopsLookup.none(),
+            GtfsRealtimeSnapshot.PlacedStopsLookup.none());
+
+    assertTrue(builder(snapshot).vehiclePositions().entities().isEmpty());
+    assertTrue(
+        builder(snapshot).tripUpdates().entities().stream()
+            .anyMatch(entity -> entity.id().equals("tu:sv:SURC:WS:WS_TEMP:WS-001:20261025")));
   }
 
   @Test
