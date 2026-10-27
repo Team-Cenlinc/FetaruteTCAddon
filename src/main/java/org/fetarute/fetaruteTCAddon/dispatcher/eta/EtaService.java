@@ -759,11 +759,12 @@ public final class EtaService implements AutoCloseable {
       long startNanos = System.nanoTime();
       BoardResult result = computeBoard(input, stationId, lineId, horizon);
       long elapsedNanos = System.nanoTime() - startNanos;
-      boardStats.recordRefresh(elapsedNanos);
-      logIfSlow(stationId, elapsedNanos, result, "refresh");
       if (railGraphService.snapshotVersion() == input.graphVersion()) {
+        // 先写回再记刷新：统计里看到“刷新完成”时新站牌已经发布，不会出现统计已加、查询还拿到旧行的窗口
         store(key, input, result);
       }
+      boardStats.recordRefresh(elapsedNanos);
+      logIfSlow(stationId, elapsedNanos, result, "refresh");
     } catch (RuntimeException ex) {
       debugLogger.accept("ETA_BOARD_REFRESH_FAILED station=" + stationId + " error=" + ex);
     } finally {
