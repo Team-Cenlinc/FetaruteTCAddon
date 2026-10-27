@@ -870,16 +870,22 @@ public final class GtfsFeedBuilder {
   // 内部类型
   // ─────────────────────────────────────────────────────────────────────────────
 
+  /** 世界坐标平面上的一个点（x/z，方块）。 */
   private record Point(double x, double z) {}
 
+  /** 一个股道节点的坐标与它所属车站的键。 */
   private record PlatformInfo(String nodeId, String stationKey, double x, double z, String track) {}
 
+  /** 已发布线路及其运营商。 */
   private record FeedLine(Operator operator, Line line) {}
 
+  /** 一个停靠站：时刻表停站、车站目录条目与车站键。 */
   private record StationStop(
       TimetableStop stop, StationDirectory.StationEntry entry, String stationKey) {}
 
+  /** 车次终点显示：中文主文案与可选英文。 */
   private record Headsign(String primary, Optional<String> secondary) {}
 
+  /** 直通运转拆出的一段：所属线路与这段的停靠站。 */
   private record Segment(RouteLineChanges.LineRef line, List<StationStop> stops) {}
 }

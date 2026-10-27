@@ -908,8 +908,10 @@ public final class GtfsRealtimeBuilder {
     return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
   }
 
+  /** 车次实例键：车次 UUID + 服务日。 */
   private record TripKey(UUID tripId, LocalDate serviceDate) {}
 
+  /** 车辆当前所处区间：上一站/下一站的序号与 stop_id，以及 GTFS 的车辆停站状态。 */
   private record StopProgress(
       OptionalInt stopSequence, Optional<String> stopId, VehicleStopStatus status) {
 
@@ -919,6 +921,7 @@ public final class GtfsRealtimeBuilder {
     }
   }
 
+  /** 车辆载客状态；没有载客数据时两者都为空。 */
   private record Occupancy(Optional<OccupancyStatus> status, OptionalInt percentage) {
 
     static Occupancy none() {

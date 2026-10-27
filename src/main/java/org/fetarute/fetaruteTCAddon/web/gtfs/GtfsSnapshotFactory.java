@@ -69,6 +69,7 @@ public final class GtfsSnapshotFactory implements GtfsSource {
     this.clock = Objects.requireNonNull(clock, "clock");
   }
 
+  /** 取当前车站目录、交路、时刻表与股道计划的一份快照；目录还没加载时为空。 */
   @Override
   public Optional<GtfsSnapshot> snapshot() {
     Optional<StationDirectory.Snapshot> catalog = directory.get();

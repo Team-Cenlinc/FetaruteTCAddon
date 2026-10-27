@@ -1966,6 +1966,7 @@ public final class ConfigManager {
       this(enabled, host, port, token, DEFAULT_PUBLISHER_NAME, DEFAULT_PUBLISHER_URL);
     }
 
+    /** 缺省配置：不启动接口、只监听本机、发布方用全局缺省值。 */
     public static WebApiSettings defaults() {
       return new WebApiSettings(
           false, "127.0.0.1", 8780, "", DEFAULT_PUBLISHER_NAME, DEFAULT_PUBLISHER_URL);

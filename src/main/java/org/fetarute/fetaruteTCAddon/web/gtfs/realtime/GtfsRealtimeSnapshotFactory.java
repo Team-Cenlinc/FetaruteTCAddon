@@ -53,6 +53,7 @@ public final class GtfsRealtimeSnapshotFactory implements GtfsRealtimeSource {
     this.timetables = Objects.requireNonNull(timetables, "timetables");
   }
 
+  /** 取当前车次绑定、取消登记、列车位置与站台屏公告的一份快照；公开 API 还没初始化时为空。 */
   @Override
   public Optional<GtfsRealtimeSnapshot> snapshot(Instant now) {
     Optional<FetaruteApi> current = api.get();
