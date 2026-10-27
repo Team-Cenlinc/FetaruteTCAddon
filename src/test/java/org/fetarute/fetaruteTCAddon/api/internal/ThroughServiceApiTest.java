@@ -254,6 +254,28 @@ class ThroughServiceApiTest {
     assertFalse(trains.getTrainSnapshot("s-last").orElseThrow().outOfService());
   }
 
+  /** 出库途中（1.16.0）：还没到第一个载客站之前都算；纯走行整趟都算；到站之后、运营交路首站都不算。 */
+  @Test
+  void trainSnapshotReportsBeforeServiceUntilTheFirstPassengerStation() {
+    Route create = storage.route(net.ws, "WS-C", RoutePatternType.LOCAL, RouteOperationType.CREATE);
+    storage.stops(
+        create,
+        new String[] {"PASS", "SURC:D:LWN:1", "CRET SURC:D:LWN:1"},
+        new String[] {"PASS", "SURC:LWN:KPO:1:001"},
+        new String[] {"STOP", "SURC:S:KPO:1"},
+        new String[] {"TERMINATE", "SURC:S:PPK:1"});
+    routes.reload(storage.provider());
+    sample("c-0", create, 0, "SURC", "WS");
+    sample("c-1", create, 1, "SURC", "WS");
+    sample("c-2", create, 2, "SURC", "WS");
+    assertTrue(trains.getTrainSnapshot("c-0").orElseThrow().beforeService(), "刚出库");
+    assertTrue(trains.getTrainSnapshot("c-1").orElseThrow().beforeService());
+    assertFalse(trains.getTrainSnapshot("c-2").orElseThrow().beforeService(), "到了第一个载客站");
+
+    sample("w-0", net.ws1, 0, "SURC", "WS");
+    assertFalse(trains.getTrainSnapshot("w-0").orElseThrow().beforeService(), "首站就是载客站");
+  }
+
   @Test
   void oldSnapshotConstructorKeepsDefaults() {
     TrainSnapshot snapshot =
@@ -272,6 +294,7 @@ class ThroughServiceApiTest {
     assertEquals(Optional.empty(), snapshot.operatorCode());
     assertEquals(Optional.empty(), snapshot.lineCode());
     assertFalse(snapshot.outOfService());
+    assertFalse(snapshot.beforeService(), "旧构造器：不算出库途中");
 
     StopInfo stop =
         new StopInfo(

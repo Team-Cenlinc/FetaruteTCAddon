@@ -81,5 +81,7 @@ class GtfsSnapshotHashTest {
             copy(snapshot, snapshot.generatedAt(), false, 0, snapshot.timetables())));
     assertNotEquals(
         base, GtfsSnapshotHash.of(copy(snapshot, snapshot.generatedAt(), true, 0, List.of())));
+    assertNotEquals(
+        base, GtfsSnapshotHash.of(GtfsTestFixtures.headwaySnapshot()), "按间隔发车的交路（及其间隔、时分）也在指纹里");
   }
 }

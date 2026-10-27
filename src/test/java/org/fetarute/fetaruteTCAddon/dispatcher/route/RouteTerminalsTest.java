@@ -217,6 +217,34 @@ class RouteTerminalsTest {
             .isEmpty());
   }
 
+  /** 出库途中：还没到第一个载客站（停车且是车站本体）之前都算；站咽喉、车库不算载客站；纯走行整趟都算。 */
+  @Test
+  void beforeServiceUntilTheFirstPassengerStation() {
+    List<RouteStop> create =
+        stops(
+            stop(RouteStopPassType.PASS, "SURC:D:LWN:1", "CRET SURC:D:LWN:1"),
+            stop(RouteStopPassType.STOP, "SURC:S:NTA:1:001", null),
+            stop(RouteStopPassType.STOP, null, "DYNAMIC:SURC:S:NTA"),
+            stop(RouteStopPassType.TERMINATE, "SURC:S:HHU:1", null));
+    assertTrue(RouteTerminals.beforeService(create, 0), "刚出库");
+    assertTrue(RouteTerminals.beforeService(create, 1), "停在咽喉不算开始载客");
+    assertFalse(RouteTerminals.beforeService(create, 2), "到了第一个载客站（动态站台）");
+    assertFalse(RouteTerminals.beforeService(create, 3));
+    assertTrue(RouteTerminals.beforeService(create, -1), "进度未知按尚未发车");
+
+    List<RouteStop> operation =
+        stops(
+            stop(RouteStopPassType.STOP, "SURC:S:NTA:1", null),
+            stop(RouteStopPassType.TERMINATE, "SURC:S:HHU:1", null));
+    assertFalse(RouteTerminals.beforeService(operation, 0), "首站就是载客站");
+
+    List<RouteStop> deadhead =
+        stops(
+            stop(RouteStopPassType.PASS, "SURC:D:LWN:1", null),
+            stop(RouteStopPassType.PASS, "SURC:S:NTA:1", null));
+    assertTrue(RouteTerminals.beforeService(deadhead, 1), "一个载客站都没有");
+  }
+
   private static RouteStop stop(RouteStopPassType type, String waypoint, String notes) {
     return new RouteStop(
         ROUTE,

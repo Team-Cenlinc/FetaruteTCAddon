@@ -129,6 +129,8 @@ public interface TrainApi {
    *     Service」同一判定；出库、运营交路恒为 false
    * @param consist 车型键（1.11.0）：出车编组写法（通常是 TrainCarts 存车名）归一后的形式，与 {@code TimetableApi} 的车型同一口径；
    *     车上没有车型标签（编组方案启用前出的车、手工生成的车）时为空
+   * @param beforeService 是否还没开始载客（1.16.0）：列车还没到当前交路的第一个载客站（停车且是车站本体的停靠点，站咽喉、车库、区间点都不算），
+   *     即出库途中；一个载客站都没有的交路（纯走行）整趟都是。与 {@code outOfService} 对称：一个管开始载客之前，一个管结束载客之后。 找不到交路时为 false
    */
   record TrainSnapshot(
       String trainName,
@@ -145,7 +147,8 @@ public interface TrainApi {
       Optional<String> operatorCode,
       Optional<String> lineCode,
       boolean outOfService,
-      Optional<String> consist) {
+      Optional<String> consist,
+      boolean beforeService) {
 
     public TrainSnapshot {
       routeCode = routeCode == null ? Optional.empty() : routeCode;
@@ -155,6 +158,42 @@ public interface TrainApi {
       operatorCode = operatorCode == null ? Optional.empty() : operatorCode;
       lineCode = lineCode == null ? Optional.empty() : lineCode;
       consist = consist == null ? Optional.empty() : consist;
+    }
+
+    /** 1.11.0 至 1.15.0 的构造器：{@code beforeService} 为 false。 */
+    public TrainSnapshot(
+        String trainName,
+        UUID worldId,
+        String routeId,
+        Optional<String> routeCode,
+        Optional<String> currentNode,
+        Optional<String> nextNode,
+        double speedBps,
+        Signal signal,
+        double edgeProgress,
+        Instant updatedAt,
+        Optional<EtaInfo> eta,
+        Optional<String> operatorCode,
+        Optional<String> lineCode,
+        boolean outOfService,
+        Optional<String> consist) {
+      this(
+          trainName,
+          worldId,
+          routeId,
+          routeCode,
+          currentNode,
+          nextNode,
+          speedBps,
+          signal,
+          edgeProgress,
+          updatedAt,
+          eta,
+          operatorCode,
+          lineCode,
+          outOfService,
+          consist,
+          false);
     }
 
     /** 1.7.0 至 1.10.0 的构造器：车型为空。 */

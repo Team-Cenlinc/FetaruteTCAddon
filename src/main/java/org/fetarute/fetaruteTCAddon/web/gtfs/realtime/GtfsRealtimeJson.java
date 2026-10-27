@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.Alert;
+import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.CarriageDetails;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.Entity;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.EntitySelector;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.FeedMessage;
@@ -131,6 +132,19 @@ public final class GtfsRealtimeJson {
     out.put("timestamp", position.timestamp());
     position.occupancyStatus().ifPresent(value -> out.put("occupancy_status", value.name()));
     position.occupancyPercentage().ifPresent(value -> out.put("occupancy_percentage", value));
+    if (!position.carriages().isEmpty()) {
+      List<Map<String, Object>> carriages = new ArrayList<>();
+      for (CarriageDetails carriage : position.carriages()) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("id", carriage.id());
+        carriage.label().ifPresent(value -> row.put("label", value));
+        carriage.occupancyStatus().ifPresent(value -> row.put("occupancy_status", value.name()));
+        row.put("occupancy_percentage", carriage.occupancyPercentage().orElse(-1));
+        row.put("carriage_sequence", carriage.carriageSequence());
+        carriages.add(row);
+      }
+      out.put("multi_carriage_details", carriages);
+    }
     return out;
   }
 

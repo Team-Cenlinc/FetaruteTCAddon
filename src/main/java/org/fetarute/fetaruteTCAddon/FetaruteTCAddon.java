@@ -3122,6 +3122,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
               () -> Optional.ofNullable(railGraphService),
               ServerIdentity::id,
               () -> configManager.current().webApiSettings(),
+              this::getSpawnManager,
+              () -> Optional.ofNullable(configManager).map(ConfigManager::current),
               clock);
       GtfsRealtimeSource realtimeSource =
           new GtfsRealtimeSnapshotFactory(

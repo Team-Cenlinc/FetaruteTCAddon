@@ -16,6 +16,9 @@ public final class GtfsIds {
   /** 日历服务 ID 的后缀：插件没有星期或日期有效期，全网一张表天天开。 */
   static final String DAILY = "DAILY";
 
+  /** 按间隔发车的模板车次在车次 ID 第三段（时刻表代码的位置）写的值：{@code {S}:{OP}:{LINE}:HEADWAY:{交路代码}}。 */
+  static final String HEADWAY = "HEADWAY";
+
   private final String prefix;
 
   /**

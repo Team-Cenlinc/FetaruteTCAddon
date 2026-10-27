@@ -99,6 +99,11 @@ final class GtfsFeedDigest {
       field(canonical, trip.timetableCode());
       field(canonical, trip.tripCode());
       field(canonical, trip.tripUuid().toString());
+      field(
+          canonical,
+          trip.headwaySeconds().isPresent()
+              ? Integer.toString(trip.headwaySeconds().getAsInt())
+              : "");
       field(canonical, Integer.toString(trip.segment()));
       field(canonical, Integer.toString(trip.firstStopSequence()));
       field(canonical, Integer.toString(trip.lastStopSequence()));

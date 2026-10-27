@@ -472,6 +472,46 @@ class GtfsFeedBuilderTest {
   }
 
   @Test
+  @DisplayName("按间隔发车的交路：模板车次各段从 0 起，直通照样拆段，frequencies.txt 全天按间隔、不按准点")
+  void publishesHeadwayRoutesAsFrequencies() {
+    GtfsFeed headway = GtfsFeedBuilder.build(GtfsTestFixtures.headwaySnapshot());
+    List<GtfsFeed.Trip> templates = headway.headwayTrips(GtfsTestFixtures.ROUTE_WS);
+
+    assertEquals(2, templates.size(), "直通在换线站拆段");
+    assertEquals("sv:SURC:WS:HEADWAY:WS-1", templates.get(0).id());
+    assertEquals("sv:SURC:WS:HEADWAY:WS-1~2", templates.get(1).id());
+    assertEquals("sv:SURC:MT", templates.get(1).routeId());
+    for (GtfsFeed.Trip template : templates) {
+      assertEquals(GtfsTestFixtures.HEADWAY_SECONDS, template.headwaySeconds().getAsInt());
+      assertEquals(0, template.stopTimes().get(0).arrivalSecondOfDay(), "每段从 0 起");
+    }
+    assertEquals(20, templates.get(1).stopTimes().get(0).departureSecondOfDay(), "换线站停站照模板");
+    assertEquals(600, templates.get(1).stopTimes().get(1).arrivalSecondOfDay(), "站间时分照模板");
+    assertEquals(
+        List.of("sv:SURC:WS:HEADWAY:WS-1", "sv:SURC:WS:HEADWAY:WS-1~2"),
+        valuesOf(headway, "frequencies", "trip_id"));
+    assertEquals(List.of("300", "300"), valuesOf(headway, "frequencies", "headway_secs"));
+    assertEquals(List.of("0", "0"), valuesOf(headway, "frequencies", "exact_times"));
+    assertEquals(List.of("24:00:00", "24:00:00"), valuesOf(headway, "frequencies", "end_time"));
+    assertTrue(
+        headway.trips(GtfsTestFixtures.TIMETABLE_ID, GtfsTestFixtures.TRIP_CODE).size() == 2,
+        "时刻表车次照常发布");
+    assertTrue(
+        GtfsFeedTables.tables(feed).stream().noneMatch(table -> table.name().equals("frequencies")),
+        "没有按间隔发车的交路时不写 frequencies.txt");
+  }
+
+  private static List<String> valuesOf(GtfsFeed source, String table, String column) {
+    GtfsTable found =
+        GtfsFeedTables.tables(source).stream()
+            .filter(candidate -> candidate.name().equals(table))
+            .findFirst()
+            .orElseThrow();
+    int index = found.columns().indexOf(column);
+    return found.rows().stream().map(row -> row.get(index)).toList();
+  }
+
+  @Test
   @DisplayName("内容没变时隔天版本号不变，日历窗口照常往后滚")
   void feedVersionIgnoresTheDate() {
     GtfsFeed nextDay =

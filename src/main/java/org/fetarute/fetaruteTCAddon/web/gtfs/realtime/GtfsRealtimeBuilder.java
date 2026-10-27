@@ -1,8 +1,10 @@
 package org.fetarute.fetaruteTCAddon.web.gtfs.realtime;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -40,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.Alert;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.AlertCause;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.AlertEffect;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.AlertSeverity;
+import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.CarriageDetails;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.Entity;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.EntitySelector;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.FeedMessage;
@@ -85,12 +88,16 @@ public final class GtfsRealtimeBuilder {
   /** 一轮生成里最多报几条坏记录。 */
   private static final int MAX_SKIP_WARNINGS = 5;
 
+  /** 推算后续车次会不会晚开，只看表定发车在这么久之内的。 */
+  static final Duration FOLLOWING_HORIZON = Duration.ofHours(3);
+
   private final GtfsFeed feed;
   private final GtfsRealtimeSnapshot snapshot;
   private final Instant now;
   private final Function<String, String> texts;
   private final Consumer<String> warn;
   private final ZoneId zone;
+  private final FrequencyStarts starts;
 
   /** 这一轮已经报过的坏记录：同一条只报一次，一轮最多 {@value #MAX_SKIP_WARNINGS} 条，避免刷屏。 */
   private final Set<String> warnedSkips = new HashSet<>();
@@ -117,6 +124,20 @@ public final class GtfsRealtimeBuilder {
       Instant now,
       Function<String, String> texts,
       Consumer<String> warn) {
+    this(feed, snapshot, now, texts, warn, FrequencyStarts.unpinned());
+  }
+
+  /**
+   * @param starts 按间隔发车车次的起点发车时刻登记（同一辆车的同一趟一经报出就不再变）
+   */
+  public GtfsRealtimeBuilder(
+      GtfsFeed feed,
+      GtfsRealtimeSnapshot snapshot,
+      Instant now,
+      Function<String, String> texts,
+      Consumer<String> warn,
+      FrequencyStarts starts) {
+    this.starts = Objects.requireNonNull(starts, "starts");
     this.feed = Objects.requireNonNull(feed, "feed");
     this.snapshot = Objects.requireNonNull(snapshot, "snapshot");
     this.now = Objects.requireNonNull(now, "now");
@@ -155,16 +176,24 @@ public final class GtfsRealtimeBuilder {
   public FeedMessage tripUpdates() {
     Map<String, Entity> entities = new TreeMap<>();
     Set<String> running = new HashSet<>();
+    List<Entity> downstream = new ArrayList<>();
     List<TimetableApi.TrainAssignment> assignments =
         snapshot.assignments().stream()
             .sorted(Comparator.comparing(TimetableApi.TrainAssignment::trainName))
             .toList();
     for (TimetableApi.TrainAssignment assignment : assignments) {
       try {
-        tripEntity(assignment, running)
+        tripEntity(assignment, running, downstream)
             .ifPresent(entity -> entities.putIfAbsent(entity.id(), entity));
       } catch (RuntimeException ex) {
         skip("train:" + assignment.trainName(), ex);
+      }
+    }
+    for (String train : sortedTrains()) {
+      try {
+        headwayTripEntity(train).ifPresent(entity -> entities.putIfAbsent(entity.id(), entity));
+      } catch (RuntimeException ex) {
+        skip("headway:" + train, ex);
       }
     }
     for (TimetableApi.CancelledTrip cancellation : snapshot.cancellations()) {
@@ -174,16 +203,23 @@ public final class GtfsRealtimeBuilder {
         skip("cancellation:" + cancellation.tripId(), ex);
       }
     }
+    // 车所在段之后的各段、交路里接下来的车次：都是推算，正在跑的车与取消登记优先
+    for (Entity entity : downstream) {
+      if (!running.contains(entity.id())) {
+        entities.putIfAbsent(entity.id(), entity);
+      }
+    }
     return message(entities.values());
   }
 
   /**
    * 运行中车次的更新。车所在的那一段登记进 {@code running}（按分段 ID + 日期）：直通车的其它段照常按取消登记发布。
    *
-   * <p>一条站点更新都给不出来（上一站不在静态包里、预测也还没算出）时不发这一条：未取消的车次至少要有一条站点更新。
+   * <p>一条站点更新都给不出来（上一站不在静态包里、预测也还没算出）时不发这一条：未取消的车次至少要有一条站点更新。 车所在段之后的各段、交路里接下来会晚开的车次，推算结果放进 {@code
+   * downstream}。
    */
   private Optional<Entity> tripEntity(
-      TimetableApi.TrainAssignment assignment, Set<String> running) {
+      TimetableApi.TrainAssignment assignment, Set<String> running, List<Entity> downstream) {
     if (outOfService(assignment.trainName())) {
       return Optional.empty();
     }
@@ -193,11 +229,18 @@ public final class GtfsRealtimeBuilder {
     }
     String id = entityId("tu", trip.get(), assignment.serviceDate());
     running.add(id);
-    TripUpdate update = tripUpdate(trip.get(), assignment);
-    if (update.stopTimeUpdates().isEmpty()) {
+    Run run = currentRun(trip.get(), assignment);
+    if (run.arrivalAtSegmentEnd().isPresent()) {
+      addDownstream(assignment, trip.get(), run.arrivalAtSegmentEnd().getAsLong(), downstream);
+    } else {
+      arrivedAtTripEnd(assignment, trip.get())
+          .ifPresent(arrival -> addFollowing(assignment, arrival, downstream));
+    }
+    if (run.update().stopTimeUpdates().isEmpty()) {
       return Optional.empty();
     }
-    return Optional.of(new Entity(id, Optional.of(update), Optional.empty(), Optional.empty()));
+    return Optional.of(
+        new Entity(id, Optional.of(run.update()), Optional.empty(), Optional.empty()));
   }
 
   private void cancellationEntities(
@@ -218,9 +261,7 @@ public final class GtfsRealtimeBuilder {
   /** 生成 VehiclePositions。 */
   public FeedMessage vehiclePositions() {
     Map<String, Entity> entities = new TreeMap<>();
-    List<String> names = new ArrayList<>(snapshot.trains().keySet());
-    names.sort(Comparator.naturalOrder());
-    for (String train : names) {
+    for (String train : sortedTrains()) {
       try {
         vehicleEntity(train).ifPresent(entity -> entities.put(entity.id(), entity));
       } catch (RuntimeException ex) {
@@ -240,15 +281,20 @@ public final class GtfsRealtimeBuilder {
     }
     TimetableApi.TrainAssignment assignment = assignmentsByTrain.get(key(train));
     Optional<GtfsFeed.Trip> trip = Optional.ofNullable(assignment).flatMap(this::tripFor);
+    Optional<GtfsFeed.Trip> headway = trip.isPresent() ? Optional.empty() : headwayTripOf(runtime);
     Optional<TripDescriptor> descriptor =
         trip.map(
                 value ->
                     descriptor(value, assignment.serviceDate(), TripScheduleRelationship.SCHEDULED))
+            .or(() -> headway.map(value -> headwayDescriptor(train, runtime, value)))
             .or(() -> routeOnlyDescriptor(runtime));
     String label = trip.map(GtfsFeed.Trip::shortName).filter(name -> !name.isBlank()).orElse(train);
     Optional<VehicleDescriptor> vehicle =
         Optional.of(new VehicleDescriptor(train, Optional.of(label)));
-    StopProgress progress = stopProgress(runtime, trip, Optional.ofNullable(assignment));
+    StopProgress progress =
+        headway.isPresent()
+            ? headwayProgress(runtime, headway.get())
+            : stopProgress(runtime, trip, Optional.ofNullable(assignment));
     Occupancy occupancy = occupancy(runtime.load());
     VehiclePosition position =
         new VehiclePosition(
@@ -260,7 +306,8 @@ public final class GtfsRealtimeBuilder {
             progress.status(),
             runtime.updatedAt().getEpochSecond(),
             occupancy.status(),
-            occupancy.percentage());
+            occupancy.percentage(),
+            carriages(train, runtime.load()));
     String id = "vp:" + train;
     return Optional.of(new Entity(id, Optional.empty(), Optional.of(position), Optional.empty()));
   }
@@ -285,26 +332,29 @@ public final class GtfsRealtimeBuilder {
     return feed.tripForRouteIndex(assignment.timetableId(), assignment.tripCode(), progress);
   }
 
-  private TripUpdate tripUpdate(GtfsFeed.Trip trip, TimetableApi.TrainAssignment assignment) {
+  /** 车所在这一段的更新，以及推算到这一段终点的预计到达（推算不出时为空）。 */
+  private Run currentRun(GtfsFeed.Trip trip, TimetableApi.TrainAssignment assignment) {
     OptionalInt delay = toOptionalInt(assignment.currentDelaySeconds());
-    Optional<TimetableApi.CancelledTrip> cancellation =
-        Optional.ofNullable(
-            cancellations.get(new TripKey(trip.tripUuid(), assignment.serviceDate())));
     OptionalInt dwell =
         train(assignment.trainName())
             .flatMap(TrainRuntimeSnapshot::dwellRemainingSec)
             .map(OptionalInt::of)
             .orElse(OptionalInt.empty());
+    Set<Integer> skipped = skippedOf(trip, assignment.serviceDate());
+    int firstCancelled = firstCancelledOf(trip, assignment.serviceDate());
     Map<Integer, StopTimeUpdate> updates = new TreeMap<>();
     addLastStopUpdate(updates, trip, assignment, delay, dwell);
-    addNextStopUpdate(updates, trip, assignment);
-    addSkippedStops(updates, trip, assignment, cancellation);
-    return new TripUpdate(
-        descriptor(trip, assignment.serviceDate(), TripScheduleRelationship.SCHEDULED),
-        Optional.of(new VehicleDescriptor(assignment.trainName(), Optional.of(trip.shortName()))),
-        List.copyOf(updates.values()),
-        now.getEpochSecond(),
-        delay);
+    OptionalLong arrivalAtEnd = addPredictions(updates, trip, assignment, skipped, firstCancelled);
+    addSkippedStops(updates, trip, skipped, firstCancelled);
+    TripUpdate update =
+        new TripUpdate(
+            descriptor(trip, assignment.serviceDate(), TripScheduleRelationship.SCHEDULED),
+            Optional.of(
+                new VehicleDescriptor(assignment.trainName(), Optional.of(trip.shortName()))),
+            List.copyOf(updates.values()),
+            now.getEpochSecond(),
+            delay);
+    return new Run(update, arrivalAtEnd);
   }
 
   private void addLastStopUpdate(
@@ -351,19 +401,29 @@ public final class GtfsRealtimeBuilder {
             Optional.empty()));
   }
 
-  private void addNextStopUpdate(
+  /**
+   * 下一站起这一段剩下各站的预计到发：下一站按 ETA 的预计晚点，往后按表定站间时分推；按表等点，车不早于表定发车开出（早到的车在站上等）。
+   *
+   * <p>表定站间时分与 ETA 用的是同一个走行模型（编表按运行曲线算），所以往后推不必每站再算一次路径。
+   *
+   * @return 推算到这一段终点的预计到达；下一站没有预测时为空
+   */
+  private OptionalLong addPredictions(
       Map<Integer, StopTimeUpdate> updates,
       GtfsFeed.Trip trip,
-      TimetableApi.TrainAssignment assignment) {
+      TimetableApi.TrainAssignment assignment,
+      Set<Integer> skipped,
+      int firstCancelled) {
     if (assignment.nextStopSequence().isEmpty()) {
-      return;
+      return OptionalLong.empty();
     }
     int sequence = assignment.nextStopSequence().get();
-    Optional<GtfsFeed.StopTime> stopTime = trip.stopTime(sequence);
-    if (stopTime.isEmpty()) {
-      return;
+    int index = indexOf(trip, sequence);
+    if (index < 0) {
+      return OptionalLong.empty();
     }
-    Optional<String> staticStopId = Optional.of(stopTime.get().stopId());
+    GtfsFeed.StopTime stopTime = trip.stopTimes().get(index);
+    Optional<String> staticStopId = Optional.of(stopTime.stopId());
     // 只认已选定的股道：动态站台未选台时车次绑定给的是占位股道（与真实起始股道同名），不能当成实际站台
     Optional<String> actualStopId = stopIdForNode(placedNode(assignment.trainName(), sequence));
     Optional<String> assignedStopId = actualStopId.filter(id -> !id.equals(staticStopId.get()));
@@ -383,57 +443,259 @@ public final class GtfsRealtimeBuilder {
                 StopScheduleRelationship.NO_DATA,
                 assignedStopId));
       }
-      return;
+      return OptionalLong.empty();
     }
-    long projected = assignment.projectedDelaySeconds().getAsLong();
     long base = serviceDayBase(assignment.serviceDate()).getEpochSecond();
-    updates.put(
-        sequence,
-        new StopTimeUpdate(
-            sequence,
-            Optional.of(
-                new StopTimeEvent(
-                    OptionalInt.empty(),
-                    OptionalLong.of(base + stopTime.get().arrivalSecondOfDay() + projected))),
-            Optional.of(
-                new StopTimeEvent(
-                    OptionalInt.empty(),
-                    OptionalLong.of(base + stopTime.get().departureSecondOfDay() + projected))),
-            stopId,
-            StopScheduleRelationship.SCHEDULED,
-            assignedStopId));
+    long arrival =
+        base + stopTime.arrivalSecondOfDay() + assignment.projectedDelaySeconds().getAsLong();
+    Propagated propagated =
+        propagate(trip, base, index, arrival, true, skipped, firstCancelled, true);
+    for (StopTimeUpdate update : propagated.updates()) {
+      StopTimeUpdate written = update;
+      if (update.stopSequence() == sequence
+          && update.scheduleRelationship() == StopScheduleRelationship.SCHEDULED) {
+        written =
+            new StopTimeUpdate(
+                sequence,
+                update.arrival(),
+                update.departure(),
+                stopId,
+                StopScheduleRelationship.SCHEDULED,
+                assignedStopId);
+      }
+      updates.put(written.stopSequence(), written);
+    }
+    return OptionalLong.of(propagated.lastArrival());
   }
 
   private void addSkippedStops(
       Map<Integer, StopTimeUpdate> updates,
       GtfsFeed.Trip trip,
-      TimetableApi.TrainAssignment assignment,
-      Optional<TimetableApi.CancelledTrip> cancellation) {
-    Set<Integer> skipped =
-        snapshot
-            .skippedStops()
-            .skipped(trip.timetableId(), trip.tripUuid(), assignment.serviceDate());
-    boolean partial =
-        cancellation.isPresent()
-            && cancellation.get().scope()
-                == org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent.Scope.PARTIAL;
+      Set<Integer> skipped,
+      int firstCancelled) {
     for (GtfsFeed.StopTime stopTime : trip.stopTimes()) {
       int sequence = stopTime.stopSequence();
-      boolean cancelledHere =
-          partial && cancellation.get().firstCancelledStopSequence() <= sequence;
-      if (!skipped.contains(sequence) && !cancelledHere) {
+      if (!skipped.contains(sequence) && sequence < firstCancelled) {
         continue;
       }
-      updates.put(
-          sequence,
-          new StopTimeUpdate(
-              sequence,
-              Optional.empty(),
-              Optional.empty(),
-              Optional.of(stopTime.stopId()),
-              StopScheduleRelationship.SKIPPED,
-              Optional.empty()));
+      updates.put(sequence, skippedUpdate(stopTime));
     }
+  }
+
+  /**
+   * 车所在段之后的推算：直通车的后几段接着往后推；交路里接下来的车次，前一趟预计到终点加终点的计划停站晚于表定发车时，按晚开往后推。
+   *
+   * <p>后续车次只看 {@link #FOLLOWING_HORIZON} 之内、而且确实会晚开的：准点的车次不用发更新，前一趟准点后面也就都准点。
+   */
+  private void addDownstream(
+      TimetableApi.TrainAssignment assignment,
+      GtfsFeed.Trip current,
+      long arrivalAtSegmentEnd,
+      List<Entity> downstream) {
+    long arrival = arrivalAtSegmentEnd;
+    long base = serviceDayBase(assignment.serviceDate()).getEpochSecond();
+    Set<Integer> skipped = skippedOf(current, assignment.serviceDate());
+    int firstCancelled = firstCancelledOf(current, assignment.serviceDate());
+    for (GtfsFeed.Trip segment : feed.trips(assignment.timetableId(), assignment.tripCode())) {
+      if (segment.segment() <= current.segment()) {
+        continue;
+      }
+      Propagated propagated =
+          propagate(segment, base, 0, arrival, true, skipped, firstCancelled, true);
+      downstream.add(
+          predictedEntity(
+              segment,
+              assignment.serviceDate(),
+              assignment.trainName(),
+              propagated,
+              OptionalInt.empty()));
+      arrival = propagated.lastArrival();
+    }
+    addFollowing(assignment, arrival, downstream);
+  }
+
+  /**
+   * 车已经停在本趟最后一站（没有下一站了）时它的实际到达：表定到达加上一次到发的偏差。车在终点停站、待命时正是终点站候车的乘客 最想知道下一趟会不会晚开的时候。
+   *
+   * @return 实际到达（epoch 秒）；车不在本趟最后一站、或没有偏差记录时为空
+   */
+  private OptionalLong arrivedAtTripEnd(
+      TimetableApi.TrainAssignment assignment, GtfsFeed.Trip trip) {
+    if (assignment.nextStopSequence().isPresent()
+        || assignment.lastStopSequence().isEmpty()
+        || assignment.currentDelaySeconds().isEmpty()) {
+      return OptionalLong.empty();
+    }
+    List<GtfsFeed.Trip> segments = feed.trips(assignment.timetableId(), assignment.tripCode());
+    List<GtfsFeed.StopTime> stops = trip.stopTimes();
+    if (segments.isEmpty()
+        || !segments.get(segments.size() - 1).id().equals(trip.id())
+        || stops.isEmpty()
+        || stops.get(stops.size() - 1).stopSequence() != assignment.lastStopSequence().get()) {
+      return OptionalLong.empty();
+    }
+    return OptionalLong.of(
+        serviceDayBase(assignment.serviceDate()).getEpochSecond()
+            + stops.get(stops.size() - 1).arrivalSecondOfDay()
+            + assignment.currentDelaySeconds().getAsLong());
+  }
+
+  /**
+   * 交路里接下来的车次：前一趟到最后一个载客站（预计或实际）加准备时间晚于表定发车时，按晚开往后推；最早也不会早于现在。
+   *
+   * @param arrival 前一趟到最后一个载客站的时刻（epoch 秒）
+   */
+  private void addFollowing(
+      TimetableApi.TrainAssignment assignment, long arrival, List<Entity> downstream) {
+    long horizon = now.getEpochSecond() + FOLLOWING_HORIZON.toSeconds();
+    for (GtfsRealtimeSnapshot.FollowingTrip next :
+        snapshot
+            .followingTrips()
+            .following(assignment.timetableId(), assignment.tripCode(), assignment.serviceDate())) {
+      List<GtfsFeed.Trip> segments = feed.trips(assignment.timetableId(), next.tripCode());
+      if (segments.isEmpty() || segments.get(0).stopTimes().isEmpty()) {
+        return;
+      }
+      long nextBase = serviceDayBase(next.serviceDate()).getEpochSecond();
+      long scheduled = nextBase + segments.get(0).stopTimes().get(0).departureSecondOfDay();
+      long ready = Math.max(arrival + next.readySeconds(), now.getEpochSecond());
+      if (ready <= scheduled || scheduled > horizon) {
+        return;
+      }
+      long time = ready;
+      boolean startsWithArrival = false;
+      for (GtfsFeed.Trip segment : segments) {
+        Propagated propagated =
+            propagate(
+                segment, nextBase, 0, time, startsWithArrival, Set.of(), Integer.MAX_VALUE, true);
+        downstream.add(
+            predictedEntity(
+                segment,
+                next.serviceDate(),
+                assignment.trainName(),
+                propagated,
+                startsWithArrival
+                    ? OptionalInt.empty()
+                    : toOptionalInt(OptionalLong.of(ready - scheduled))));
+        time = propagated.lastArrival();
+        startsWithArrival = true;
+      }
+      arrival = time;
+    }
+  }
+
+  private Entity predictedEntity(
+      GtfsFeed.Trip segment,
+      LocalDate serviceDate,
+      String trainName,
+      Propagated propagated,
+      OptionalInt delay) {
+    String id = entityId("tu", segment, serviceDate);
+    TripUpdate update =
+        new TripUpdate(
+            descriptor(segment, serviceDate, TripScheduleRelationship.SCHEDULED),
+            Optional.of(new VehicleDescriptor(trainName, Optional.of(segment.shortName()))),
+            propagated.updates(),
+            now.getEpochSecond(),
+            delay);
+    return new Entity(id, Optional.of(update), Optional.empty(), Optional.empty());
+  }
+
+  /**
+   * 从一段的第 {@code from} 个停靠起往后推预计到发。
+   *
+   * <p>每站：发车 = max(表定发车, 到达 + 表定停站)，按表等点的车不早于表定开出；下一站到达 = 发车 + 表定站间时分。越站或取消的站不停，也不等点。
+   *
+   * @param time {@code startsWithArrival} 为 true 时是第一站的预计到达；为 false 时是车最早能从第一站开出的时刻（始发站只写发车）
+   * @param holdForTimetable 按表等点（不早于表定发车）；按间隔发车的模板车次没有表定时刻，不等点
+   */
+  private static Propagated propagate(
+      GtfsFeed.Trip segment,
+      long base,
+      int from,
+      long time,
+      boolean startsWithArrival,
+      Set<Integer> skipped,
+      int firstCancelled,
+      boolean holdForTimetable) {
+    List<GtfsFeed.StopTime> stops = segment.stopTimes();
+    List<StopTimeUpdate> out = new ArrayList<>();
+    long arrival = time;
+    long lastArrival = time;
+    for (int i = from; i < stops.size(); i++) {
+      GtfsFeed.StopTime stop = stops.get(i);
+      boolean origin = i == from && !startsWithArrival;
+      boolean passing =
+          skipped.contains(stop.stopSequence()) || stop.stopSequence() >= firstCancelled;
+      long scheduledDeparture =
+          holdForTimetable ? base + stop.departureSecondOfDay() : Long.MIN_VALUE;
+      long departure;
+      if (origin) {
+        departure = Math.max(scheduledDeparture, time);
+        arrival = departure;
+      } else if (passing) {
+        departure = arrival;
+      } else {
+        departure =
+            Math.max(
+                scheduledDeparture,
+                arrival + stop.departureSecondOfDay() - stop.arrivalSecondOfDay());
+      }
+      out.add(
+          passing
+              ? skippedUpdate(stop)
+              : new StopTimeUpdate(
+                  stop.stopSequence(),
+                  origin ? Optional.empty() : Optional.of(at(arrival)),
+                  Optional.of(at(departure)),
+                  Optional.of(stop.stopId()),
+                  StopScheduleRelationship.SCHEDULED,
+                  Optional.empty()));
+      lastArrival = arrival;
+      if (i + 1 < stops.size()) {
+        arrival = departure + stops.get(i + 1).arrivalSecondOfDay() - stop.departureSecondOfDay();
+      }
+    }
+    return new Propagated(List.copyOf(out), lastArrival);
+  }
+
+  private static StopTimeEvent at(long epochSecond) {
+    return new StopTimeEvent(OptionalInt.empty(), OptionalLong.of(epochSecond));
+  }
+
+  private static StopTimeUpdate skippedUpdate(GtfsFeed.StopTime stopTime) {
+    return new StopTimeUpdate(
+        stopTime.stopSequence(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.of(stopTime.stopId()),
+        StopScheduleRelationship.SKIPPED,
+        Optional.empty());
+  }
+
+  private static int indexOf(GtfsFeed.Trip trip, int stopSequence) {
+    List<GtfsFeed.StopTime> stops = trip.stopTimes();
+    for (int i = 0; i < stops.size(); i++) {
+      if (stops.get(i).stopSequence() == stopSequence) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private Set<Integer> skippedOf(GtfsFeed.Trip trip, LocalDate serviceDate) {
+    return snapshot.skippedStops().skipped(trip.timetableId(), trip.tripUuid(), serviceDate);
+  }
+
+  /** 半途取消从哪一站起不再停；没有半途取消时为 {@link Integer#MAX_VALUE}。 */
+  private int firstCancelledOf(GtfsFeed.Trip trip, LocalDate serviceDate) {
+    TimetableApi.CancelledTrip cancellation =
+        cancellations.get(new TripKey(trip.tripUuid(), serviceDate));
+    return cancellation != null
+            && cancellation.scope()
+                == org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent.Scope.PARTIAL
+        ? cancellation.firstCancelledStopSequence()
+        : Integer.MAX_VALUE;
   }
 
   private Optional<TripUpdate> cancellationUpdate(
@@ -501,6 +763,109 @@ public final class GtfsRealtimeBuilder {
   // ─────────────────────────────────────────────────────────────────────────────
   // VehiclePositions
   // ─────────────────────────────────────────────────────────────────────────────
+
+  private List<String> sortedTrains() {
+    List<String> names = new ArrayList<>(snapshot.trains().keySet());
+    names.sort(Comparator.naturalOrder());
+    return names;
+  }
+
+  /** 没绑车次、跑在按间隔发车交路上的车所在的模板车次段。 */
+  private Optional<GtfsFeed.Trip> headwayTripOf(TrainRuntimeSnapshot runtime) {
+    return feed.headwayTripForRouteIndex(runtime.routeUuid(), runtime.routeIndex());
+  }
+
+  /**
+   * 按间隔发车的车次（{@code frequencies.txt} 的 {@code exact_times=0}）：{@code
+   * schedule_relationship=UNSCHEDULED}， 起点发车时刻按第一次报出时的推算登记下来，之后不再改（规范要求一经确定不可变）。
+   */
+  private TripDescriptor headwayDescriptor(
+      String train, TrainRuntimeSnapshot runtime, GtfsFeed.Trip trip) {
+    Instant start = starts.pin(train + "|" + trip.id(), proposedStart(runtime, trip));
+    ZonedDateTime local = start.atZone(zone);
+    return new TripDescriptor(
+        Optional.of(trip.id()),
+        Optional.empty(),
+        Optional.of(GtfsTime.timeOfDay(local.toLocalTime().toSecondOfDay())),
+        Optional.of(GtfsTime.date(local.toLocalDate())),
+        TripScheduleRelationship.UNSCHEDULED);
+  }
+
+  /** 推算这一趟从本段首站开出的时刻：现在减去模板里首站到上一个经过的停靠的时分；还没到首站时就是现在。 */
+  private Instant proposedStart(TrainRuntimeSnapshot runtime, GtfsFeed.Trip trip) {
+    int elapsed = 0;
+    int origin = trip.stopTimes().get(0).departureSecondOfDay();
+    for (GtfsFeed.StopTime stop : trip.stopTimes()) {
+      if (stop.stopSequence() <= runtime.routeIndex()) {
+        elapsed = stop.departureSecondOfDay() - origin;
+      }
+    }
+    return now.minusSeconds(Math.max(0, elapsed));
+  }
+
+  /**
+   * 按间隔发车的车：下一站按 ETA，往后按模板站间时分推（没有表定时刻，不等点）。
+   *
+   * <p>同一个模板车次同时有几辆车在跑，实体 ID 带上列车名区分。越过运营终点的回库车不发布。
+   */
+  private Optional<Entity> headwayTripEntity(String train) {
+    if (outOfService(train) || assignmentsByTrain.containsKey(key(train))) {
+      return Optional.empty();
+    }
+    TrainRuntimeSnapshot runtime = snapshot.trains().get(train);
+    if (runtime == null) {
+      return Optional.empty();
+    }
+    Optional<GtfsFeed.Trip> trip = headwayTripOf(runtime);
+    if (trip.isEmpty()) {
+      return Optional.empty();
+    }
+    int index = -1;
+    List<GtfsFeed.StopTime> stops = trip.get().stopTimes();
+    for (int i = 0; i < stops.size(); i++) {
+      if (stops.get(i).stopSequence() > runtime.routeIndex()) {
+        index = i;
+        break;
+      }
+    }
+    if (index < 0) {
+      return Optional.empty();
+    }
+    OptionalLong eta = snapshot.stopEtas().eta(train, stops.get(index).stopSequence());
+    if (eta.isEmpty()) {
+      return Optional.empty();
+    }
+    Propagated propagated =
+        propagate(trip.get(), 0L, index, eta.getAsLong(), true, Set.of(), Integer.MAX_VALUE, false);
+    TripUpdate update =
+        new TripUpdate(
+            headwayDescriptor(train, runtime, trip.get()),
+            Optional.of(new VehicleDescriptor(train, Optional.of(train))),
+            propagated.updates(),
+            now.getEpochSecond(),
+            OptionalInt.empty());
+    String id = "tu:" + trip.get().id() + ":" + train;
+    return Optional.of(new Entity(id, Optional.of(update), Optional.empty(), Optional.empty()));
+  }
+
+  /** 按间隔发车的车在模板里的位置：停在一个停靠上为 STOPPED_AT，否则驶向下一个停靠。 */
+  private static StopProgress headwayProgress(TrainRuntimeSnapshot runtime, GtfsFeed.Trip trip) {
+    int index = runtime.routeIndex();
+    Optional<GtfsFeed.StopTime> here = trip.stopTime(index);
+    if (runtime.dwellRemainingSec().isPresent() && here.isPresent()) {
+      return new StopProgress(
+          OptionalInt.of(index), Optional.of(here.get().stopId()), VehicleStopStatus.STOPPED_AT);
+    }
+    for (GtfsFeed.StopTime stop : trip.stopTimes()) {
+      if (stop.stopSequence() > index) {
+        return new StopProgress(
+            OptionalInt.of(stop.stopSequence()),
+            Optional.of(stop.stopId()),
+            VehicleStopStatus.IN_TRANSIT_TO);
+      }
+    }
+    return StopProgress.none();
+  }
 
   private Optional<TripDescriptor> routeOnlyDescriptor(TrainRuntimeSnapshot runtime) {
     Optional<RouteLineChanges.LineRef> line = lineOf(runtime);
@@ -606,11 +971,37 @@ public final class GtfsRealtimeBuilder {
       return Occupancy.none();
     }
     TrainLoad trainLoad = load.get();
-    int seats = trainLoad.seats();
+    return occupancy(
+        trainLoad.seats(), trainLoad.cars().stream().mapToInt(TrainLoad.Car::occupied).sum());
+  }
+
+  /** 各节车的载客（车头为第 1 节）；读不到车辆模型时为空。没有座位的车（如动力车）照样列出，只是不写载客率。 */
+  private static List<CarriageDetails> carriages(String train, Optional<TrainLoad> load) {
+    if (load.isEmpty()) {
+      return List.of();
+    }
+    List<TrainLoad.Car> cars = load.get().cars();
+    List<CarriageDetails> out = new ArrayList<>(cars.size());
+    for (int i = 0; i < cars.size(); i++) {
+      TrainLoad.Car car = cars.get(i);
+      Occupancy occupancy = occupancy(car.seats(), car.occupied());
+      int sequence = i + 1;
+      out.add(
+          new CarriageDetails(
+              train + "#" + sequence,
+              Optional.of(Integer.toString(sequence)),
+              occupancy.status(),
+              occupancy.percentage(),
+              sequence));
+    }
+    return out;
+  }
+
+  /** 座位数与在座人数换成 GTFS 的载客状态与百分比；没有座位时两者都为空。 */
+  private static Occupancy occupancy(int seats, int occupied) {
     if (seats <= 0) {
       return Occupancy.none();
     }
-    int occupied = trainLoad.cars().stream().mapToInt(TrainLoad.Car::occupied).sum();
     int percentage = Math.max(0, Math.min(100, (int) Math.round(occupied * 100.0 / seats)));
     int vacant = Math.max(0, seats - occupied);
     OccupancyStatus status;
@@ -928,6 +1319,22 @@ public final class GtfsRealtimeBuilder {
                     .flatMap(station -> feed.dynamicStopId(station.id())));
   }
 
+  /**
+   * 此刻在按间隔发车交路上跑的车与它们所在的模板车次（{@link FrequencyStarts} 的键）。登记表按它清理：车离开、换了交路的登记
+   * 随之作废，同一辆车以后再跑这条交路时重新推算起点发车。
+   */
+  public Set<String> headwayKeys() {
+    Set<String> keys = new HashSet<>();
+    for (Map.Entry<String, TrainRuntimeSnapshot> entry : snapshot.trains().entrySet()) {
+      String train = entry.getKey();
+      if (outOfService(train) || assignmentsByTrain.containsKey(key(train))) {
+        continue;
+      }
+      headwayTripOf(entry.getValue()).ifPresent(trip -> keys.add(train + "|" + trip.id()));
+    }
+    return keys;
+  }
+
   /** 列车在这一站已选定的股道；动态站台未选台时为空。 */
   private Optional<String> placedNode(String trainName, int stopIndex) {
     return snapshot.placedStops().placed(trainName, stopIndex);
@@ -951,6 +1358,41 @@ public final class GtfsRealtimeBuilder {
 
   private static String key(String value) {
     return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+  }
+
+  /**
+   * 车所在这一段的更新。
+   *
+   * @param arrivalAtSegmentEnd 推算到这一段终点的预计到达（epoch 秒）；下一站没有预测时为空
+   */
+  private record Run(TripUpdate update, OptionalLong arrivalAtSegmentEnd) {}
+
+  /**
+   * 一段的推算结果。
+   *
+   * @param updates 各站的预计到发（越站、取消的站为 SKIPPED）
+   * @param lastArrival 这一段最后一站的预计到达（epoch 秒）
+   */
+  private record Propagated(List<StopTimeUpdate> updates, long lastArrival) {}
+
+  /**
+   * 按间隔发车车次的起点发车时刻登记：GTFS-Realtime 要求 {@code exact_times=0} 的车次一经报出起点发车时刻就不再变，
+   * 而每次生成都是新的构建器，所以登记放在构建器外面（{@link GtfsRealtimeService}）。
+   */
+  @FunctionalInterface
+  public interface FrequencyStarts {
+
+    /**
+     * @param key 列车与模板车次
+     * @param proposed 这一次推算的起点发车
+     * @return 登记过的时刻；第一次时登记并返回 {@code proposed}
+     */
+    Instant pin(String key, Instant proposed);
+
+    /** 不登记：每次都用这一次的推算（测试与一次性生成）。 */
+    static FrequencyStarts unpinned() {
+      return (key, proposed) -> proposed;
+    }
   }
 
   /** 车次实例键：车次 UUID + 服务日。 */

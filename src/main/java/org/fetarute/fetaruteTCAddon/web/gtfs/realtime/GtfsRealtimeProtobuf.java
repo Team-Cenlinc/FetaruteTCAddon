@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.Alert;
+import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.CarriageDetails;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.Entity;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.EntitySelector;
 import org.fetarute.fetaruteTCAddon.web.gtfs.realtime.GtfsRealtimeFeed.FeedMessage;
@@ -152,6 +153,20 @@ public final class GtfsRealtimeProtobuf {
     if (position.occupancyPercentage().isPresent()) {
       out.uint32(10, position.occupancyPercentage().getAsInt());
     }
+    for (CarriageDetails carriage : position.carriages()) {
+      out.message(11, carriage(carriage));
+    }
+    return out.toByteArray();
+  }
+
+  private static byte[] carriage(CarriageDetails carriage) {
+    Writer out = new Writer();
+    out.string(1, carriage.id());
+    carriage.label().ifPresent(value -> out.string(2, value));
+    carriage.occupancyStatus().ifPresent(value -> out.enumValue(3, value.number()));
+    // 规范：没有数据时为 -1（int32，负数按 10 字节 varint）
+    out.int32(4, carriage.occupancyPercentage().orElse(-1));
+    out.uint32(5, carriage.carriageSequence());
     return out.toByteArray();
   }
 

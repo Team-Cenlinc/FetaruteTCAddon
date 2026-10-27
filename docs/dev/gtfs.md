@@ -34,6 +34,10 @@ web-api:
 | 运营商、线路、车站、车站组 | `StationDirectory#snapshot()` |
 | 已发布时刻表、计划股道、越站 | `TimetableService`（`publishedTimetables`、`plannedPlatform`、`skippedStops`） |
 | 交路的线路归属与停靠表 | `RouteDefinitionCache#entries()` |
+| 按间隔发车的交路与间隔 | `SpawnManager#snapshotPlan()`（有发车间隔、又不受时刻表管辖的出车服务） |
+| 按间隔发车交路的站间时分 | `TimetableTimingCalculator` + `RunCurveModel.Settings#forTimetable`（与编表同一个走行模型），按调度图版本、停靠表与配置缓存 |
+| 交路里接下来的车次 | `TimetableService#publishedTimetables` 的车辆交路；终点的计划停站取交路缓存 |
+| 按间隔发车的车到站预测 | `EtaService#getForTrain`（`EtaTarget.StopIndex`），只对这种车现算 |
 | 股道坐标 | `RailGraphService#snapshotAll()` 里 `STATION` 类型的节点 |
 | 车次绑定、取消 | 公开 API 的 `TimetableApi#listAssignments` / `#cancellations` |
 | 列车位置、速度、载客、停站剩余时间 | `TrainSnapshotStore`（`EtaRuntimeSampler` 在主线程采样） |
@@ -77,6 +81,7 @@ CSV 保留 7 位小数（约 1 cm）；GTFS-RT 的经纬度是 float32。多个�
 
 - **线路**：ACTIVE 与 MAINTENANCE 进 `routes.txt`，PLANNING 不进。
 - **车次**：只取生效中的已发布时刻表；`timetable.enabled=false` 时表只能查、不驱动行车，一个车次都不出。
+- **按间隔发车的交路**：出车计划里有发车间隔、又不受时刻表管辖（按表运行没启用时就是全部）的交路，发布一趟模板车次加 `frequencies.txt`：车次 ID 写 `{S}:{OP}:{LINE}:HEADWAY:{交路代码}`，各段停站时刻从 0 起，全天（0–24 点）按间隔、不按准点（`exact_times=0`）。间隔是线路或交路组的发车基准按交路权重分摊后的值，同一交路有几个出车点时按频率合并；站间时分与编表同一个走行模型，算不出来（交路不在缓存、图上走不通）就不发布。直通运转照样拆段。
 - **交路阶段**：出库、回库交路只有在途中办客时才发布。判据是交路计划里至少有两个停车的车站（STOP/TERMINATE 且有站码）；纯走行、只停一站的车次不进包。
 - **检修线路**：进 `routes.txt`（乘客仍能在图上看到这条线），但不出车次；全线停运由告警表达。
 - **车站**：被车次停靠的车站，以及有非规划线路经过的车站，都发布（设计稿 Q4：没有时刻表的线路「线路和车站照常出」）；`…:DYN` 兜底停靠点只在车站真的有车次停靠时发布。
@@ -138,7 +143,11 @@ zip 的条目顺序固定、条目时刻写死（`ZipEntry#setTimeLocal`），�
 | 直通运转的段 | 运行时进度下标 ≥ 换线站下标时用 `~2` 那一段 |
 | 上一站实际偏差 | `TrainAssignment#currentDelaySeconds` → 上一站的 `departure.delay` |
 | 停站中的车 | 运行时 `dwellRemainingSec` → 上一站 `departure.time = max(now + 剩余秒数, 表定发车)`（按表等点时不会早于表定开出）；既没有停站剩余也没有偏差时不写上一站 |
-| 下一站预计 | `projectedDelaySeconds` → `arrival.time` / `departure.time`（静态时刻 + 偏差） |
+| 下一站预计 | `projectedDelaySeconds` → 到达 = 表定到达 + 偏差，发车 = max(表定发车, 到达 + 表定停站) |
+| 往后各站 | 从下一站起按表定站间时分往后推，每站发车 = max(表定发车, 到达 + 表定停站)：晚点原样往后带，早到的车在站上等点、往后都是准点。表定站间时分与 ETA 用同一个走行模型（编表按运行曲线算），不必每站再算一次路径。越站、取消的站不停也不等点 |
+| 直通车的后几段 | 接着前一段推，各段各发一条（车所在段之后的推算，正在跑的车与取消登记优先） |
+| 交路里接下来的车次 | 前一趟到最后一个载客站的时刻（还在路上时为推算的预计到达，已经停在终点时为表定到达 + 上一次到发偏差）加准备时间（开进折返线的表定时分 + 交路最后一个节点的计划停站，与站牌推算“终点车接着开的那一趟”同一口径），晚于表定发车时按晚开往后推，最早不早于现在：始发站只写发车，`TripUpdate.delay` 是始发晚开的秒数。只看表定发车在 3 小时内的、最多两趟；准点的不发（前一趟准点后面也就准点）。后续车次的 `start_date` 按交路服务日换算，跨零点的那一趟是下一个日历日 |
+| 按间隔发车的车 | 没绑车次、跑在按间隔发车交路上的车：模板车次 + `UNSCHEDULED`，实体 ID 带列车名；下一站按 ETA，往后按模板时分推（没有表定时刻，不等点）。`start_time`/`start_date` 按第一次报出时的推算登记，之后不再变（规范要求），车离开或换了交路时登记随之清掉 |
 | 动态选台 | 只认**已选定**的股道（`EtaService#placedStopNode`；未选台时车次绑定给的是与起始股道同名的占位股道，不算）。实际股道与静态 `stop_id` 不同时只写 `stop_time_properties.assigned_stop_id`、不写 `stop_id`（规范首选；两者都写时必须相同，而实际股道不在这一趟的静态 `stop_times` 里） |
 | 越站 / 半途取消 | 该站 `schedule_relationship=SKIPPED`（越站来自 `TimetableService#skippedStops`）；拆段后某一段一站都不再停时，这一段整段 `CANCELED` |
 | 整趟取消 | `TripDescriptor.schedule_relationship=CANCELED`，拆段的每一段各一条 |
@@ -153,11 +162,11 @@ zip 的条目顺序固定、条目时刻写死（`ZipEntry#setTimeLocal`），�
 | 字段 | 来源 |
 |---|---|
 | `vehicle.id` / `label` | 列车名 / 车次号（没绑车次时用列车名） |
-| `trip` | 绑了车次：`trip_id` + `start_date`；没绑：只填乘客线路 `route_id`；两者都没有时不填 |
+| `trip` | 绑了车次：`trip_id` + `start_date`；跑在按间隔发车交路上：模板车次 + `UNSCHEDULED`（见上）；都不是：只填乘客线路 `route_id`；线路也不明时不填 |
 | `position` | 车头实际坐标与朝向（Q9 选 A，见下），速度取采样速度（格/秒即米/秒） |
 | `current_stop_sequence` / `stop_id` / `current_status` | 正在停站为 `STOPPED_AT`，车头已到下一站节点为 `INCOMING_AT`，其余 `IN_TRANSIT_TO`；只报这一段静态 `stop_times` 里有的停靠（没有车站的停车点不算），`stop_id` 只在已选台时写实际股道 |
 | `occupancy_percentage` / `occupancy_status` | 各节车座位与在座（`TrainLoad`）：空车 `EMPTY`，空位过半年 `MANY_SEATS_AVAILABLE`，有空位 `FEW_SEATS_AVAILABLE`，坐满 `FULL`。车辆模型没有站位容量，100% 表示座位坐满，不代表不能再上车 |
-| `multi_carriage_details` | P3 |
+| `multi_carriage_details` | 每节车一条（车头为第 1 节）：`id` 为 `列车名#节序`、`label` 为节序、各节的载客状态与百分比；没有座位的车（如动力车）照样列出，载客率按规范写 -1 |
 
 **Q9 车头坐标**：`EtaRuntimeSampler` 在主线程采样时顺手记下车头的 `x/y/z` 与沿轨道的运动向量（`RailTracker#getMotionVector`，`TrainRuntimeSnapshot.Position`），HTTP 侧再按上面的投影换成经纬度，`bearing = atan2(dx, −dz)` 归一到 `[0, 360)`（+x 向东为 90°，−z 向北为 0°）；从没动过时不写。不用实体 yaw：TrainCarts 写进实体的是模型朝向，与轨道方向差 90°，车厢反挂、换端时还会再差 180°。不在上一节点与下一节点之间插值：弯道和道岔区会偏离轨道，停站时位置也不在站台上。
 
@@ -199,9 +208,10 @@ protobuf 由 `GtfsRealtimeProtobuf` 手写编码（只用到 varint、长度前�
 
 - `GtfsFeedBuilderTest`：直通拆段、跨零点 `24:xx`、动态站台与计划股道、出入库纯走行过滤、检修/规划线路、上下客、换乘、英文译文、`feed_version` 与 zip 逐字节稳定、相邻换线不拆出一站段。
 - `GtfsRealtimeProtobufTest`：用官方绑定反解码核对三类实体、负偏差、绝对时刻、`assigned_stop_id`、`SKIPPED`/`CANCELED`、多语言文本。
-- `GtfsRealtimeBuilderTest`：运行中车次、换段、越站、停站剩余时间、整趟/半途取消、车辆位置与载客、只带线路的车、公告与线路状况。
+- `GtfsRealtimeBuilderTest`：运行中车次、换段、越站、停站剩余时间、整趟/半途取消、逐站推算与早到等点、直通后一段、交路下一趟晚开、按间隔发车的车（`UNSCHEDULED`、起点发车登记）、车辆位置与各节载客、只带线路的车、公告与线路状况。
+- `GtfsFollowingTripsTest`：交路车次顺序、跨零点的日期换算、终点停站。
 - `WebApiGtfsTest`：zip 的 Content-Type/文件名词/缓存、RT 的两种格式与 400、meta 的版本、数据源为空时 503。
 
 ## 未做（P3）
 
-shapes、frequencies（无时刻表线路）、逐站预测（需要给站牌行加车次身份）、未发车车次的晚点、`multi_carriage_details`、分合编（`DECP`/`COPL`）、多世界坐标。
+shapes、分合编（`DECP`/`COPL`）、多世界坐标。

@@ -46,6 +46,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
  *     stops.txt
  * @param platformPlansVersion 计划股道的内容版本（{@code TimetableService#platformPlansVersion}）；股道计划不在
  *     {@link Timetable} 里， 用版本号让输入 hash 能发现它变了
+ * @param headwayRoutes 按间隔发车、不受时刻表管辖的交路，发布成 {@code frequencies.txt}
  */
 public record GtfsSnapshot(
     Optional<String> serverId,
@@ -63,7 +64,8 @@ public record GtfsSnapshot(
     Map<UUID, GtfsRouteRef> routes,
     GtfsPlatformPlans plannedPlatforms,
     Set<UUID> stationsOfPublishedLines,
-    long platformPlansVersion) {
+    long platformPlansVersion,
+    List<GtfsHeadwayRoute> headwayRoutes) {
 
   public GtfsSnapshot {
     serverId =
@@ -82,6 +84,45 @@ public record GtfsSnapshot(
     plannedPlatforms = plannedPlatforms == null ? GtfsPlatformPlans.none() : plannedPlatforms;
     stationsOfPublishedLines =
         stationsOfPublishedLines == null ? Set.of() : Set.copyOf(stationsOfPublishedLines);
+    headwayRoutes = headwayRoutes == null ? List.of() : List.copyOf(headwayRoutes);
+  }
+
+  /** 兼容调用：没有按间隔发车的交路。 */
+  public GtfsSnapshot(
+      Optional<String> serverId,
+      ZoneId zone,
+      String publisherName,
+      String publisherUrl,
+      Instant generatedAt,
+      boolean timetableEnabled,
+      List<Operator> operators,
+      List<Line> lines,
+      List<StationDirectory.StationEntry> stations,
+      List<StationDirectory.GroupEntry> groups,
+      List<GtfsPlatformNode> platforms,
+      List<Timetable> timetables,
+      Map<UUID, GtfsRouteRef> routes,
+      GtfsPlatformPlans plannedPlatforms,
+      Set<UUID> stationsOfPublishedLines,
+      long platformPlansVersion) {
+    this(
+        serverId,
+        zone,
+        publisherName,
+        publisherUrl,
+        generatedAt,
+        timetableEnabled,
+        operators,
+        lines,
+        stations,
+        groups,
+        platforms,
+        timetables,
+        routes,
+        plannedPlatforms,
+        stationsOfPublishedLines,
+        platformPlansVersion,
+        List.of());
   }
 
   /** 兼容调用：没有额外的「有线路经过」车站与计划股道版本（测试与只关心车次的调用方）。 */

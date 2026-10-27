@@ -6,13 +6,14 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 
 /**
  * 把 {@link GtfsFeed} 排成 GTFS 的各张 CSV 表并打成 zip。
  *
  * <p>表顺序、行顺序与字段写法全部固定：同一个 feed 两次生成逐字节一致。只发布本插件确实有的东西——没有换乘就不写 {@code transfers.txt}，没有英文名就不写
- * {@code translations.txt}；{@code calendar_dates.txt}、{@code frequencies.txt}、{@code shapes.txt}
- * 等留到以后。
+ * {@code translations.txt}；没有按间隔发车的交路就不写 {@code frequencies.txt}；{@code calendar_dates.txt}、{@code
+ * shapes.txt} 等留到以后。
  *
  * <p>时刻写法允许超过 24 点（跨零点的站写 {@code 24:xx:xx}）；{@code stop_sequence} 直接用车次在交路上的节点下标，与实时源的 {@code
  * stop_sequence} 是同一个数。
@@ -65,6 +66,14 @@ public final class GtfsFeedTables {
                   "record_sub_id",
                   "field_value"),
               translations));
+    }
+    List<List<String>> frequencies = frequencies(feed);
+    if (!frequencies.isEmpty()) {
+      tables.add(
+          new GtfsTable(
+              "frequencies",
+              List.of("trip_id", "start_time", "end_time", "headway_secs", "exact_times"),
+              frequencies));
     }
     List<List<String>> transfers = transfers(feed);
     if (!transfers.isEmpty()) {
@@ -285,6 +294,23 @@ public final class GtfsFeedTables {
       return;
     }
     rows.add(List.of(table, field, "en", english, recordId, "", ""));
+  }
+
+  /** 按间隔发车的模板车次：全天按间隔、不按准点（{@code exact_times=0}）。按间隔发车没有运营时段的概念（线路运营中就全天发），所以窗口是 0 点到 24 点。 */
+  private static List<List<String>> frequencies(GtfsFeed feed) {
+    List<List<String>> rows = new ArrayList<>();
+    for (GtfsFeed.Trip trip : feed.trips()) {
+      if (trip.headwaySeconds().isPresent()) {
+        rows.add(
+            List.of(
+                trip.id(),
+                GtfsTime.timeOfDay(0),
+                GtfsTime.timeOfDay(TimetableTrip.SECONDS_PER_DAY),
+                Integer.toString(trip.headwaySeconds().getAsInt()),
+                "0"));
+      }
+    }
+    return rows;
   }
 
   private static List<List<String>> transfers(GtfsFeed feed) {

@@ -221,7 +221,7 @@ final class WebApiViews {
       train.lineCode().ifPresent(value -> row.put("lineCode", value));
       train.routeCode().ifPresent(value -> row.put("routeCode", value));
       train.consist().ifPresent(value -> row.put("consist", value));
-      row.put("inService", !train.outOfService());
+      row.put("inService", !train.outOfService() && !train.beforeService());
       train.currentNode().ifPresent(value -> row.put("currentNode", value));
       train.nextNode().ifPresent(value -> row.put("nextNode", value));
       row.put("speedBlocksPerSecond", round(train.speedBps()));

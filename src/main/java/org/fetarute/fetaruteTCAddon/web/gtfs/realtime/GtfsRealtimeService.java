@@ -77,6 +77,11 @@ public final class GtfsRealtimeService {
   private final Map<String, Long> warnedAt = new ConcurrentHashMap<>();
 
   /**
+   * 按间隔发车车次的起点发车时刻（列车与模板车次 → 时刻）：一经报出就不再变。每次生成车辆位置时只留下这一次还在用的， 车离开、换了交路的登记随之清掉，同一辆车以后再跑这条交路时重新推算。
+   */
+  private final Map<String, Instant> frequencyStarts = new ConcurrentHashMap<>();
+
+  /**
    * @param feeds 静态包服务（提供版本号与 trip/stop 索引）
    * @param source 运行时快照
    * @param clock 时钟
@@ -114,7 +119,14 @@ public final class GtfsRealtimeService {
           source.snapshot(now).orElseGet(() -> GtfsRealtimeSnapshot.empty(now));
       GtfsRealtimeBuilder builder =
           new GtfsRealtimeBuilder(
-              staticFeed.get(), snapshot, now, texts.get(), this::warnThrottled);
+              staticFeed.get(),
+              snapshot,
+              now,
+              texts.get(),
+              this::warnThrottled,
+              (key, proposed) -> frequencyStarts.computeIfAbsent(key, ignored -> proposed));
+      // 不论哪种 feed 都按此刻在跑的车清理：只拉 TripUpdates 的中转也不会让旧登记留下来
+      frequencyStarts.keySet().retainAll(builder.headwayKeys());
       FeedMessage message =
           switch (feed) {
             case TRIP_UPDATES -> builder.tripUpdates();

@@ -101,6 +101,26 @@ final class GtfsSnapshotHash {
       timetables += elementTimetable(timetable);
     }
     h = mix(h, timetables);
+
+    long headway = 0L;
+    for (GtfsHeadwayRoute route : snapshot.headwayRoutes()) {
+      headway += elementHeadway(route);
+    }
+    h = mix(h, headway);
+    return h;
+  }
+
+  private static long elementHeadway(GtfsHeadwayRoute route) {
+    long h = SEED;
+    h = mix(h, route.routeId());
+    h = mix(h, route.headwaySeconds());
+    for (TimetableStop stop : route.stops()) {
+      h = mix(h, stop.stopSequence());
+      h = mix(h, stop.nodeId());
+      h = mix(h, stop.arrivalOffsetSeconds());
+      h = mix(h, stop.departureOffsetSeconds());
+      h = mix(h, stop.passType().name());
+    }
     return h;
   }
 

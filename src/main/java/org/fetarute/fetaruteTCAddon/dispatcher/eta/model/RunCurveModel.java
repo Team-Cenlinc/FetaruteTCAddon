@@ -341,6 +341,26 @@ public final class RunCurveModel implements RunTimeModel {
           fraction);
     }
 
+    /** 编表的兜底速度：配置里的默认速度无效时用。 */
+    public static final double TIMETABLE_FALLBACK_SPEED_BPS = 8.0D;
+
+    /**
+     * 编表的走行参数：与运行时控车、ETA 读同一组配置（{@link #fromConfig}）。编表、参数面板与按间隔发车线路的 GTFS 模板车次共用这一个入口，
+     * 几处算出的站间时分是同一个数。
+     *
+     * @param config 当前配置；为空时（插件未加载配置）退回默认加减速、不做进站限速
+     */
+    public static Settings forTimetable(ConfigManager.ConfigView config) {
+      if (config == null) {
+        return new Settings(
+            SpeedCurve.defaults(),
+            TIMETABLE_FALLBACK_SPEED_BPS,
+            StopApproach.Rule.disabled(),
+            ConfigManager.TimetableSettings.DEFAULT_STATION_STOP_OVERHEAD_SECONDS);
+      }
+      return fromConfig(config, TIMETABLE_FALLBACK_SPEED_BPS);
+    }
+
     /** 换一组加减速，其余不变；{@code replacement} 原样使用，不再乘舒适比例。 */
     public Settings withMotion(SpeedCurve replacement) {
       return new Settings(

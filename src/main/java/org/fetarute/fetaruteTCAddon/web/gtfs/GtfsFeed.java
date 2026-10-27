@@ -202,6 +202,9 @@ public final class GtfsFeed {
    * @param firstStopSequence 本段第一个停靠序号
    * @param lastStopSequence 本段最后一个停靠序号
    * @param stopTimes 本段停站，按 {@code stopSequence} 升序
+   * @param headwaySeconds 按间隔发车的模板车次的发车间隔（{@code frequencies.txt}，{@code exact_times=0}）；
+   *     时刻表车次为空。模板车次的 {@code timetableId} 与 {@code tripUuid} 都是交路 UUID，{@code tripCode}
+   *     是交路代码，各段停站时刻从 0 起
    */
   public record Trip(
       String id,
@@ -218,7 +221,8 @@ public final class GtfsFeed {
       int segment,
       int firstStopSequence,
       int lastStopSequence,
-      List<StopTime> stopTimes) {
+      List<StopTime> stopTimes,
+      OptionalInt headwaySeconds) {
 
     public Trip {
       Objects.requireNonNull(id, "id");
@@ -232,6 +236,12 @@ public final class GtfsFeed {
       tripCode = tripCode == null ? "" : tripCode;
       Objects.requireNonNull(tripUuid, "tripUuid");
       stopTimes = stopTimes == null ? List.of() : List.copyOf(stopTimes);
+      headwaySeconds = headwaySeconds == null ? OptionalInt.empty() : headwaySeconds;
+    }
+
+    /** 是否按间隔发车的模板车次。 */
+    public boolean frequencyBased() {
+      return headwaySeconds.isPresent();
     }
 
     /** 本段是否包含这个停靠序号。 */
@@ -302,6 +312,7 @@ public final class GtfsFeed {
   private final Map<String, String> dynamicStopIdsByStation;
   private final Map<TripKey, List<Trip>> tripsByTimetableCode;
   private final Map<String, Trip> tripsById;
+  private final Map<UUID, List<Trip>> headwayTripsByRoute;
 
   GtfsFeed(
       String version,
@@ -376,6 +387,16 @@ public final class GtfsFeed {
     tripIndex.forEach((key, list) -> frozenTrips.put(key, List.copyOf(list)));
     this.tripsByTimetableCode = Map.copyOf(frozenTrips);
     this.tripsById = Map.copyOf(byId);
+
+    Map<UUID, List<Trip>> headwayIndex = new LinkedHashMap<>();
+    for (Trip trip : this.trips) {
+      if (trip.frequencyBased()) {
+        headwayIndex.computeIfAbsent(trip.timetableId(), k -> new ArrayList<>()).add(trip);
+      }
+    }
+    Map<UUID, List<Trip>> frozenHeadway = new LinkedHashMap<>();
+    headwayIndex.forEach((route, list) -> frozenHeadway.put(route, List.copyOf(list)));
+    this.headwayTripsByRoute = Map.copyOf(frozenHeadway);
   }
 
   /**
@@ -553,7 +574,20 @@ public final class GtfsFeed {
    * @return 对应的段；没有这趟车时为空
    */
   public Optional<Trip> tripForRouteIndex(UUID timetableId, String tripCode, int routeIndex) {
-    List<Trip> segments = trips(timetableId, tripCode);
+    return segmentAt(trips(timetableId, tripCode), routeIndex);
+  }
+
+  /** 按间隔发车的交路的模板车次（拆段后的各段，按分段序号排序）；不是这种交路时为空。 */
+  public List<Trip> headwayTrips(UUID routeId) {
+    return routeId == null ? List.of() : headwayTripsByRoute.getOrDefault(routeId, List.of());
+  }
+
+  /** 同 {@link #tripForRouteIndex}，查按间隔发车的交路的模板车次。 */
+  public Optional<Trip> headwayTripForRouteIndex(UUID routeId, int routeIndex) {
+    return segmentAt(headwayTrips(routeId), routeIndex);
+  }
+
+  private static Optional<Trip> segmentAt(List<Trip> segments, int routeIndex) {
     if (segments.isEmpty()) {
       return Optional.empty();
     }

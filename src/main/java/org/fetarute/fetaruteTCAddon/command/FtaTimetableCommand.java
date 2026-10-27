@@ -34,8 +34,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfiles;
 import org.fetarute.fetaruteTCAddon.dispatcher.consist.ResolvedConsistPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -108,9 +106,6 @@ public final class FtaTimetableCommand {
 
   private static final int SUGGESTION_LIMIT = 20;
   private static final int PAGE_SIZE = 10;
-
-  /** 边未设限速时的兜底速度，与 ETA 模块保持同一口径。 */
-  private static final double FALLBACK_SPEED_BPS = 8.0D;
 
   private final FetaruteTCAddon plugin;
   private final TimetableBuildJobs buildJobs = new TimetableBuildJobs();
@@ -2973,14 +2968,7 @@ public final class FtaTimetableCommand {
    * @param config 当前配置；为空时（插件未加载配置）退回默认加减速、不做进站限速
    */
   static RunCurveModel.Settings runCurveSettings(ConfigManager.ConfigView config) {
-    if (config == null) {
-      return new RunCurveModel.Settings(
-          SpeedCurve.defaults(),
-          FALLBACK_SPEED_BPS,
-          StopApproach.Rule.disabled(),
-          ConfigManager.TimetableSettings.DEFAULT_STATION_STOP_OVERHEAD_SECONDS);
-    }
-    return RunCurveModel.Settings.fromConfig(config, FALLBACK_SPEED_BPS);
+    return RunCurveModel.Settings.forTimetable(config);
   }
 
   /** 找到覆盖这条交路全部节点的调度图快照。 */

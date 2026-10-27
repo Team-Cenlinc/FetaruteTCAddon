@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiFunction;
@@ -40,6 +41,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
  * @param lineStatus 线路运行状况（运营商代码、线路代码）；站台屏没启用时返回空
  * @param skippedStops 越站查询
  * @param placedStops 已选定的实际股道查询（动态站台未选台时为空）
+ * @param followingTrips 同一车辆交路里接下来要跑的车次（推算还没发车的车次会不会晚开）
+ * @param stopEtas 列车到交路某一站的预计到达（按间隔发车的车没有表定时刻，到站预测只能直接问 ETA）
  */
 public record GtfsRealtimeSnapshot(
     Instant generatedAt,
@@ -51,7 +54,63 @@ public record GtfsRealtimeSnapshot(
     List<PidsBulletin> bulletins,
     BiFunction<String, String, Optional<PidsLineStatus>> lineStatus,
     SkippedStopsLookup skippedStops,
-    PlacedStopsLookup placedStops) {
+    PlacedStopsLookup placedStops,
+    FollowingTripsLookup followingTrips,
+    StopEtaLookup stopEtas) {
+
+  /** 没有按站到站预测来源。 */
+  public GtfsRealtimeSnapshot(
+      Instant generatedAt,
+      List<TimetableApi.TrainAssignment> assignments,
+      List<TimetableApi.CancelledTrip> cancellations,
+      Map<String, TrainRuntimeSnapshot> trains,
+      Set<String> outOfServiceTrains,
+      Set<String> beforeServiceTrains,
+      List<PidsBulletin> bulletins,
+      BiFunction<String, String, Optional<PidsLineStatus>> lineStatus,
+      SkippedStopsLookup skippedStops,
+      PlacedStopsLookup placedStops,
+      FollowingTripsLookup followingTrips) {
+    this(
+        generatedAt,
+        assignments,
+        cancellations,
+        trains,
+        outOfServiceTrains,
+        beforeServiceTrains,
+        bulletins,
+        lineStatus,
+        skippedStops,
+        placedStops,
+        followingTrips,
+        StopEtaLookup.none());
+  }
+
+  /** 没有后续车次来源。 */
+  public GtfsRealtimeSnapshot(
+      Instant generatedAt,
+      List<TimetableApi.TrainAssignment> assignments,
+      List<TimetableApi.CancelledTrip> cancellations,
+      Map<String, TrainRuntimeSnapshot> trains,
+      Set<String> outOfServiceTrains,
+      Set<String> beforeServiceTrains,
+      List<PidsBulletin> bulletins,
+      BiFunction<String, String, Optional<PidsLineStatus>> lineStatus,
+      SkippedStopsLookup skippedStops,
+      PlacedStopsLookup placedStops) {
+    this(
+        generatedAt,
+        assignments,
+        cancellations,
+        trains,
+        outOfServiceTrains,
+        beforeServiceTrains,
+        bulletins,
+        lineStatus,
+        skippedStops,
+        placedStops,
+        FollowingTripsLookup.none());
+  }
 
   public GtfsRealtimeSnapshot {
     Objects.requireNonNull(generatedAt, "generatedAt");
@@ -64,6 +123,8 @@ public record GtfsRealtimeSnapshot(
     lineStatus = lineStatus == null ? (operator, line) -> Optional.empty() : lineStatus;
     skippedStops = skippedStops == null ? SkippedStopsLookup.none() : skippedStops;
     placedStops = placedStops == null ? PlacedStopsLookup.none() : placedStops;
+    followingTrips = followingTrips == null ? FollowingTripsLookup.none() : followingTrips;
+    stopEtas = stopEtas == null ? StopEtaLookup.none() : stopEtas;
   }
 
   /** 什么都没起来时的一版空快照：报文仍然合法，只是没有实体。 */
@@ -78,7 +139,9 @@ public record GtfsRealtimeSnapshot(
         List.of(),
         (operator, line) -> Optional.empty(),
         SkippedStopsLookup.none(),
-        PlacedStopsLookup.none());
+        PlacedStopsLookup.none(),
+        FollowingTripsLookup.none(),
+        StopEtaLookup.none());
   }
 
   /** 按车次实例的越站查询。 */
@@ -118,6 +181,61 @@ public record GtfsRealtimeSnapshot(
     /** 没有选台来源：一律为空。 */
     static PlacedStopsLookup none() {
       return (trainName, stopIndex) -> Optional.empty();
+    }
+  }
+
+  /**
+   * 同一车辆交路里，某趟车之后依次要跑的车次（含带客的回库展示车次）。
+   *
+   * <p>用来推算还没发车的车次会不会晚开：前一趟预计到终点，加上终点的计划停站（与站牌推算“终点车接着开的那一趟”同一口径），晚于表定发车就晚开。
+   */
+  @FunctionalInterface
+  public interface FollowingTripsLookup {
+
+    /**
+     * @param timetableId 时刻表
+     * @param tripCode 当前车次号
+     * @param serviceDate 当前车次起点发车所在日期（与车次绑定同一口径）
+     * @return 接下来的车次，按运行先后；不挂交路、或是交路最后一趟时为空
+     */
+    List<FollowingTrip> following(UUID timetableId, String tripCode, LocalDate serviceDate);
+
+    /** 没有交路来源：一律为空。 */
+    static FollowingTripsLookup none() {
+      return (timetableId, tripCode, serviceDate) -> List.of();
+    }
+  }
+
+  /**
+   * 交路里的一趟后续车次。
+   *
+   * @param tripCode 车次号
+   * @param serviceDate 它起点发车所在日期：跨零点时与前一趟不是同一天（换算过交路服务日，不能直接沿用前一趟的日期）
+   * @param readySeconds 前一趟到最后一个载客站之后，车最早多久能开出这一趟：开进折返线的表定时分（交路在终点站结束时为 0）加交路最后一个节点的计划停站
+   */
+  public record FollowingTrip(String tripCode, LocalDate serviceDate, int readySeconds) {
+
+    public FollowingTrip {
+      Objects.requireNonNull(tripCode, "tripCode");
+      Objects.requireNonNull(serviceDate, "serviceDate");
+      readySeconds = Math.max(0, readySeconds);
+    }
+  }
+
+  /** 列车到交路某一站的预计到达。 */
+  @FunctionalInterface
+  public interface StopEtaLookup {
+
+    /**
+     * @param trainName 列车名
+     * @param stopIndex 交路节点的 0 起下标
+     * @return 预计到达（epoch 秒）；算不出时为空
+     */
+    OptionalLong eta(String trainName, int stopIndex);
+
+    /** 没有到站预测来源：一律为空。 */
+    static StopEtaLookup none() {
+      return (trainName, stopIndex) -> OptionalLong.empty();
     }
   }
 }

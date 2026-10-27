@@ -197,6 +197,32 @@ public final class GtfsTestFixtures {
         Set.of(STATION_RVS));
   }
 
+  /** 交路 WS-1 按间隔发车时的发车间隔（秒）。 */
+  public static final int HEADWAY_SECONDS = 300;
+
+  /** 同一现场，另把交路 WS-1 当作按间隔发车的交路（模板车次与时刻表车次并存）。 */
+  public static GtfsSnapshot headwaySnapshot() {
+    GtfsSnapshot base = snapshot();
+    return new GtfsSnapshot(
+        base.serverId(),
+        base.zone(),
+        base.publisherName(),
+        base.publisherUrl(),
+        base.generatedAt(),
+        base.timetableEnabled(),
+        base.operators(),
+        base.lines(),
+        base.stations(),
+        base.groups(),
+        base.platforms(),
+        base.timetables(),
+        base.routes(),
+        base.plannedPlatforms(),
+        base.stationsOfPublishedLines(),
+        base.platformPlansVersion(),
+        List.of(new GtfsHeadwayRoute(ROUTE_WS, HEADWAY_SECONDS, throughPlan().stops())));
+  }
+
   /** 现场静态包。 */
   public static GtfsFeed feed() {
     return GtfsFeedBuilder.build(snapshot());

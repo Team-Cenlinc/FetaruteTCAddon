@@ -188,7 +188,20 @@ class GtfsRealtimeProtobufTest {
                         VehicleStopStatus.STOPPED_AT,
                         TIMESTAMP,
                         Optional.of(OccupancyStatus.FULL),
-                        OptionalInt.of(100))),
+                        OptionalInt.of(100),
+                        List.of(
+                            new GtfsRealtimeFeed.CarriageDetails(
+                                "TRAIN-1#1",
+                                Optional.of("1"),
+                                Optional.of(OccupancyStatus.FULL),
+                                OptionalInt.of(100),
+                                1),
+                            new GtfsRealtimeFeed.CarriageDetails(
+                                "TRAIN-1#2",
+                                Optional.of("2"),
+                                Optional.empty(),
+                                OptionalInt.empty(),
+                                2)))),
                 Optional.empty()));
 
     GtfsRealtime.FeedMessage decoded =
@@ -207,6 +220,16 @@ class GtfsRealtimeProtobufTest {
     assertEquals(GtfsRealtime.VehiclePosition.OccupancyStatus.FULL, position.getOccupancyStatus());
     assertEquals(100, position.getOccupancyPercentage());
     assertEquals("TRAIN-1", position.getVehicle().getId());
+    assertEquals(2, position.getMultiCarriageDetailsCount());
+    GtfsRealtime.VehiclePosition.CarriageDetails head = position.getMultiCarriageDetails(0);
+    assertEquals("TRAIN-1#1", head.getId());
+    assertEquals("1", head.getLabel());
+    assertEquals(1, head.getCarriageSequence());
+    assertEquals(100, head.getOccupancyPercentage());
+    assertEquals(GtfsRealtime.VehiclePosition.OccupancyStatus.FULL, head.getOccupancyStatus());
+    GtfsRealtime.VehiclePosition.CarriageDetails engine = position.getMultiCarriageDetails(1);
+    assertEquals(-1, engine.getOccupancyPercentage(), "没有座位的车按规范写 -1");
+    assertEquals(2, engine.getCarriageSequence());
     assertEquals(
         GtfsRealtime.VehiclePosition.VehicleStopStatus.INCOMING_AT,
         vehicle(decoded, "vp:TRAIN-2").getCurrentStatus(),

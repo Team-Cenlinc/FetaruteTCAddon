@@ -101,6 +101,8 @@ public final class GtfsRealtimeFeed {
   public enum TripScheduleRelationship {
     /** 按静态时刻表运行（允许晚点）。 */
     SCHEDULED(0),
+    /** 按间隔发车、没有表定时刻（{@code frequencies.txt} 的 {@code exact_times=0}）。 */
+    UNSCHEDULED(2),
     /** 整趟取消。 */
     CANCELED(3);
 
@@ -170,7 +172,11 @@ public final class GtfsRealtimeFeed {
     }
   }
 
-  /** VehiclePosition：一列车此刻的位置与载客。 */
+  /**
+   * VehiclePosition：一列车此刻的位置与载客。
+   *
+   * @param carriages 各节车的载客（{@code multi_carriage_details}，车头在前）；读不到车辆模型时为空
+   */
   public record VehiclePosition(
       Optional<TripDescriptor> trip,
       Optional<VehicleDescriptor> vehicle,
@@ -180,7 +186,32 @@ public final class GtfsRealtimeFeed {
       VehicleStopStatus currentStatus,
       long timestamp,
       Optional<OccupancyStatus> occupancyStatus,
-      OptionalInt occupancyPercentage) {
+      OptionalInt occupancyPercentage,
+      List<CarriageDetails> carriages) {
+
+    /** 不带各节车载客。 */
+    public VehiclePosition(
+        Optional<TripDescriptor> trip,
+        Optional<VehicleDescriptor> vehicle,
+        Optional<Position> position,
+        OptionalInt currentStopSequence,
+        Optional<String> stopId,
+        VehicleStopStatus currentStatus,
+        long timestamp,
+        Optional<OccupancyStatus> occupancyStatus,
+        OptionalInt occupancyPercentage) {
+      this(
+          trip,
+          vehicle,
+          position,
+          currentStopSequence,
+          stopId,
+          currentStatus,
+          timestamp,
+          occupancyStatus,
+          occupancyPercentage,
+          List.of());
+    }
 
     public VehiclePosition {
       trip = trip == null ? Optional.empty() : trip;
@@ -191,6 +222,34 @@ public final class GtfsRealtimeFeed {
       currentStatus = currentStatus == null ? VehicleStopStatus.IN_TRANSIT_TO : currentStatus;
       occupancyStatus = occupancyStatus == null ? Optional.empty() : occupancyStatus;
       occupancyPercentage = occupancyPercentage == null ? OptionalInt.empty() : occupancyPercentage;
+      carriages = carriages == null ? List.of() : List.copyOf(carriages);
+    }
+  }
+
+  /**
+   * 一节车的载客（{@code CarriageDetails}）。
+   *
+   * @param id 车厢 ID：{@code 列车名#节序}，同一列车里唯一
+   * @param label 给乘客看的车厢号（节序）
+   * @param occupancyStatus 载客状态；这节车没有座位时为空
+   * @param occupancyPercentage 在座占座位的百分比；这节车没有座位时为空（编码时写规范的 -1）
+   * @param carriageSequence 节序，车头为 1
+   */
+  public record CarriageDetails(
+      String id,
+      Optional<String> label,
+      Optional<OccupancyStatus> occupancyStatus,
+      OptionalInt occupancyPercentage,
+      int carriageSequence) {
+
+    public CarriageDetails {
+      Objects.requireNonNull(id, "id");
+      label = label == null ? Optional.empty() : label;
+      occupancyStatus = occupancyStatus == null ? Optional.empty() : occupancyStatus;
+      occupancyPercentage = occupancyPercentage == null ? OptionalInt.empty() : occupancyPercentage;
+      if (carriageSequence < 1) {
+        throw new IllegalArgumentException("carriageSequence 从 1 起: " + carriageSequence);
+      }
     }
   }
 

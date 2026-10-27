@@ -306,14 +306,53 @@ public final class GtfsFeedBuilder {
   }
 
   private void buildTrips(List<GtfsFeed.Trip> trips, List<GtfsFeed.Transfer> transfers) {
-    if (!snapshot.timetableEnabled()) {
+    if (snapshot.timetableEnabled()) {
+      List<Timetable> timetables = new ArrayList<>(snapshot.timetables());
+      timetables.sort(Comparator.comparing(Timetable::code).thenComparing(t -> t.id().toString()));
+      for (Timetable timetable : timetables) {
+        addTimetableTrips(timetable, trips, transfers);
+      }
+    }
+    for (GtfsHeadwayRoute headway : snapshot.headwayRoutes()) {
+      addHeadwayTrip(headway, trips, transfers);
+    }
+  }
+
+  /**
+   * 按间隔发车的交路：发布一趟模板车次（各段停站时刻从 0 起），配 {@code frequencies.txt} 全天按间隔、不按准点（{@code exact_times=0}）。
+   *
+   * <p>只发布运营中线路的交路；车次 ID 的第三段写 {@code HEADWAY}，车次号是交路代码。
+   */
+  private void addHeadwayTrip(
+      GtfsHeadwayRoute headway, List<GtfsFeed.Trip> trips, List<GtfsFeed.Transfer> transfers) {
+    GtfsRouteRef route = snapshot.routes().get(headway.routeId());
+    if (route == null) {
+      warn("headway-route:" + headway.routeId(), "按间隔发车的交路 " + headway.routeId() + " 不在交路缓存里，已跳过");
       return;
     }
-    List<Timetable> timetables = new ArrayList<>(snapshot.timetables());
-    timetables.sort(Comparator.comparing(Timetable::code).thenComparing(t -> t.id().toString()));
-    for (Timetable timetable : timetables) {
-      addTimetableTrips(timetable, trips, transfers);
+    if (!runnableLine(new RouteLineChanges.LineRef(route.operatorCode(), route.lineCode()))) {
+      return;
     }
+    buildRun(
+        new RunSpec(
+            route.routeCode(),
+            route.operatorCode(),
+            route.lineCode(),
+            GtfsIds.HEADWAY,
+            route.routeCode(),
+            headway.routeId(),
+            GtfsIds.HEADWAY,
+            route.routeCode(),
+            headway.routeId(),
+            headway.routeId(),
+            Optional.empty(),
+            0,
+            OptionalInt.of(headway.headwaySeconds()),
+            ""),
+        headway.stops(),
+        route,
+        trips,
+        transfers);
   }
 
   private void addTimetableTrips(
@@ -359,18 +398,49 @@ public final class GtfsFeedBuilder {
           "车次 " + trip.tripCode() + "（" + timetable.code() + "）没有交路时分，已跳过");
       return;
     }
-    TimetableRoutePlan plan = planOptional.get();
     GtfsRouteRef route = snapshot.routes().get(trip.routeId());
     if (route == null) {
       warn("trip-route:" + trip.routeId(), "交路 " + trip.routeId() + " 不在交路缓存里，已跳过它的车次");
       return;
     }
+    buildRun(
+        new RunSpec(
+            trip.tripCode() + "（" + timetable.code() + "）",
+            managementOperator.code(),
+            managementLine.code(),
+            timetable.code(),
+            trip.tripCode(),
+            timetable.id(),
+            timetable.code(),
+            trip.tripCode(),
+            trip.id(),
+            trip.routeId(),
+            Optional.of(trip.id()),
+            trip.departureSecondOfDay(),
+            OptionalInt.empty(),
+            trip.tripCode()),
+        planOptional.get().stops(),
+        route,
+        trips,
+        transfers);
+  }
+
+  /**
+   * 把一趟车（时刻表车次或模板车次）按停车的车站排成 GTFS 车次：直通运转在换线站拆段，动态站台按计划股道或 {@code …:DYN}。
+   *
+   * @param planStops 交路各节点的到发偏移（相对起点发车）
+   */
+  private void buildRun(
+      RunSpec spec,
+      List<TimetableStop> planStops,
+      GtfsRouteRef route,
+      List<GtfsFeed.Trip> trips,
+      List<GtfsFeed.Transfer> transfers) {
     List<RouteStop> routeStops = route.stops();
-    List<TimetableStop> planStops = plan.stops();
     boolean aligned = routeStops.size() == planStops.size();
     if (!aligned) {
       warn(
-          "trip-stops-mismatch:" + trip.routeId(),
+          "trip-stops-mismatch:" + spec.routeId(),
           "交路 " + route.routeCode() + " 的停靠表与时刻表不一致，换线按交路自身线路处理");
     }
     List<RouteLineChanges.LineRef> linesByIndex =
@@ -384,7 +454,8 @@ public final class GtfsFeedBuilder {
         continue;
       }
       boolean dynamic = dynamicStop(routeStops, aligned, stop);
-      Optional<StationStop> resolved = resolveStationStop(stop, trip, dynamic);
+      Optional<StationStop> resolved =
+          resolveStationStop(stop, spec.routeId(), spec.label(), dynamic);
       if (resolved.isPresent()) {
         stationStops.add(resolved.get());
       }
@@ -411,7 +482,8 @@ public final class GtfsFeedBuilder {
     List<Integer> boundaries = boundaries(linesAt);
     Map<Integer, String> stopIds = new HashMap<>();
     for (StationStop stationStop : stationStops) {
-      stopIds.put(stationStop.stop().stopSequence(), resolveStopId(trip, stationStop));
+      stopIds.put(
+          stationStop.stop().stopSequence(), resolveStopId(spec.plannedTripId(), stationStop));
     }
     List<Segment> segments = segments(stationStops, linesAt, boundaries);
     List<GtfsFeed.Trip> built = new ArrayList<>(segments.size());
@@ -420,11 +492,16 @@ public final class GtfsFeedBuilder {
       List<GtfsFeed.StopTime> stopTimes = new ArrayList<>(segment.stops().size());
       boolean firstSegment = index == 0;
       boolean lastSegment = index == segments.size() - 1;
+      // 模板车次的每一段都从 0 起：frequencies.txt 只用停站之间的相对时分
+      int shift =
+          spec.headway().isPresent()
+              ? -segment.stops().get(0).stop().arrivalOffsetSeconds()
+              : spec.startSecond();
       for (int k = 0; k < segment.stops().size(); k++) {
         StationStop stationStop = segment.stops().get(k);
         TimetableStop stop = stationStop.stop();
-        int arrival = trip.departureSecondOfDay() + stop.arrivalOffsetSeconds();
-        int departure = trip.departureSecondOfDay() + stop.departureOffsetSeconds();
+        int arrival = shift + stop.arrivalOffsetSeconds();
+        int departure = shift + stop.departureOffsetSeconds();
         int dropOff = firstSegment && k == 0 ? 1 : 0;
         int pickup = lastSegment && k == segment.stops().size() - 1 ? 1 : 0;
         stopTimes.add(
@@ -437,35 +514,29 @@ public final class GtfsFeedBuilder {
                 dropOff));
       }
       if (!timeOrdered(stopTimes)) {
-        warn(
-            "trip-time-order:" + trip.id(),
-            "车次 " + trip.tripCode() + "（" + timetable.code() + "）的站间时分倒退，已跳过");
+        warn("trip-time-order:" + spec.tripUuid(), "车次 " + spec.label() + " 的站间时分倒退，已跳过");
         return;
       }
       String segmentId =
-          ids.trip(
-              managementOperator.code(),
-              managementLine.code(),
-              timetable.code(),
-              trip.tripCode(),
-              index);
+          ids.trip(spec.idOperator(), spec.idLine(), spec.idTimetable(), spec.idTrip(), index);
       built.add(
           new GtfsFeed.Trip(
               segmentId,
               ids.route(segment.line().operatorCode(), segment.line().lineCode()),
               ids.service(),
-              trip.tripCode(),
+              spec.shortName(),
               headsign.primary(),
               headsign.secondary(),
               stopTimes.get(0).departureSecondOfDay(),
-              timetable.id(),
-              timetable.code(),
-              trip.tripCode(),
-              trip.id(),
+              spec.timetableId(),
+              spec.timetableCode(),
+              spec.tripCode(),
+              spec.tripUuid(),
               index,
               segment.stops().get(0).stop().stopSequence(),
               segment.stops().get(segment.stops().size() - 1).stop().stopSequence(),
-              stopTimes));
+              stopTimes,
+              spec.headway()));
     }
     for (int index = 0; index + 1 < built.size(); index++) {
       StationStop boundary =
@@ -574,15 +645,15 @@ public final class GtfsFeedBuilder {
   }
 
   private Optional<StationStop> resolveStationStop(
-      TimetableStop stop, TimetableTrip trip, boolean dynamic) {
+      TimetableStop stop, UUID routeId, String label, boolean dynamic) {
     Optional<StationRef> ref =
         stop.nodeId()
             .flatMap(RouteTerminals::stationRefOfNode)
-            .or(() -> stop.stationCode().flatMap(code -> stationRefOfCode(code, trip)));
+            .or(() -> stop.stationCode().flatMap(code -> stationRefOfCode(code, routeId)));
     if (ref.isEmpty()) {
       warn(
           "stop-ref:" + stop.stopSequence(),
-          "车次 " + trip.tripCode() + " 的第 " + stop.stopSequence() + " 站解析不出车站，已跳过");
+          "车次 " + label + " 的第 " + stop.stopSequence() + " 站解析不出车站，已跳过");
       return Optional.empty();
     }
     String key = stationKey(ref.get().operatorCode(), ref.get().stationCode());
@@ -604,8 +675,8 @@ public final class GtfsFeedBuilder {
   }
 
   /** 停靠点没有节点 ID 时的兜底：按站码在本运营商的车站里找。 */
-  private Optional<StationRef> stationRefOfCode(String stationCode, TimetableTrip trip) {
-    GtfsRouteRef route = snapshot.routes().get(trip.routeId());
+  private Optional<StationRef> stationRefOfCode(String stationCode, UUID routeId) {
+    GtfsRouteRef route = snapshot.routes().get(routeId);
     if (route == null) {
       return Optional.empty();
     }
@@ -624,11 +695,15 @@ public final class GtfsFeedBuilder {
    *
    * <p>解析的同时登记「这座车站被停靠」「这条股道要发布」，车站的其余股道在生成 stops.txt 时一并补上。
    */
-  private String resolveStopId(TimetableTrip trip, StationStop stationStop) {
+  private String resolveStopId(Optional<UUID> plannedTripId, StationStop stationStop) {
     usedStations.putIfAbsent(stationStop.stationKey(), stationStop.entry());
     tripServedStations.add(stationStop.stationKey());
     Optional<String> planned =
-        snapshot.plannedPlatforms().plannedPlatform(trip.id(), stationStop.stop().stopSequence());
+        plannedTripId.flatMap(
+            tripId ->
+                snapshot
+                    .plannedPlatforms()
+                    .plannedPlatform(tripId, stationStop.stop().stopSequence()));
     if (planned.isPresent()) {
       String plannedNode = planned.get().trim();
       Optional<StationRef> ref = RouteTerminals.stationRefOfNode(plannedNode);
@@ -919,6 +994,40 @@ public final class GtfsFeedBuilder {
       StationDirectory.StationEntry entry,
       String stationKey,
       boolean dynamic) {}
+
+  /**
+   * 一趟要发布的车。
+   *
+   * @param label 告警里的称呼
+   * @param idOperator 车次 ID 第一段（时刻表的运营商；模板车次为交路的运营商）
+   * @param idLine 车次 ID 第二段（时刻表所属线路；模板车次为交路的线路）
+   * @param idTimetable 车次 ID 第三段（时刻表代码；模板车次为 {@code HEADWAY}）
+   * @param idTrip 车次 ID 第四段（车次号；模板车次为交路代码）
+   * @param timetableId 写进 {@link GtfsFeed.Trip#timetableId()}（模板车次为交路 UUID）
+   * @param timetableCode 时刻表代码
+   * @param tripCode 车次号
+   * @param tripUuid 车次 UUID（模板车次为交路 UUID）
+   * @param routeId 交路
+   * @param plannedTripId 查计划股道用的车次；模板车次没有计划股道
+   * @param startSecond 起点发车当日秒数
+   * @param headway 模板车次的发车间隔
+   * @param shortName {@code trip_short_name}
+   */
+  private record RunSpec(
+      String label,
+      String idOperator,
+      String idLine,
+      String idTimetable,
+      String idTrip,
+      UUID timetableId,
+      String timetableCode,
+      String tripCode,
+      UUID tripUuid,
+      UUID routeId,
+      Optional<UUID> plannedTripId,
+      int startSecond,
+      OptionalInt headway,
+      String shortName) {}
 
   /** 车次终点显示：中文主文案与可选英文。 */
   private record Headsign(String primary, Optional<String> secondary) {}

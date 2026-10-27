@@ -122,6 +122,8 @@ public final class TrainApiImpl implements TrainApi {
                     RouteTerminals.outOfService(
                         r.route().operationType(), stops, snap.routeIndex()))
             .orElse(false);
+    boolean beforeService =
+        record.isPresent() && RouteTerminals.beforeService(stops, snap.routeIndex());
 
     // 获取进度信息
     Optional<String> nextNode = Optional.empty();
@@ -172,7 +174,8 @@ public final class TrainApiImpl implements TrainApi {
         currentLine.map(RouteLineChanges.LineRef::operatorCode),
         currentLine.map(RouteLineChanges.LineRef::lineCode),
         outOfService,
-        snap.consist());
+        snap.consist(),
+        beforeService);
   }
 
   /** 列车当前对乘客显示的线路（{@link RouteLineChanges#current}：线路标签优先，否则为交路本身的线路），按主数据的写法给出。 */
