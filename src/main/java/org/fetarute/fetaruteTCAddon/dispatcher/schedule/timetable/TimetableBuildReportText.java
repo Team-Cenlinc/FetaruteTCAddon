@@ -576,6 +576,28 @@ public final class TimetableBuildReportText {
    *
    * @param conflictsAtTarget 目标间隔下让不掉的那些冲突（可吸收的运行时自己会让，点名它们会指错地方）
    */
+  /** 降低间隔裕量就排得开时的提示：给出试到的最大可行值，不替用户改。 */
+  public static String separationHint(int currentSeconds, int feasibleSeconds) {
+    return "提示：间隔裕量从 "
+        + currentSeconds
+        + "s 降到 "
+        + feasibleSeconds
+        + "s 时，同样的间隔与参数可以排开（已按 "
+        + feasibleSeconds
+        + "s 完整构建确认，没有让不掉的冲突）；要用就带 --separation "
+        + feasibleSeconds
+        + " 重排";
+  }
+
+  /** 降低间隔裕量也排不开时的提示：冲突不是裕量造成的。 */
+  public static String separationHintNone(int currentSeconds, int lowestSeconds) {
+    return "提示：间隔裕量从 "
+        + currentSeconds
+        + "s 一路降到 "
+        + lowestSeconds
+        + "s 也排不开，冲突与裕量无关，要从间隔、折返或站台股道上找原因";
+  }
+
   /** 间隔由运行计划书的时段给定、不放宽时排不开的一句话。 */
   public static String describePlannedIntervalsFailure(
       TimetableConflictChecker.Report conflictsAtTarget) {

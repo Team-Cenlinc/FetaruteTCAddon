@@ -847,6 +847,10 @@ class TimetableBuilderTest {
     assertTrue(
         result.warnings().stream().anyMatch(text -> text.contains("放宽到 300s 的范围内没有找到")),
         () -> result.warnings().toString());
+    // 单股道加折返是结构性的：降间隔裕量也排不开，失败原因要说清这一点，而不是让人去调裕量。
+    assertTrue(
+        result.warnings().stream().anyMatch(text -> text.contains("冲突与裕量无关")),
+        () -> result.warnings().toString());
   }
 
   /** 排得干净的表两类残余都为空：分类不会凭空造出残余。 */

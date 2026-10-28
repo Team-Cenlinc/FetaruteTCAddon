@@ -28,6 +28,7 @@ public final class TimetableBuildProgress {
     TARGET("按目标间隔编排"),
     RELAX("放宽间隔搜索"),
     TIGHTEN("逐组收紧"),
+    SEPARATION("试更小的间隔裕量"),
     PLATFORMS("排计划站台与量瓶颈"),
     REPORT("汇报与保存");
 

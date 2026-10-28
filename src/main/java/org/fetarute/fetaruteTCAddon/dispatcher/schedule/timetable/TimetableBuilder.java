@@ -374,6 +374,7 @@ public final class TimetableBuilder {
           reasons.addAll(
               TimetableBuildReportText.describeUnabsorbable(
                   afterCancel.orElse(target).unabsorbable(), options.serviceStartSecondOfDay()));
+          separationHint(prepared, input, options, builtAt).ifPresent(hint -> reasons.add(1, hint));
           return new Built(
               targetFailure(String.join("\n", reasons), prepared, target),
               Optional.of(prepared),
@@ -416,6 +417,7 @@ public final class TimetableBuilder {
           reasons.addAll(
               TimetableBuildReportText.describeUnabsorbable(
                   target.unabsorbable(), options.serviceStartSecondOfDay()));
+          separationHint(prepared, input, options, builtAt).ifPresent(hint -> reasons.add(1, hint));
           return new Built(
               targetFailure(String.join("\n", reasons), prepared, target),
               Optional.of(prepared),
@@ -1760,8 +1762,11 @@ public final class TimetableBuilder {
   }
 
   /**
-   * 严格模式取消让不掉的班次：目标间隔（喂车多停也试过）仍有不可吸收残余时，按残余的顺序取第一处里要等的那一班（后车）取消， 在已选的相位上重排一次、重新分类，直到干净，或取消数到 {@code
+   * 严格模式取消让不掉的班次：目标间隔仍有不可吸收残余时，按残余的顺序取第一处里要等的那一班（后车）取消， 在已选的相位上重排一次、重新分类，直到干净，或取消数到 {@code
    * --max-cancel} 上限。
+   *
+   * <p>取消了一班、让不掉的残余却没有变少（预订表重新落位后冲突挪到了别处，甚至更多）时，这一班放回去、记为无效，换下一处去试；
+   * 试的次数至多是上限的两倍。不这样做，取消会一路越撤越多，最后报的残余比没撤时还多。
    *
    * <p>取消发生在相位选择与完整窗口复核之后，不回头改相位：相位层"不拿取消换冲突"比的是相位候选，这里是相位定了之后拿掉个别班次。
    * 后车不是运营班次（出入库走行、待命、带客回库班）或已经取消过时取对方；两方都取消不了就看下一处，一处也取消不了就停。
@@ -1781,10 +1786,14 @@ public final class TimetableBuilder {
     Map<CancelSlot, String> targetCodes = new HashMap<>();
     target.slotByCode().forEach((code, slot) -> targetCodes.put(slot, code));
     Map<CancelSlot, Cancelled> cancelled = new LinkedHashMap<>();
+    Set<CancelSlot> useless = new HashSet<>();
     Attempt current = target;
     int count = 0;
-    while (!current.clean() && cancelled.size() < limit) {
-      Optional<Cancelled> found = nextCancel(current, cancelled.keySet());
+    int tries = 0;
+    while (!current.clean() && cancelled.size() < limit && tries < 2 * limit) {
+      Set<CancelSlot> skip = new HashSet<>(cancelled.keySet());
+      skip.addAll(useless);
+      Optional<Cancelled> found = nextCancel(current, skip);
       if (found.isEmpty()) {
         break;
       }
@@ -1794,6 +1803,7 @@ public final class TimetableBuilder {
               targetCodes.getOrDefault(found.get().slot(), found.get().tripCode()),
               found.get().cause());
       cancelled.put(next.slot(), next);
+      tries++;
       detail("严格模式取消让不掉的班次：第 " + cancelled.size() + " 班（上限 " + limit + "）");
       progress.trial(TimetableBuildProgress.Trial.CANCEL_RETRY);
       Attempt retried;
@@ -1805,6 +1815,11 @@ public final class TimetableBuilder {
         cancelled.remove(next.slot());
         break;
       }
+      if (retried.unabsorbable().size() >= current.unabsorbable().size()) {
+        cancelled.remove(next.slot());
+        useless.add(next.slot());
+        continue;
+      }
       current = retried;
       count = Math.max(cancelled.size(), current.dropped().size() - target.dropped().size());
       if (count > limit) {
@@ -1812,6 +1827,52 @@ public final class TimetableBuilder {
       }
     }
     return new Cancellation(current, List.copyOf(cancelled.values()), count);
+  }
+
+  /** 试更小的间隔裕量时每次往下减几秒。 */
+  static final int SEPARATION_PROBE_STEP = 5;
+
+  /** 试更小的间隔裕量时最多试几档（不含当前值）：每档一次周期层求解加一次完整构建。 */
+  static final int SEPARATION_PROBE_LIMIT = 5;
+
+  /**
+   * 目标表排不开时，按 {@link #SEPARATION_PROBE_STEP} 秒一档往下试间隔裕量，找最大的、周期层排得开且按它完整构建没有让不掉冲突的那一档，
+   * 写进失败原因，由用户决定要不要用。不自动降：裕量是用户定的运行余量，降不降是取舍，不是编表能替用户做的事。
+   *
+   * <p>每档都完整构建，以它为准：周期层每圈剩一两班接不上车时，派车照样排得开，只看周期层会漏掉能用的那一档。 全部试完都不行时也给一句，说明冲突与裕量无关。裕量已经是一档以内时不试。
+   */
+  private Optional<String> separationHint(
+      Prepared prepared, BuildInput input, TimetableBuildOptions options, Instant builtAt) {
+    int current = separationOf(options);
+    if (current < SEPARATION_PROBE_STEP) {
+      return Optional.empty();
+    }
+    stage(TimetableBuildProgress.Stage.SEPARATION);
+    int lowest = current;
+    for (int step = 1; step <= SEPARATION_PROBE_LIMIT; step++) {
+      int candidate = current - step * SEPARATION_PROBE_STEP;
+      if (candidate < 0) {
+        break;
+      }
+      lowest = candidate;
+      detail("间隔裕量试 " + candidate + "s");
+      TimetableBuildOptions at = options.withSeparation(Duration.ofSeconds(candidate));
+      for (Supplier<Solved> supplier : solveRegimes(prepared, input, at)) {
+        try {
+          Solved solved = supplier.get();
+          Attempt attempt =
+              attemptAtPhases(solved.prepared(), at, solved.input(), builtAt, solved.phases());
+          if (attempt.clean()) {
+            return Optional.of(TimetableBuildReportText.separationHint(current, candidate));
+          }
+        } catch (BuildFailure | PeriodicSolver.HyperperiodTooLong failure) {
+          // 这一档本身构建不了：当作不行，试下一档。
+        }
+      }
+    }
+    return lowest < current
+        ? Optional.of(TimetableBuildReportText.separationHintNone(current, lowest))
+        : Optional.empty();
   }
 
   /** 下一班取消谁：按残余的顺序，先后车、再对方；只取本表的运营班次，已经取消过的与定点班次跳过。 */
@@ -1873,7 +1934,7 @@ public final class TimetableBuilder {
         target.conflicts().conflicts(),
         target.absorbable(),
         target.unabsorbable(),
-        List.of());
+        target.phaseNotes());
   }
 
   /** 首站带 CRET 指令：列车在这条 route 上从车库实体化，与发车侧 {@code startsWithCret} 判法一致。 */

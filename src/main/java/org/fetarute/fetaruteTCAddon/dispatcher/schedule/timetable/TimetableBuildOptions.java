@@ -570,6 +570,27 @@ public record TimetableBuildOptions(
         schedule);
   }
 
+  /** 换一个间隔裕量，其余不变。 */
+  public TimetableBuildOptions withSeparation(Duration nextSeparation) {
+    return new TimetableBuildOptions(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        nextSeparation,
+        strictConflicts,
+        groupIntervals,
+        repair,
+        following,
+        recoveryMinDwellSeconds,
+        maxCancelTrips,
+        holdMaxSeconds,
+        schedule);
+  }
+
   /** 换一组跟车规则，其余不变。 */
   public TimetableBuildOptions withFollowing(Following nextFollowing) {
     return new TimetableBuildOptions(

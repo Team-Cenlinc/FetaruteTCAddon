@@ -346,7 +346,7 @@ public record TimetableBuildResult(
    * @param conflictsAtTarget 目标间隔下的全部冲突
    * @param absorbable 其中运行时能让的残余
    * @param unabsorbable 其中让不掉的残余——构建失败就是因为它们
-   * @param resourcePhaseNotes 目标间隔那次构建第三层选了哪些相位、预算够不够
+   * @param resourcePhaseNotes 目标间隔那次构建周期层的结论（超周期、是否排开、多停）
    */
   public static TimetableBuildResult failure(
       String reason,
