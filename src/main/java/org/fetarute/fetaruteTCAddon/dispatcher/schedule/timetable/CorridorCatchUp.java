@@ -69,7 +69,8 @@ final class CorridorCatchUp {
       BlockingTimes.Trajectories trajectories) {
     this.profiles = profiles == null ? Map.of() : profiles;
     this.index = index == null ? TimetableConflictChecker.GraphIndex.of(null) : index;
-    this.footprints = new TimetableConflictChecker.Footprints(this.index);
+    // 共线段按占用格对齐；闭塞时间由 following 另算，不能再用足迹里的闭塞格。
+    this.footprints = new TimetableConflictChecker.Footprints(this.index.withoutBlocking());
     this.separation = Math.max(0, separation);
     this.following = following == null ? TimetableBuildOptions.Following.NONE : following;
     this.trajectories = trajectories == null ? BlockingTimes.Trajectories.NONE : trajectories;

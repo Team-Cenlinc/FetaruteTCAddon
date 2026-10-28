@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
@@ -46,28 +45,26 @@ class TimetableBuilderStubTerminalTest {
           new int[] {50, 10, 100, 100, 50},
           new double[] {10.0, 10.0, 10.0, 10.0, 10.0});
 
-  /** 串行后 X 上没有任何冲突；报告里有它的端点行；往返对锚定了相位；慢车之后的 RB 偏离了网格。 */
+  /**
+   * 单股道端点 X 的站台上没有任何冲突：周期层把经过它的折返在环上错开。A:1 也是单股道，每 4 班换一次车要先回库再出库，目标间隔装不下这段换车， 换车的延后会沿单线区间 A:2–X
+   * 传开（那是区间，不是 X 的站台），所以成品表回退到装得下的间隔，且不留让不掉的冲突。
+   */
   @Test
-  void stubTerminalIsCleanAfterSerialization() {
+  void stubTerminalIsClean() {
     TimetableBuildResult result = build(180);
 
     assertTrue(result.success(), () -> result.warnings().toString());
     assertTrue(
-        result.phaseNotes().stream().anyMatch(note -> note.contains("锚定")),
-        () -> result.phaseNotes().toString());
-    assertTrue(
-        result.conflictsAtTarget().stream().noneMatch(c -> c.resource().contains("OP:S:X")),
+        result.conflictsAtTarget().stream()
+            .noneMatch(
+                c ->
+                    c.kind() == TimetableConflictChecker.Kind.PLATFORM
+                        && c.resource().contains("OP:S:X")),
         () -> result.conflictsAtTarget().toString());
-    assertEquals(1, result.terminals().size());
-    assertEquals("OP:S:X", result.terminals().get(0).group());
-    assertTrue(result.terminals().get(0).visits() > 0);
-    assertFalse(result.shifts().isEmpty(), "慢车到得晚，续班锚在车上，必有班次偏离网格");
-    assertTrue(
-        result.shifts().stream()
-            .anyMatch(s -> s.reason() == TerminalSerializer.Shift.Reason.ANCHORED_TO_VEHICLE));
+    assertTrue(result.unabsorbable().isEmpty(), () -> result.unabsorbable().toString());
   }
 
-  /** 两次 build 逐字段相等：实际时刻、车次号、主键、偏离清单、端点报告。 */
+  /** 两次 build 逐字段相等：实际时刻、车次号、主键、偏离清单。 */
   @Test
   void serializedBuildIsDeterministic() {
     TimetableBuildResult first = build(180);
@@ -77,7 +74,6 @@ class TimetableBuilderStubTerminalTest {
     assertEquals(
         first.timetable().orElseThrow().duties(), second.timetable().orElseThrow().duties());
     assertEquals(first.shifts(), second.shifts());
-    assertEquals(first.terminals(), second.terminals());
   }
 
   /** 车次号按实际发车顺序：同 route 的 001 永远早于 002，主键由车次号派生。 */

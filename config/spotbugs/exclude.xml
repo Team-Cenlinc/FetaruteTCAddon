@@ -434,6 +434,10 @@
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetablePlanRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
@@ -514,6 +518,11 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaConsistCommand"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaTimetablePlanCommand"/>
+        <Method name="giveBook"/>
         <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
     </Match>
     <Match>

@@ -51,7 +51,7 @@ class TimetableBuilderNeighborsTest {
     NeighborTimetable neighbor = neighborAt(300);
     TimetableBuildResult result =
         build(
-            new TimetableBuilder(new TimetableTimingCalculator(), Map.of(), false),
+            new TimetableBuilder(),
             List.of(neighbor),
             300,
             TimetableBuildOptions.Repair.none(),
@@ -95,7 +95,7 @@ class TimetableBuilderNeighborsTest {
     assertFalse(result.headwayRelaxed(), "让车装得下，不该放宽");
     assertEquals(600, result.effectiveHeadwaySeconds());
     assertTrue(result.conflictsAtTarget().isEmpty(), () -> result.conflictsAtTarget().toString());
-    assertFalse(result.yields().isEmpty());
+    // 周期层把邻表折进环里先避开它；还要让的只能是给邻表让、且不超过让车上限。
     assertTrue(
         result.yields().stream()
             .allMatch(
@@ -103,25 +103,9 @@ class TimetableBuilderNeighborsTest {
                     yield.external()
                         && yield.firstOwner().equals(Optional.of(NEIGHBOR))
                         && yield.waitSeconds() <= 300));
-    // 邻表被记为影响过我的表：让车也算接触。
     assertEquals(1, result.neighbors().size());
-    assertTrue(result.neighbors().get(0).conflictsAtTarget() >= 1);
     assertEquals(1, result.baselines().size());
     assertEquals(neighbor.timetableId(), result.baselines().get(0).neighborTimetableId());
-  }
-
-  /** 快车错峰的候选编表器不放宽：上面那种让车装不下、要放宽才排得开的，候选直接失败（被淘汰），而不是去搜放宽。 */
-  @Test
-  void aStaggerCandidateFailsInsteadOfRelaxing() {
-    TimetableBuildResult result =
-        build(
-            new TimetableBuilder(new TimetableTimingCalculator(), Map.of(), false),
-            List.of(neighborAcrossPhaseCandidates()),
-            600,
-            new TimetableBuildOptions.Repair(Duration.ofSeconds(5), Duration.ofSeconds(300)),
-            false);
-
-    assertFalse(result.success(), () -> result.warnings().toString());
   }
 
   /** 严格模式只对真冲突失败：只有让车的表照常成表。 */
@@ -135,16 +119,12 @@ class TimetableBuilderNeighborsTest {
             true);
 
     assertTrue(result.success(), () -> result.warnings().toString());
-    assertFalse(result.yields().isEmpty());
     assertTrue(result.conflictsAtTarget().isEmpty());
   }
 
-  /**
-   * 让车上限装不下且所有相位都撞车时回到放宽：上限 5 秒，零偏移要让 40 秒，相位候选（粗档与细档）也都要让超过 5 秒，目标 600 下全是真冲突； 放宽之后差的那几秒又能让了——
-   * 搜索找的是"让车装得下"的最小间隔。邻表的运行在冲突记录里一动不动；基线记下了对方。
-   */
+  /** 让车上限只有 5 秒：周期层把邻表折进环里，相位直接避开它，表上的让车不超过上限；邻表的运行在冲突记录里一动不动，基线记下了对方。 */
   @Test
-  void externalConflictOverMaxWaitRelaxesMyHeadwayAndNeverMovesTheNeighbor() {
+  void aTightYieldLimitIsMetWithoutEverMovingTheNeighbor() {
     NeighborTimetable neighbor = neighborAcrossPhaseCandidates();
 
     TimetableBuildResult result =
@@ -155,14 +135,9 @@ class TimetableBuilderNeighborsTest {
             false);
 
     assertTrue(result.success(), () -> result.warnings().toString());
-    assertTrue(result.headwayRelaxed(), "目标 600s 的全部相位与邻表撞上，必须放宽");
     assertTrue(
         result.yields().stream().allMatch(yield -> yield.waitSeconds() <= 5),
         () -> result.yields().toString());
-    assertTrue(
-        result.effectiveHeadwaySeconds() >= 610,
-        () -> String.valueOf(result.effectiveHeadwaySeconds()));
-    assertFalse(result.externalConflictsAtTarget().isEmpty());
     assertTrue(
         result.externalConflictsAtTarget().stream()
             .allMatch(c -> c.otherOwner().map(NEIGHBOR::equals).orElse(false)),
@@ -177,13 +152,9 @@ class TimetableBuilderNeighborsTest {
     }
     assertEquals(1, result.neighbors().size());
     assertEquals(NEIGHBOR, result.neighbors().get(0).displayCode());
-    assertTrue(result.neighbors().get(0).conflictsAtTarget() >= 1);
     assertEquals(1, result.baselines().size());
     assertEquals(neighbor.timetableId(), result.baselines().get(0).neighborTimetableId());
     assertEquals(neighbor.updatedAt(), result.baselines().get(0).neighborUpdatedAt());
-    assertTrue(
-        result.warnings().stream().anyMatch(text -> text.contains("已发布邻表的冲突")),
-        () -> result.warnings().toString());
   }
 
   /** 没有邻表时结果与旧行为一致：无外部冲突、无基线。 */

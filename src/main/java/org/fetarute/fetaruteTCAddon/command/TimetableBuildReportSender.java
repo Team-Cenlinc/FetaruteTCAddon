@@ -1,11 +1,9 @@
 package org.fetarute.fetaruteTCAddon.command;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.command.CommandSender;
@@ -168,18 +166,6 @@ final class TimetableBuildReportSender {
       sender.sendMessage(Component.text("    " + line, NamedTextColor.DARK_GRAY));
     }
     for (String line :
-        TimetableBuildReportText.describeTerminals(
-            result.terminals(), result.shifts(), options.dutyLimits().turnaround())) {
-      sender.sendMessage(
-          Component.text(
-              "  " + line, line.contains("超过 100%") ? NamedTextColor.YELLOW : NamedTextColor.GRAY));
-    }
-    for (String line : TimetableBuildReportText.describeThroats(result.throats())) {
-      sender.sendMessage(
-          Component.text(
-              "  " + line, line.contains("超过 100%") ? NamedTextColor.YELLOW : NamedTextColor.GRAY));
-    }
-    for (String line :
         TimetableBuildReportText.describeBottlenecks(
             result.capacity(), options.serviceStartSecondOfDay())) {
       sender.sendMessage(
@@ -331,7 +317,7 @@ final class TimetableBuildReportSender {
    * @param saved 已落库的表，与 {@code lines} 同序
    * @param lineArg 命令里线路参数的写法（逗号分隔）
    * @param options 本次构建参数，重建命令要用
-   * @param result 构建结果，决定给不给「重建」「写回 baseline」「用快车错峰重建」几个按钮
+   * @param result 构建结果，决定给不给「重建」「写回 baseline」几个按钮
    */
   void sendSavedActions(
       List<ResolvedLine> lines,
@@ -417,68 +403,6 @@ final class TimetableBuildReportSender {
                         "把这个交路组的 baselineSec 改成放宽后的间隔，下次不传 --headway 也是它")));
       }
     }
-    rapidStaggerHint(options, result)
-        .ifPresent(
-            hint ->
-                sender.sendMessage(
-                    Component.text("  快车在共线段被慢车拖住 ", NamedTextColor.GRAY)
-                        .append(
-                            CommandUx.suggestAction(
-                                "[用快车错峰重建]",
-                                rebuildCommand(first, lineArg, saved.get(0), options, result)
-                                    + " --rapid-stagger"
-                                    + staggerMinutesArgument(options),
-                                hint))));
-  }
-
-  /**
-   * 「用快车错峰重建」按钮的悬停说明：成品表上有快车被慢车拖住、而这次没有搜过错峰时才给——没开错峰，或开了但原表已放宽而没搜。
-   *
-   * <p>重建命令沿用「按放宽后的间隔重建」那一条（各组按实际间隔写成 {@code --group-headway}），再带上 {@code --rapid-stagger}：
-   * 错峰只在目标间隔下比，放宽过的表按放宽后的间隔重编才搜得动。
-   */
-  static Optional<String> rapidStaggerHint(
-      TimetableBuildOptions options, TimetableBuildResult result) {
-    return rapidStaggerHint(options.rapidStagger(), result.headwayRelaxed(), result.rapidCatchUp());
-  }
-
-  /**
-   * 同上，只看三样：这次开没开错峰、目标间隔放没放宽、快车损失多少。
-   *
-   * @param staggered 这次带了 {@code --rapid-stagger}
-   * @param relaxed 目标间隔被放宽了（开了错峰也只试了加长折返）
-   * @param catchUp 成品表上快车被拖住与在表里让车等待的合计
-   */
-  static Optional<String> rapidStaggerHint(
-      boolean staggered, boolean relaxed, TimetableBuildResult.CatchUp catchUp) {
-    if (catchUp.lost() <= 0L || (staggered && !relaxed)) {
-      return Optional.empty();
-    }
-    List<String> lost = new ArrayList<>();
-    if (catchUp.seconds() > 0L) {
-      lost.add(
-          String.format(
-              Locale.ROOT, "快车 %d 班在共线段被慢车拖住，共 %d 秒", catchUp.trips(), catchUp.seconds()));
-    }
-    if (catchUp.held() > 0L) {
-      lost.add(String.format(Locale.ROOT, "快车在表里让车等待共 %d 秒", catchUp.held()));
-    }
-    String how = relaxed ? "目标间隔排不开、已放宽，按放宽后的间隔带 --rapid-stagger 重新编表：" : "带 --rapid-stagger 重新编表：";
-    return Optional.of(
-        String.join("，", lost)
-            + "。"
-            + how
-            + "逐个试原地折返端加长折返、快车组整组平移与快车中途加停，"
-            + "在班次不少、最多多用一列车、不放宽间隔、不把普通车往后推的前提下挑快车与全网让车损失最少的方案；需要几分钟（默认约 "
-            + TimetableBuildOptions.DEFAULT_STAGGER_MINUTES
-            + " 分钟上限，到点后编完当时那一批就停，--stagger-minutes 可改），在后台线程运行，不阻塞服务器主线程");
-  }
-
-  /** 重建命令里的错峰时限：与缺省值不同才写出。 */
-  static String staggerMinutesArgument(TimetableBuildOptions options) {
-    return options.staggerMinutes() == TimetableBuildOptions.DEFAULT_STAGGER_MINUTES
-        ? ""
-        : " --stagger-minutes " + options.staggerMinutes();
   }
 
   /** 线路参数在可点命令里的写法：几条线时加双引号，客户端不认不带引号的逗号，整条命令会标红发不出去。 */

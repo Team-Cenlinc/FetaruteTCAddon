@@ -520,7 +520,7 @@ class TimetableBuilderTest {
   /**
    * 目标 headway 排出来有冲突时，回退到最小可行间隔并明确报告，回退后的表本身没有冲突。
    *
-   * <p>单线 DEP–A–B–C、终点 C 只有一股道、折返 180 秒：120 秒一班时，前一辆车还在 C 折返、后一辆已经到了； 回库车还要从待命在 A
+   * <p>单线 DEP–A–B–C、终点 C 只有一股道、折返 180 秒，往返一趟连折返要四百多秒：240 秒一班时，前一辆车还在 C 折返、后一辆已经到了； 回库车还要从待命在 A
    * 的下一辆车身上碾过去。这些都是物理冲突，不是模型的偏好。
    */
   @Test
@@ -529,7 +529,7 @@ class TimetableBuilderTest {
         new TimetableBuildOptions(
             5 * 3600,
             7 * 3600,
-            Duration.ofSeconds(120),
+            Duration.ofSeconds(240),
             Duration.ofSeconds(0),
             new VehicleDutyPlanner.Limits(1, 5400, 180),
             "",
@@ -538,8 +538,8 @@ class TimetableBuilderTest {
     TimetableBuildResult result = build(twoRouteFixture(1, 1), options);
 
     assertTrue(result.success(), () -> result.warnings().toString());
-    assertTrue(result.headwayRelaxed(), "目标 120s 必然冲突，应当回退");
-    assertEquals(120, result.targetHeadwaySeconds());
+    assertTrue(result.headwayRelaxed(), "目标 240s 必然冲突，应当回退");
+    assertEquals(240, result.targetHeadwaySeconds());
     assertTrue(
         result.effectiveHeadwaySeconds() >= 210,
         () -> "至少要等前车折返完: " + result.effectiveHeadwaySeconds());
@@ -623,82 +623,6 @@ class TimetableBuilderTest {
                   .describe(seconds -> TimetableCsvExporter.clock(5 * 3600 + seconds))),
           reason);
     }
-  }
-
-  /** 相位候选在截短的窗口里试排：窗口末端一个最长交路寿命之内的取消是窗口人为截断造成的，不参与"不拿取消换冲突"的比较； 窗口没截短时末端就是真的计划窗口末端，全都算。 */
-  @Test
-  void truncatedTrialWindowIgnoresDropsNearItsEnd() {
-    TimetableBuildOptions full =
-        new TimetableBuildOptions(
-            0,
-            86_400,
-            Duration.ofSeconds(300),
-            Duration.ofSeconds(20),
-            new VehicleDutyPlanner.Limits(8, 7200, TurnaroundTable.none(), 300),
-            "",
-            ZONE);
-    TimetableBuildOptions trial =
-        new TimetableBuildOptions(
-            0,
-            14_400,
-            Duration.ofSeconds(300),
-            Duration.ofSeconds(20),
-            full.dutyLimits(),
-            "",
-            ZONE);
-
-    int maxWait = trial.repair().maxWaitSeconds();
-    assertEquals(
-        14_400 - 900 - maxWait - 240, TimetableBuilder.completionTailFrom(full, trial, 900, 240));
-    assertEquals(14_400 - 900 - maxWait, TimetableBuilder.completionTailFrom(full, trial, 900, 0));
-    assertEquals(Integer.MAX_VALUE, TimetableBuilder.completionTailFrom(full, full, 900, 240));
-    assertEquals(2, TimetableBuilder.droppedBefore(List.of(100, 7199, 7200, 14_000), 7200));
-    assertEquals(
-        4, TimetableBuilder.droppedBefore(List.of(100, 7199, 7200, 14_000), Integer.MAX_VALUE));
-  }
-
-  /** 残余按方向计数只认本表那一边：邻表车次号与本表某一班相同时，不把邻表的冲突记到本表那个方向上。 */
-  @Test
-  void residualsByDirectionIgnoreTheNeighbourSide() {
-    TimetableConflictChecker.Conflict external =
-        new TimetableConflictChecker.Conflict(
-            TimetableConflictChecker.Kind.TRACK,
-            "edge:A~B",
-            "R1-001",
-            "R2-001",
-            0,
-            10,
-            5,
-            15,
-            Optional.of("CO/OP/L2/TT"),
-            Optional.empty());
-    TimetableConflictChecker.Conflict internal =
-        new TimetableConflictChecker.Conflict(
-            TimetableConflictChecker.Kind.TRACK,
-            "edge:B~C",
-            "R1-001",
-            "R2-001",
-            0,
-            10,
-            5,
-            15,
-            Optional.empty(),
-            Optional.empty());
-    List<ConflictAbsorption.Residual> residuals =
-        List.of(
-            new ConflictAbsorption.Residual(
-                external, "R2-001", 15, Optional.empty(), 0, ConflictAbsorption.Verdict.EXTERNAL),
-            new ConflictAbsorption.Residual(
-                internal,
-                "R2-001",
-                35,
-                Optional.empty(),
-                0,
-                ConflictAbsorption.Verdict.OVER_MAX_WAIT));
-
-    assertEquals(
-        Map.of("D1", 1, "D2", 2),
-        TimetableBuilder.countByDirection(residuals, Map.of("R1-001", "D1", "R2-001", "D2")));
   }
 
   /** 宽松的间隔下没有冲突，表按目标间隔成表。 */
@@ -877,7 +801,7 @@ class TimetableBuilderTest {
   /**
    * 残余分两类，且两类之和就是报告里的冲突数——成功判据只看不可吸收那一类。
    *
-   * <p>DEP-A-B-C 是单股道夹具，120 s 目标下的冲突都压在容量 1 的端点上，运行时在那里等就是堵死岔线， 所以它们必须被判成不可吸收，并因此触发放宽。这条同时钉住"分类接进了
+   * <p>DEP-A-B-C 是单股道夹具，240 s 目标下的冲突都压在容量 1 的端点上，运行时在那里等就是堵死岔线， 所以它们必须被判成不可吸收，并因此触发放宽。这条同时钉住"分类接进了
    * build"与"判据没被放松成永远可吸收"。
    */
   @Test
@@ -886,7 +810,7 @@ class TimetableBuilderTest {
         new TimetableBuildOptions(
             5 * 3600,
             7 * 3600,
-            Duration.ofSeconds(120),
+            Duration.ofSeconds(240),
             Duration.ofSeconds(0),
             new VehicleDutyPlanner.Limits(1, 5400, 180),
             "",
@@ -904,6 +828,31 @@ class TimetableBuilderTest {
         "不可吸收那一列里不能混进可吸收的");
   }
 
+  /** 非严格模式至多放宽到目标的两倍：同一夹具要四百多秒才排得开，150 秒的目标照实报失败，不发一张间隔面目全非的表。 */
+  @Test
+  void relaxingBeyondTwiceTheTargetFailsClearly() {
+    TimetableBuildOptions options =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(150),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE);
+
+    TimetableBuildResult result = build(twoRouteFixture(1, 1), options);
+
+    assertFalse(result.success());
+    assertTrue(
+        result.warnings().stream().anyMatch(text -> text.contains("放宽到 300s 的范围内没有找到")),
+        () -> result.warnings().toString());
+    // 单股道加折返是结构性的：降间隔裕量也排不开，失败原因要说清这一点，而不是让人去调裕量。
+    assertTrue(
+        result.warnings().stream().anyMatch(text -> text.contains("冲突与裕量无关")),
+        () -> result.warnings().toString());
+  }
+
   /** 排得干净的表两类残余都为空：分类不会凭空造出残余。 */
   @Test
   void aCleanTableHasNoResidualsAtAll() {
@@ -915,8 +864,51 @@ class TimetableBuilderTest {
     assertTrue(result.unabsorbable().isEmpty());
   }
 
+  /** 并行只影响快慢：放宽（周期层扫描提前并行解）、严格取消（逐班试排成批编）与裕量提示（各档成批编）三条路径上， 4 个线程与串行编出的结果逐字段相同。 */
+  @Test
+  void parallelBuildMatchesSerial() {
+    TimetableBuildOptions relaxing =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(240),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE);
+    TimetableBuildOptions strict =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE,
+            Duration.ofSeconds(30),
+            true);
+    TimetableBuildOptions beyondTwice = relaxing.withHeadway(Duration.ofSeconds(150));
+    for (TimetableBuildOptions options : List.of(relaxing, strict, beyondTwice)) {
+      TimetableBuildResult serial = build(twoRouteFixture(1, 1), options, 1);
+      TimetableBuildResult parallel = build(twoRouteFixture(1, 1), options, 4);
+      assertEquals(serial.success(), parallel.success());
+      assertEquals(serial.warnings(), parallel.warnings());
+      assertEquals(serial.timetable(), parallel.timetable());
+      assertEquals(serial.effectiveHeadwaySeconds(), parallel.effectiveHeadwaySeconds());
+      assertEquals(serial.unabsorbable(), parallel.unabsorbable());
+      assertEquals(serial.absorbable(), parallel.absorbable());
+      assertEquals(serial.droppedTrips(), parallel.droppedTrips());
+      assertEquals(serial, parallel);
+    }
+  }
+
   private static TimetableBuildResult build(Fixture fixture, TimetableBuildOptions options) {
-    return new TimetableBuilder()
+    return build(fixture, options, 1);
+  }
+
+  private static TimetableBuildResult build(
+      Fixture fixture, TimetableBuildOptions options, int threads) {
+    return new TimetableBuilder(TimetableBuildProgress.untracked(), threads)
         .build(
             new TimetableBuilder.BuildInput(
                 TIMETABLE,

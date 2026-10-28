@@ -9,8 +9,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.command.CommandSender;
@@ -49,9 +47,6 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 public final class FtaConsistCommand {
 
   private static final int SUGGESTION_LIMIT = 20;
-  private static final int BOOK_MAX_LINES_PER_PAGE = 11;
-  private static final PlainTextComponentSerializer PLAIN_TEXT =
-      PlainTextComponentSerializer.plainText();
 
   private final FetaruteTCAddon plugin;
   private final NamespacedKey bookMarkerKey;
@@ -341,7 +336,7 @@ public final class FtaConsistCommand {
       return;
     }
     Scope scope = scopeOpt.get();
-    List<String> lines = readBookLines(meta);
+    List<String> lines = EditorBooks.lines(meta);
     ConsistPlanBook.Parsed parsed = ConsistPlanBook.parse(lines);
     if (!parsed.ok()) {
       sender.sendMessage(locale.component("command.consist.define.problem-header"));
@@ -536,7 +531,7 @@ public final class FtaConsistCommand {
           List.of(
               locale.component("command.consist.editor.book.lore-1"),
               locale.component("command.consist.editor.book.lore-2")));
-      meta.pages(toPages(lines));
+      meta.pages(EditorBooks.pages(lines));
       book.setItemMeta(meta);
     }
     if (!sender.getInventory().addItem(book).isEmpty()) {
@@ -557,40 +552,6 @@ public final class FtaConsistCommand {
       return Optional.empty();
     }
     return Optional.of(new BookContext(company, operator, name));
-  }
-
-  private static List<String> readBookLines(BookMeta meta) {
-    List<String> lines = new ArrayList<>();
-    for (Component page : meta.pages()) {
-      String text = page == null ? "" : PLAIN_TEXT.serialize(page);
-      if (text.isEmpty()) {
-        continue;
-      }
-      lines.addAll(List.of(text.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1)));
-    }
-    return lines;
-  }
-
-  private static List<Component> toPages(List<String> lines) {
-    List<Component> pages = new ArrayList<>();
-    StringBuilder page = new StringBuilder();
-    int count = 0;
-    for (String line : lines) {
-      if (count >= BOOK_MAX_LINES_PER_PAGE) {
-        pages.add(Component.text(page.toString()));
-        page = new StringBuilder();
-        count = 0;
-      }
-      if (count > 0) {
-        page.append('\n');
-      }
-      page.append(line == null ? "" : line);
-      count++;
-    }
-    if (page.length() > 0 || pages.isEmpty()) {
-      pages.add(Component.text(page.toString()));
-    }
-    return pages;
   }
 
   private static String emptyTemplateKey() {

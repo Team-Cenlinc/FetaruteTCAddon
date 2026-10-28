@@ -372,16 +372,16 @@ public final class TimetableBuildReportText {
   }
 
   /** 让车一行："让车: N 处已写进表（涉及 M 班，最长 +Xs，--max-wait Ys；对邻表 K 处）"。 */
-  public static String describeYields(List<ResourceRepair.Yield> yields, int maxWaitSeconds) {
+  public static String describeYields(List<TripYield> yields, int maxWaitSeconds) {
     if (maxWaitSeconds <= 0) {
       return "让车: 关闭（--max-wait 0），冲突原样上报";
     }
     if (yields == null || yields.isEmpty()) {
       return "让车: 无（--max-wait " + maxWaitSeconds + "s）";
     }
-    long external = yields.stream().filter(ResourceRepair.Yield::external).count();
+    long external = yields.stream().filter(TripYield::external).count();
     Map<TimetableConflictChecker.Kind, Integer> byKind = new LinkedHashMap<>();
-    for (ResourceRepair.Yield yield : yields) {
+    for (TripYield yield : yields) {
       byKind.merge(yield.kind(), 1, Integer::sum);
     }
     StringBuilder kinds = new StringBuilder();
@@ -396,8 +396,8 @@ public final class TimetableBuildReportText {
         Locale.ROOT,
         "让车: %d 处已写进表（涉及 %d 班，最长 +%ds，--max-wait %ds）%s；%s",
         yields.size(),
-        ResourceRepair.movedCount(yields),
-        ResourceRepair.maxWait(yields),
+        TripYield.movedCount(yields),
+        TripYield.maxWait(yields),
         maxWaitSeconds,
         external > 0 ? "，其中对邻表让车 " + external + " 处" : "",
         kinds);
@@ -405,14 +405,14 @@ public final class TimetableBuildReportText {
 
   /** 让车明细，最多前几条："· 站台 platform:OP:S:A:1: RA-002 让 D001 +40s（05:05:00）"。 */
   public static List<String> describeYieldDetails(
-      List<ResourceRepair.Yield> yields, int serviceStartSecondOfDay, int limit) {
+      List<TripYield> yields, int serviceStartSecondOfDay, int limit) {
     List<String> out = new ArrayList<>();
     if (yields == null || yields.isEmpty()) {
       return out;
     }
     int shown = Math.min(yields.size(), Math.max(0, limit));
     for (int i = 0; i < shown; i++) {
-      ResourceRepair.Yield yield = yields.get(i);
+      TripYield yield = yields.get(i);
       out.add(
           String.format(
               Locale.ROOT,
@@ -483,85 +483,6 @@ public final class TimetableBuildReportText {
           .append(" 条");
     }
     return text.toString();
-  }
-
-  /**
-   * 「结构下界」与「端点串行」两行；没有容量 1 的端点时为空。
-   *
-   * <p>折返秒数<b>从该端点的占用成本里反推</b>而不是另外传一个数：打印出来的必须就是算下界时用的那个， 否则报告会和它自己解释的算式对不上。来源（终到站 dwell 还是 {@code
-   * --turnaround} 覆盖）由 {@code turnarounds} 说明。
-   */
-  public static List<String> describeTerminals(
-      List<TerminalSerializer.TerminalReport> terminals,
-      List<TimetableBuildResult.TripShift> shifts,
-      TurnaroundTable turnarounds) {
-    List<String> out = new ArrayList<>();
-    if (terminals == null || terminals.isEmpty()) {
-      return out;
-    }
-    long delayed =
-        shifts.stream().filter(s -> s.actualSecondOfDay() > s.nominalSecondOfDay()).count();
-    long advanced = shifts.size() - delayed;
-    int maxDelay =
-        shifts.stream()
-            .mapToInt(s -> s.actualSecondOfDay() - s.nominalSecondOfDay())
-            .max()
-            .orElse(0);
-    for (TerminalSerializer.TerminalReport terminal : terminals) {
-      out.add(
-          String.format(
-              Locale.ROOT,
-              "结构下界: %s（单股道）每次折返占用 ≥ %ds（进站 %d + 折返 %d + 出站 %d + 裕量 %d，折返取 %s），按权重每 %d 班经过 %.1f 次 → 全线间隔下界 %ds",
-              terminal.group(),
-              terminal.visitCostSeconds(),
-              terminal.approachInSeconds(),
-              turnaroundOf(terminal),
-              terminal.approachOutSeconds(),
-              terminal.separationSeconds(),
-              turnarounds.describe(),
-              terminal.cycleTrips(),
-              terminal.visitsPerCycle(),
-              terminal.headwayFloorSeconds()));
-      out.add(
-          String.format(
-              Locale.ROOT,
-              "端点串行: %s 经过 %d 次、占用 %.0f%%%s；%d 班偏离网格（延后 %d / 提前 %d，最大 +%ds）；无处等待 %d 班；截断 %d 班",
-              terminal.group(),
-              terminal.visits(),
-              terminal.utilization() * 100.0D,
-              terminal.utilization() > 1.0D ? "（超过 100%，目标间隔本身在结构上不可能）" : "",
-              shifts.size(),
-              delayed,
-              advanced,
-              Math.max(0, maxDelay),
-              terminal.nowhereToWait(),
-              terminal.truncated()));
-    }
-    return out;
-  }
-
-  /** 「车库咽喉」一行：出库与回库共用的那段单线上各过了几次、占用多少、出库在车库里等了几班。 没有咽喉（出入段分线或没有出入库）时为空。 */
-  public static List<String> describeThroats(List<TerminalSerializer.ThroatReport> throats) {
-    List<String> out = new ArrayList<>();
-    if (throats == null) {
-      return out;
-    }
-    for (TerminalSerializer.ThroatReport throat : throats) {
-      out.add(
-          String.format(
-              Locale.ROOT,
-              "车库咽喉: %s（出入段共用 %d 条边）出库 %d 次、回库 %d 次、占用 %.0f%%%s；出库在库内等 %d 班（最长 +%ds）；回库撞上已排出库 %d 次",
-              throat.depot(),
-              throat.edges(),
-              throat.outbound(),
-              throat.inbound(),
-              throat.utilization() * 100.0D,
-              throat.utilization() > 1.0D ? "（超过 100%，目标间隔本身在结构上不可能）" : "",
-              throat.waited(),
-              throat.maxWaitSeconds(),
-              throat.inboundOverlaps()));
-    }
-    return out;
   }
 
   /**
@@ -650,46 +571,53 @@ public final class TimetableBuildReportText {
     }
   }
 
-  /** 从端点占用成本里反推本端点用的折返秒数：成本 = 进站 + 折返 + 出站 + 裕量。 */
-  private static int turnaroundOf(TerminalSerializer.TerminalReport terminal) {
-    return Math.max(
-        0,
-        terminal.visitCostSeconds()
-            - terminal.approachInSeconds()
-            - terminal.approachOutSeconds()
-            - terminal.separationSeconds());
-  }
-
   /**
-   * 搜索失败的文案：端点利用率超过 100% 时说"结构上不可能"，否则说"范围内没找到"并点名让不掉的冲突最多的资源。
-   * 两种情况下运营者要做的事不同：前者改折返/权重/股道，后者改裕量或等下一轮把咽喉也串行。
+   * 搜索失败的文案：放宽到上限仍没有周期层排得开、完整构建也干净的间隔时，点名让不掉的冲突最多的资源。
    *
    * @param conflictsAtTarget 目标间隔下让不掉的那些冲突（可吸收的运行时自己会让，点名它们会指错地方）
    */
+  /** 降低间隔裕量就排得开时的提示：给出试到的最大可行值，不替用户改。 */
+  public static String separationHint(int currentSeconds, int feasibleSeconds) {
+    return "提示：间隔裕量从 "
+        + currentSeconds
+        + "s 降到 "
+        + feasibleSeconds
+        + "s 时，同样的间隔与参数可以排开（已按 "
+        + feasibleSeconds
+        + "s 完整构建确认，没有让不掉的冲突）；要用就带 --separation "
+        + feasibleSeconds
+        + " 重排";
+  }
+
+  /** 降低间隔裕量也排不开时的提示：冲突不是裕量造成的。 */
+  public static String separationHintNone(int currentSeconds, int lowestSeconds) {
+    return "提示：间隔裕量从 "
+        + currentSeconds
+        + "s 一路降到 "
+        + lowestSeconds
+        + "s 也排不开，冲突与裕量无关，要从间隔、折返或站台股道上找原因";
+  }
+
+  /** 间隔由运行计划书的时段给定、不放宽时排不开的一句话。 */
+  public static String describePlannedIntervalsFailure(
+      TimetableConflictChecker.Report conflictsAtTarget) {
+    return "间隔由运行计划书的时段给定，不放宽；让不掉的冲突集中在 "
+        + String.join("、", conflictsAtTarget.topResources(3))
+        + "。调整计划书里相关时段的间隔，或用 --strict 取消让不掉的班次";
+  }
+
   public static String describeSearchFailure(
       int targetHeadway,
       int limitHeadway,
-      TimetableConflictChecker.Report conflictsAtTarget,
-      List<TerminalSerializer.TerminalReport> terminals,
-      TurnaroundTable turnarounds) {
-    for (TerminalSerializer.TerminalReport terminal : terminals) {
-      if (terminal.utilization() > 1.0D) {
-        return String.format(
-            Locale.ROOT,
-            "目标间隔 %ds 下端点 %s（单股道）利用率 %.0f%%（每次折返占用 %ds，折返取 %s）：目标本身在结构上不可能；放宽到 %ds 仍找不到无冲突的间隔。可做的事：核对终到站的 dwell 是否偏大或 --turnaround 是否设得太长、降低经过该端点的 route 权重、或增加股道",
-            targetHeadway,
-            terminal.group(),
-            terminal.utilization() * 100.0D,
-            terminal.visitCostSeconds(),
-            turnarounds.describe(),
-            limitHeadway);
-      }
-    }
+      int solveLimit,
+      TimetableConflictChecker.Report conflictsAtTarget) {
     return "目标间隔 "
         + targetHeadway
         + "s 在放宽到 "
         + limitHeadway
-        + "s 的范围内没有找到无冲突的间隔；让不掉的冲突集中在 "
+        + "s 的范围内没有找到无冲突的间隔（周期层至多试 "
+        + solveLimit
+        + " 组间隔）；让不掉的冲突集中在 "
         + String.join("、", conflictsAtTarget.topResources(3))
         + "。检查单线区段、站台数量与折返时间";
   }

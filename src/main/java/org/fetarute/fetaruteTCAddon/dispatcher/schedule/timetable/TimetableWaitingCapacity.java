@@ -388,7 +388,13 @@ final class TimetableWaitingCapacity {
           otherPath.nextStop(theirs.get(), otherStops))) {
         return EnRouteRoom.FULL;
       }
-      int wait = (int) Math.max(0L, (long) until + separation - conflict.secondFrom());
+      int wait =
+          (int)
+              Math.max(
+                  0L,
+                  (long) until
+                      + TimetableConflictChecker.marginOf(conflict.resource(), separation)
+                      - conflict.secondFrom());
       followers.merge(conflict.second(), wait, Math::max);
     }
     return new EnRouteRoom(true, java.util.Collections.unmodifiableMap(followers));

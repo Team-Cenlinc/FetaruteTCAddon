@@ -41,8 +41,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction
  *       不算被挡；与本车同一行进方向的后车（不论经哪条进路汇入）只是排队，不算放不下，它要多等的秒数照样受第三条的上限与第五条的连锁约束（{@link
  *       TimetableWaitingCapacity#room}）。
  *   <li><b>顺推超限</b>：这一等让后续班次赶不上表定时刻（本班到达 + 折返 + 等待 &gt; 下一班发车），而表上没有推后它 → 不可吸收。
- *       途中站上被这一等挡住的同方向后车同样算：它晚到多少，就按它自己的交路链判一遍，取最深的。 写得进去的顺推已由让车修复的必等顺推写进表（{@link
- *       ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait} 或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
+ *       途中站上被这一等挡住的同方向后车同样算：它晚到多少，就按它自己的交路链判一遍，取最深的。 预订表（{@link
+ *       ReservationScheduler}）写得进去的延后已经写进表，还剩下的就是推不动的——推迟超过 {@code --max-wait}
+ *       或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
  *       <p>同一班在几处都要等时，按这一班已判可吸收的等待之和往后推（同一对车在相邻几个资源上重复报的冲突只算一次，取最长的那次），
  *       不各算各的。运行时晚点的车途中车站压缩停站（{@code timetable.recovery.min-dwell-seconds}）：顶到下一班的晚点不超过那一班的可追回量
  *       （{@link Recovery#recoverableSeconds}）时，算在那一班里追回、不顶后面。同一辆车靠追回吸收的秒数全表累计不超过这一交路可追回总量的 {@value
@@ -361,38 +362,6 @@ public final class ConflictAbsorption {
         maxWaitSeconds);
   }
 
-  /**
-   * 必等顺推用：哪些冲突是运行时"在资源前等一下"就能过去的——判据前四条（邻表、容量 1 端点、超上限、让车点无容量），不看顺推。
-   *
-   * <p>顺推要写进表的正是这类等待；不可吸收的那些本来就会让这次尝试失败、交给搜索放宽，推它们只会把别处搅乱。 顺推本身取决于有没有推，所以这里不能把第五条算进来。
-   *
-   * @param conflicts 当前的冲突
-   * @param timetable 当前表
-   * @param occupancy 当前表的投影
-   * @param index 图索引
-   * @param separationSeconds 相邻占用裕量
-   * @param maxWaitSeconds 单步让车上限
-   * @return 每处冲突一条，顺序与 {@code conflicts} 一致
-   */
-  static List<Residual> classifyWaits(
-      List<TimetableConflictChecker.Conflict> conflicts,
-      Timetable timetable,
-      TimetableOccupancyProjector.Occupancy occupancy,
-      TimetableConflictChecker.GraphIndex index,
-      int separationSeconds,
-      int maxWaitSeconds,
-      Map<UUID, TimetableConflictChecker.RouteProfile> profiles) {
-    if (conflicts == null || conflicts.isEmpty()) {
-      return List.of();
-    }
-    return classify(
-        Context.of(timetable, occupancy, index, TurnaroundTable.none(), profiles, Recovery.NONE)
-            .withoutChain(),
-        new TimetableConflictChecker.Report(conflicts),
-        separationSeconds,
-        maxWaitSeconds);
-  }
-
   private static List<Residual> classify(
       Context context,
       TimetableConflictChecker.Report report,
@@ -506,9 +475,9 @@ public final class ConflictAbsorption {
     if (conflict.external()) {
       return new Residual(conflict, moverOf(conflict), 0, Optional.empty(), 0, Verdict.EXTERNAL);
     }
-    // 后车与预计等待：与 ResourceRepair.moveFor 同一口径，内部冲突里后车恒为 second。
+    // 后车与预计等待：内部冲突里后车恒为 second（预订表只延后后到的那一辆）。
     String mover = moverOf(conflict);
-    int wait = conflict.firstTo() + separation - conflict.secondFrom();
+    int wait = conflict.waitSeconds(separation);
     wait = Math.max(0, wait);
     Optional<String> origin = context.waitingPointOf(mover);
     // 后车在哪等：冲突在它某个途中停车点之后时，运行时它在那一站的发车门控前被挡住（或驶出后在区间信号前等），
@@ -676,7 +645,7 @@ public final class ConflictAbsorption {
     static final Chain NONE = new Chain(0, 0);
   }
 
-  /** 内部冲突的后车恒为 {@code second}：{@link ResourceRepair#moveFor} 只在对方是邻表时才改挪自己。 */
+  /** 内部冲突的后车恒为 {@code second}：预订表只延后后到的那一辆；对方是邻表时挪的总是自己。 */
   private static String moverOf(TimetableConflictChecker.Conflict conflict) {
     return conflict.secondOwner().isEmpty() ? conflict.second() : conflict.first();
   }

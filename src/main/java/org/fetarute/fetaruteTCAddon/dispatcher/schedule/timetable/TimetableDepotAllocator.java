@@ -159,7 +159,7 @@ public final class TimetableDepotAllocator implements VehicleDutyPlanner.DepotLe
     int until = Integer.MIN_VALUE;
     long longest = 0L;
     for (TimetableConflictChecker.Conflict conflict : sorted) {
-      long wait = Math.max(0L, (long) conflict.firstTo() + separation - conflict.secondFrom());
+      long wait = Math.max(0L, conflict.waitSeconds(separation));
       String key = pairOf(conflict);
       if (key.equals(pair) && spanFrom(conflict) <= (long) until + separation) {
         longest = Math.max(longest, wait);

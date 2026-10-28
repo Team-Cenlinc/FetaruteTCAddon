@@ -71,6 +71,8 @@ public final class StorageSchema {
     ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
     ddl.add(hudLineBindings(dialect));
     ddl.add(consistPlans(dialect));
+    ddl.add(timetablePlans(dialect));
+    ddl.add(timetablePlanBindings(dialect));
     ddl.add(pidsScreens(dialect));
     ddl.add(pidsBulletins(dialect));
     ddl.add(pendingCalls(dialect));
@@ -718,6 +720,54 @@ public final class StorageSchema {
         dialect.timestampType(),
         dialect.timestampType(),
         table("operators"));
+  }
+
+  /** 运行计划书：挂在运营商下，按 code 引用；正文是书的原文。唯一约束写在表内（MySQL 不支持 {@code CREATE INDEX IF NOT EXISTS}）。 */
+  private String timetablePlans(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    operator_id %s NOT NULL,
+                    code %s NOT NULL,
+                    name %s NOT NULL,
+                    body %s NOT NULL,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    UNIQUE (operator_id, code),
+                    FOREIGN KEY (operator_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_plans"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.textType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("operators"));
+  }
+
+  /** 时刻表编号与运行计划书的绑定：每个运营商下的编号至多绑定一本。时刻表按线路存、联编时几条线同一编号，所以按编号而不是按表主键绑定， 编号也可以先绑定后编表。 */
+  private String timetablePlanBindings(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    operator_id %s NOT NULL,
+                    timetable_code %s NOT NULL,
+                    plan_id %s NOT NULL,
+                    PRIMARY KEY (operator_id, timetable_code),
+                    FOREIGN KEY (operator_id) REFERENCES %s(id) ON DELETE CASCADE,
+                    FOREIGN KEY (plan_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_plan_bindings"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        table("operators"),
+        table("timetable_plans"));
   }
 
   private String hudLineBindings(SqlDialect dialect) {

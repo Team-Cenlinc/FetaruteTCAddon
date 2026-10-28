@@ -1813,7 +1813,7 @@ public final class ConfigManager {
    * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
    * @param recoveryEngageDelaySeconds 晚点追赶：晚点达到多少秒才放宽线路限速
    * @param maxDelaySeconds 交路上的下一班晚过计划发车这么多秒还没开出，车就从交路上解下、后面的班次交给替补；0 表示不限
-   * @param buildThreads 编表（含快车错峰搜索）用几个线程：{@link #AUTO_BUILD_THREADS} 按核数自动取，0 表示全部核，1 为串行；结果与线程数无关
+   * @param buildThreads 编表用几个线程并行编互不依赖的候选：{@link #AUTO_BUILD_THREADS} 按核数自动取，0 表示全部核，1 为串行；结果与线程数无关
    */
   public record TimetableSettings(
       boolean enabled,

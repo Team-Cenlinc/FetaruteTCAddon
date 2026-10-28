@@ -157,7 +157,7 @@ class TimetableBuilderGroupsTest {
             .orElseThrow();
     assertEquals((int) (full + shortTurn), atA.departures());
     assertTrue(atA.maxGap() < effective.get("full"), "交错后 A 上的合成间隔小于大交路自己的间隔");
-    assertTrue(result.phaseNotes().stream().anyMatch(note -> note.contains("交错")));
+    assertTrue(result.phaseNotes().stream().anyMatch(note -> note.contains("周期层求解")));
   }
 
   /** 同样输入两次构建，含相位与交错在内逐字段相等。 */

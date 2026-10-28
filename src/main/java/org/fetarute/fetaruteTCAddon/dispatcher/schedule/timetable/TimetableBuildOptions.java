@@ -28,9 +28,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  * @param strictConflicts 目标 headway 排出来有冲突时：{@code true} 构建失败；{@code false} 回退到最小可行 headway 并警告
  * @param groupIntervals 交路组 → 该组每个方向的发车间隔（秒）；没列出的组用 {@code headway}
  * @param repair 让车修复参数（单处上限、累计上限）
- * @param rapidStagger 快车错峰搜索：排完之后用完整编表逐个试原地折返端的折返、快车组的平移量与停站，按成品表实测的快车被卡秒数挑位置（慢，见 {@link
- *     RapidStagger}）
- * @param following 运行时同向跟车的规则：给了就按闭塞时间量快车被卡（错峰也按它比），否则按占用区间
+ * @param following 运行时同向跟车的规则：给了就按闭塞时间量快车被卡，否则按占用区间
  * @param recoveryMinDwellSeconds 运行时晚点车途中站最少停多少秒（{@code
  *     timetable.recovery.min-dwell-seconds}）：顺推按下一班的可追回量判可不可吸收 （{@link
  *     ConflictAbsorption.Recovery}）；0 表示不按追回量判，顺推一班也不放过
@@ -38,7 +36,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  *     #DEFAULT_MAX_CANCEL_TRIPS}）表示按运营班次的比例定（{@link #maxCancelTripsFor}）
  * @param holdMaxSeconds 运行时早到列车在站台最多被扣多久（{@code timetable.hold-max-seconds} 与调度层硬上限取小）：
  *     表上写进去的多停靠早到等点兑现，不能超过它（{@link #feederHoldLimitSeconds}）；负数取 {@link #DEFAULT_HOLD_MAX_SECONDS}
- * @param staggerMinutes 快车错峰搜索的时间上限（分钟，{@code --stagger-minutes}）；到点后编完当时那一批，就停在已编过的候选里挑。0 表示不限
+ * @param schedule 运行计划书：分时段频率与定点班次（{@link ServiceSchedule#NONE} 为全天一个制式）
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,
@@ -52,12 +50,11 @@ public record TimetableBuildOptions(
     boolean strictConflicts,
     Map<String, Integer> groupIntervals,
     Repair repair,
-    boolean rapidStagger,
     Following following,
     int recoveryMinDwellSeconds,
     int maxCancelTrips,
     int holdMaxSeconds,
-    int staggerMinutes) {
+    ServiceSchedule schedule) {
 
   /**
    * 运行时同向跟车的规则，编表按它算闭塞时间（{@link BlockingTimes}）：后车多早要用到一段线路、前车多晚才放出来。
@@ -229,15 +226,8 @@ public record TimetableBuildOptions(
   /** 不给 {@code holdMaxSeconds} 时的运行时扣车上限：与 {@code timetable.hold-max-seconds} 的默认值相同。 */
   public static final int DEFAULT_HOLD_MAX_SECONDS = 120;
 
-  /**
-   * {@code --stagger-minutes} 的缺省值：快车错峰搜索约 10 分钟上限（到点后编完当时那一批才停，见 {@link RapidStagger#search}）。
-   *
-   * <p>错峰的每个候选都是一次完整编表，候选数随相对周期、加停点与档位相乘，大路网上不设上限可以跑几个小时。build 在后台线程跑、但占着编表线程与核，
-   * 一次构建多等十分钟还在发起人愿意守着看结果的范围内；到点停下时已编过的候选照样按原规则挑，最先编的（加长折返、整组平移）往往已经给出了大部分改善。 要搜完整个空间就显式给更大的值或 0。
-   */
-  public static final int DEFAULT_STAGGER_MINUTES = 10;
-
   public TimetableBuildOptions {
+    schedule = schedule == null ? ServiceSchedule.NONE : schedule;
     if (serviceStartSecondOfDay < 0 || serviceStartSecondOfDay >= TimetableTrip.SECONDS_PER_DAY) {
       throw new IllegalArgumentException("serviceStartSecondOfDay 超出一天范围");
     }
@@ -275,10 +265,19 @@ public record TimetableBuildOptions(
     recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
     maxCancelTrips = maxCancelTrips < 0 ? DEFAULT_MAX_CANCEL_TRIPS : maxCancelTrips;
     holdMaxSeconds = holdMaxSeconds < 0 ? DEFAULT_HOLD_MAX_SECONDS : holdMaxSeconds;
-    staggerMinutes = Math.max(0, staggerMinutes);
   }
 
-  /** 错峰搜索不限时的构造（命令层另用 {@link #withStaggerMinutes} 补上）。 */
+  /**
+   * 周期层在途中车站最多多停几秒：运行时扣车上限的一半。
+   *
+   * <p>多停写进表里，运行时靠"早到等点"兑现，受 {@link #holdMaxSeconds} 封顶；同一处扣车还要吸收这辆车本来的早到，
+   * 所以只拿一半写进表，保证表上的每一次多停运行时都真的会扣。 运行时不扣车（上限 0）时不多停。
+   */
+  public int feederHoldLimitSeconds() {
+    return holdMaxSeconds / 2;
+  }
+
+  /** 没有运行计划书的构造：全天一个制式。 */
   public TimetableBuildOptions(
       int serviceStartSecondOfDay,
       int serviceEndSecondOfDay,
@@ -291,7 +290,6 @@ public record TimetableBuildOptions(
       boolean strictConflicts,
       Map<String, Integer> groupIntervals,
       Repair repair,
-      boolean rapidStagger,
       Following following,
       int recoveryMinDwellSeconds,
       int maxCancelTrips,
@@ -308,22 +306,32 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        rapidStagger,
         following,
         recoveryMinDwellSeconds,
         maxCancelTrips,
         holdMaxSeconds,
-        0);
+        ServiceSchedule.NONE);
   }
 
-  /**
-   * 按车接续的喂车方向在中途最多多停几秒：运行时扣车上限的一半。
-   *
-   * <p>多停写进表里，运行时靠"早到等点"兑现，受 {@link #holdMaxSeconds} 封顶；同一处扣车还要吸收这辆车本来的早到，
-   * 所以只拿一半写进表，保证表上的每一次多停运行时都真的会扣。 运行时不扣车（上限 0）时不多停。
-   */
-  public int feederHoldLimitSeconds() {
-    return holdMaxSeconds / 2;
+  /** 换运行计划书，其余不变。 */
+  public TimetableBuildOptions withSchedule(ServiceSchedule next) {
+    return new TimetableBuildOptions(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        repair,
+        following,
+        recoveryMinDwellSeconds,
+        maxCancelTrips,
+        holdMaxSeconds,
+        next);
   }
 
   /** 换运行时扣车上限，其余不变。 */
@@ -340,12 +348,11 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        rapidStagger,
         following,
         recoveryMinDwellSeconds,
         maxCancelTrips,
         seconds,
-        staggerMinutes);
+        schedule);
   }
 
   /** 取消上限是不是按运营班次的比例定（没给 {@code --max-cancel}）。 */
@@ -380,7 +387,6 @@ public record TimetableBuildOptions(
       boolean strictConflicts,
       Map<String, Integer> groupIntervals,
       Repair repair,
-      boolean rapidStagger,
       Following following) {
     this(
         serviceStartSecondOfDay,
@@ -394,7 +400,6 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        rapidStagger,
         following,
         0,
         0,
@@ -402,36 +407,6 @@ public record TimetableBuildOptions(
   }
 
   /** 不按闭塞时间算的构造：快车被卡按占用区间量。 */
-  public TimetableBuildOptions(
-      int serviceStartSecondOfDay,
-      int serviceEndSecondOfDay,
-      Duration headway,
-      Duration defaultDwell,
-      VehicleDutyPlanner.Limits dutyLimits,
-      String tripCodePrefix,
-      ZoneId zoneId,
-      Duration separation,
-      boolean strictConflicts,
-      Map<String, Integer> groupIntervals,
-      Repair repair,
-      boolean rapidStagger) {
-    this(
-        serviceStartSecondOfDay,
-        serviceEndSecondOfDay,
-        headway,
-        defaultDwell,
-        dutyLimits,
-        tripCodePrefix,
-        zoneId,
-        separation,
-        strictConflicts,
-        groupIntervals,
-        repair,
-        rapidStagger,
-        Following.NONE);
-  }
-
-  /** 不做快车错峰搜索的构造。 */
   public TimetableBuildOptions(
       int serviceStartSecondOfDay,
       int serviceEndSecondOfDay,
@@ -456,7 +431,7 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        false);
+        Following.NONE);
   }
 
   /** 没有让车参数的构造：默认 60 s / 300 s。 */
@@ -567,12 +542,11 @@ public record TimetableBuildOptions(
         strictConflicts,
         intervals,
         repair,
-        rapidStagger,
         following,
         recoveryMinDwellSeconds,
         maxCancelTrips,
         holdMaxSeconds,
-        staggerMinutes);
+        schedule);
   }
 
   /** 换让车参数，其余不变。 */
@@ -589,16 +563,15 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         nextRepair,
-        rapidStagger,
         following,
         recoveryMinDwellSeconds,
         maxCancelTrips,
         holdMaxSeconds,
-        staggerMinutes);
+        schedule);
   }
 
-  /** 开关快车错峰搜索，其余不变。 */
-  public TimetableBuildOptions withRapidStagger(boolean enabled) {
+  /** 换一个间隔裕量，其余不变。 */
+  public TimetableBuildOptions withSeparation(Duration nextSeparation) {
     return new TimetableBuildOptions(
         serviceStartSecondOfDay,
         serviceEndSecondOfDay,
@@ -607,16 +580,15 @@ public record TimetableBuildOptions(
         dutyLimits,
         tripCodePrefix,
         zoneId,
-        separation,
+        nextSeparation,
         strictConflicts,
         groupIntervals,
         repair,
-        enabled,
         following,
         recoveryMinDwellSeconds,
         maxCancelTrips,
         holdMaxSeconds,
-        staggerMinutes);
+        schedule);
   }
 
   /** 换一组跟车规则，其余不变。 */
@@ -633,12 +605,11 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        rapidStagger,
         nextFollowing,
         recoveryMinDwellSeconds,
         maxCancelTrips,
         holdMaxSeconds,
-        staggerMinutes);
+        schedule);
   }
 
   /** 换运行时的最短停站（顺推按可追回量判），其余不变。 */
@@ -655,12 +626,11 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        rapidStagger,
         following,
         seconds,
         maxCancelTrips,
         holdMaxSeconds,
-        staggerMinutes);
+        schedule);
   }
 
   /** 换严格模式的取消上限，其余不变。 */
@@ -677,34 +647,11 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        rapidStagger,
         following,
         recoveryMinDwellSeconds,
         trips,
         holdMaxSeconds,
-        staggerMinutes);
-  }
-
-  /** 换快车错峰搜索的时间上限（分钟，0 表示不限），其余不变。 */
-  public TimetableBuildOptions withStaggerMinutes(int minutes) {
-    return new TimetableBuildOptions(
-        serviceStartSecondOfDay,
-        serviceEndSecondOfDay,
-        headway,
-        defaultDwell,
-        dutyLimits,
-        tripCodePrefix,
-        zoneId,
-        separation,
-        strictConflicts,
-        groupIntervals,
-        repair,
-        rapidStagger,
-        following,
-        recoveryMinDwellSeconds,
-        maxCancelTrips,
-        holdMaxSeconds,
-        minutes);
+        schedule);
   }
 
   /** 计划窗口长度（秒）：首班发车到运营结束。 */
@@ -741,12 +688,11 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        rapidStagger,
         following,
         recoveryMinDwellSeconds,
         maxCancelTrips,
         holdMaxSeconds,
-        staggerMinutes);
+        schedule);
   }
 
   /**
