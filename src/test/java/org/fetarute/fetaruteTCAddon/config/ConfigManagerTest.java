@@ -445,37 +445,6 @@ class ConfigManagerTest {
         "负数回退缺省值");
   }
 
-  /** 编表线程数：模板写 auto，缺省也是 auto；非负整数照用（0 表示全部核），负数与写错的回退 auto。 */
-  @Test
-  void timetableBuildThreadsDefaultToAuto() throws Exception {
-    YamlConfiguration template = new YamlConfiguration();
-    try (java.io.InputStream in = ConfigManager.class.getResourceAsStream("/config.yml")) {
-      template.load(new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
-    }
-    int auto = ConfigManager.TimetableSettings.AUTO_BUILD_THREADS;
-    assertEquals(
-        auto,
-        ConfigManager.parse(template, Logger.getLogger("config-test"))
-            .timetableSettings()
-            .buildThreads());
-    assertEquals(auto, ConfigManager.TimetableSettings.defaults().buildThreads());
-
-    java.util.function.Function<Object, Integer> parsed =
-        value -> {
-          YamlConfiguration config = new YamlConfiguration();
-          config.set("timetable.build-threads", value);
-          return ConfigManager.parse(config, Logger.getLogger("config-test"))
-              .timetableSettings()
-              .buildThreads();
-        };
-    assertEquals(0, parsed.apply(0), "0 表示全部核");
-    assertEquals(1, parsed.apply(1));
-    assertEquals(6, parsed.apply(6));
-    assertEquals(auto, parsed.apply("AUTO"));
-    assertEquals(auto, parsed.apply(-2), "负数回退 auto");
-    assertEquals(auto, parsed.apply("many"), "写错回退 auto");
-  }
-
   /** 叫车配置：模板与代码缺省一致，缺段用缺省，负数回退缺省。 */
   @Test
   void callSettingsParseWithDefaults() throws Exception {

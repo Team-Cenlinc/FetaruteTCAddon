@@ -585,12 +585,17 @@ public final class TimetableBuildReportText {
   }
 
   public static String describeSearchFailure(
-      int targetHeadway, int limitHeadway, TimetableConflictChecker.Report conflictsAtTarget) {
+      int targetHeadway,
+      int limitHeadway,
+      int solveLimit,
+      TimetableConflictChecker.Report conflictsAtTarget) {
     return "目标间隔 "
         + targetHeadway
         + "s 在放宽到 "
         + limitHeadway
-        + "s 的范围内没有找到无冲突的间隔；让不掉的冲突集中在 "
+        + "s 的范围内没有找到无冲突的间隔（周期层至多试 "
+        + solveLimit
+        + " 组间隔）；让不掉的冲突集中在 "
         + String.join("、", conflictsAtTarget.topResources(3))
         + "。检查单线区段、站台数量与折返时间";
   }

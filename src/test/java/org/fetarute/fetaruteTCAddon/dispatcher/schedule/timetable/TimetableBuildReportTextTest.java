@@ -44,9 +44,10 @@ class TimetableBuildReportTextTest {
                 conflict("junction:j"),
                 conflict("single:s")));
 
-    String search = TimetableBuildReportText.describeSearchFailure(120, 480, report);
+    String search = TimetableBuildReportText.describeSearchFailure(120, 240, 32, report);
 
-    assertTrue(search.contains("放宽到 480s 的范围内没有找到"), search);
+    assertTrue(search.contains("放宽到 240s 的范围内没有找到"), search);
+    assertTrue(search.contains("至多试 32 组"), search);
     assertTrue(search.contains("TRACK edge:a~b×2"), search);
   }
 

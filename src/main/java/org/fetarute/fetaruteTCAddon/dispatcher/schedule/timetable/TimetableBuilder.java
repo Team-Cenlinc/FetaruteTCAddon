@@ -75,8 +75,11 @@ public final class TimetableBuilder {
   /** 目标与实际份额偏差超过这个百分点就明确警告。 */
   public static final double SHARE_WARN_PERCENT_POINTS = 5.0D;
 
-  /** 搜索可行 headway 时最多放宽到目标的多少倍。 */
-  public static final int HEADWAY_SEARCH_MAX_MULTIPLIER = 4;
+  /**
+   * 非严格模式搜索可行间隔时最多放宽到目标的多少倍。放得再宽的表间隔面目全非，没有发布的意义；超周期也随之变长，每问一次周期层都更慢。 放宽到这里还排不开就照实报失败，由调整目标间隔或
+   * {@code --strict} 取消来解决。
+   */
+  public static final int HEADWAY_SEARCH_MAX_MULTIPLIER = 2;
 
   private final TimetableTimingCalculator timingCalculator;
 
@@ -406,7 +409,10 @@ public final class TimetableBuilder {
                   + (bandsFixIntervals
                       ? TimetableBuildReportText.describePlannedIntervalsFailure(atTarget)
                       : TimetableBuildReportText.describeSearchFailure(
-                          targetHeadway, targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER, atTarget)));
+                          targetHeadway,
+                          targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER,
+                          RELAX_SOLVE_LIMIT,
+                          atTarget)));
           reasons.addAll(
               TimetableBuildReportText.describeUnabsorbable(
                   target.unabsorbable(), options.serviceStartSecondOfDay()));
@@ -2144,11 +2150,11 @@ public final class TimetableBuilder {
   /** 放宽间隔的扫描步长取最小组间隔的这么多分之一（至少 1 秒）：周期层每次只要毫秒到一秒，步长可以很细。 */
   static final int RELAX_STEPS_PER_INTERVAL = 60;
 
-  /** 放宽与收紧合计最多问几次周期层：到上限就停在当前可行解（或报找不到），按次数计，结果确定。 */
-  static final int RELAX_SOLVE_LIMIT = 200;
+  /** 放宽与收紧合计最多问几次周期层：到上限就停在当前可行解（或报找不到），按次数计，结果确定。放宽之后超周期常到小时级， 一次要几秒，这个数决定了排不开时最久等多久。 */
+  static final int RELAX_SOLVE_LIMIT = 32;
 
   /** 粗档步长取最小组间隔的这么多分之一：先粗找到第一个排得开的，再在那一档里按细档补查。 */
-  static final int RELAX_COARSE_STEPS_PER_INTERVAL = 12;
+  static final int RELAX_COARSE_STEPS_PER_INTERVAL = 6;
 
   /**
    * 周期层求解的结果与它对应的准备。

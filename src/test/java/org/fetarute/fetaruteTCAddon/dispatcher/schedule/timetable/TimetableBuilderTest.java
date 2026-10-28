@@ -520,7 +520,7 @@ class TimetableBuilderTest {
   /**
    * 目标 headway 排出来有冲突时，回退到最小可行间隔并明确报告，回退后的表本身没有冲突。
    *
-   * <p>单线 DEP–A–B–C、终点 C 只有一股道、折返 180 秒：120 秒一班时，前一辆车还在 C 折返、后一辆已经到了； 回库车还要从待命在 A
+   * <p>单线 DEP–A–B–C、终点 C 只有一股道、折返 180 秒，往返一趟连折返要四百多秒：240 秒一班时，前一辆车还在 C 折返、后一辆已经到了； 回库车还要从待命在 A
    * 的下一辆车身上碾过去。这些都是物理冲突，不是模型的偏好。
    */
   @Test
@@ -529,7 +529,7 @@ class TimetableBuilderTest {
         new TimetableBuildOptions(
             5 * 3600,
             7 * 3600,
-            Duration.ofSeconds(120),
+            Duration.ofSeconds(240),
             Duration.ofSeconds(0),
             new VehicleDutyPlanner.Limits(1, 5400, 180),
             "",
@@ -538,8 +538,8 @@ class TimetableBuilderTest {
     TimetableBuildResult result = build(twoRouteFixture(1, 1), options);
 
     assertTrue(result.success(), () -> result.warnings().toString());
-    assertTrue(result.headwayRelaxed(), "目标 120s 必然冲突，应当回退");
-    assertEquals(120, result.targetHeadwaySeconds());
+    assertTrue(result.headwayRelaxed(), "目标 240s 必然冲突，应当回退");
+    assertEquals(240, result.targetHeadwaySeconds());
     assertTrue(
         result.effectiveHeadwaySeconds() >= 210,
         () -> "至少要等前车折返完: " + result.effectiveHeadwaySeconds());
@@ -801,7 +801,7 @@ class TimetableBuilderTest {
   /**
    * 残余分两类，且两类之和就是报告里的冲突数——成功判据只看不可吸收那一类。
    *
-   * <p>DEP-A-B-C 是单股道夹具，120 s 目标下的冲突都压在容量 1 的端点上，运行时在那里等就是堵死岔线， 所以它们必须被判成不可吸收，并因此触发放宽。这条同时钉住"分类接进了
+   * <p>DEP-A-B-C 是单股道夹具，240 s 目标下的冲突都压在容量 1 的端点上，运行时在那里等就是堵死岔线， 所以它们必须被判成不可吸收，并因此触发放宽。这条同时钉住"分类接进了
    * build"与"判据没被放松成永远可吸收"。
    */
   @Test
@@ -810,7 +810,7 @@ class TimetableBuilderTest {
         new TimetableBuildOptions(
             5 * 3600,
             7 * 3600,
-            Duration.ofSeconds(120),
+            Duration.ofSeconds(240),
             Duration.ofSeconds(0),
             new VehicleDutyPlanner.Limits(1, 5400, 180),
             "",
@@ -826,6 +826,27 @@ class TimetableBuilderTest {
     assertTrue(
         result.unabsorbable().stream().noneMatch(ConflictAbsorption.Residual::absorbable),
         "不可吸收那一列里不能混进可吸收的");
+  }
+
+  /** 非严格模式至多放宽到目标的两倍：同一夹具要四百多秒才排得开，150 秒的目标照实报失败，不发一张间隔面目全非的表。 */
+  @Test
+  void relaxingBeyondTwiceTheTargetFailsClearly() {
+    TimetableBuildOptions options =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(150),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE);
+
+    TimetableBuildResult result = build(twoRouteFixture(1, 1), options);
+
+    assertFalse(result.success());
+    assertTrue(
+        result.warnings().stream().anyMatch(text -> text.contains("放宽到 300s 的范围内没有找到")),
+        () -> result.warnings().toString());
   }
 
   /** 排得干净的表两类残余都为空：分类不会凭空造出残余。 */
