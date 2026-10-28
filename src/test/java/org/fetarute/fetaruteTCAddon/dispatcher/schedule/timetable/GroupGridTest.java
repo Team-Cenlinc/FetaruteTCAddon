@@ -89,4 +89,37 @@ class GroupGridTest {
             .filter(slot -> slot.slot() >= 3)
             .allMatch(slot -> slot.routeId().equals(RZ)));
   }
+
+  /**
+   * 分时段时每段的 SWRR 按环上的格号对齐，不跨段连续计数：后段间隔 200、相位 100，第一班 1100 是环上第 5 格，1:1 的两条 route 里归第二条（连续计数会给第一条）。
+   */
+  @Test
+  void eachSegmentAlignsSwrrWithTheRingSlot() {
+    ServiceGroupClassifier.Direction direction =
+        new ServiceGroupClassifier.Direction(
+            "OP:S:A",
+            "OP:S:C",
+            List.of(
+                new WeightedTripAllocator.Candidate("RA", 1),
+                new WeightedTripAllocator.Candidate("RZ", 1)),
+            List.of(RA, RZ));
+
+    GroupGrid.DirectionGrid grid =
+        GroupGrid.ofSegments(
+            direction,
+            List.of(
+                new GroupGrid.Segment(0, 1000, 300, 0),
+                new GroupGrid.Segment(1000, 2000, 200, 100)),
+            WeightedTripAllocator.unconstrained());
+
+    assertEquals(
+        List.of(0, 300, 600, 900, 1100, 1300, 1500, 1700, 1900),
+        grid.slots().stream().map(GroupGrid.Slot::departureSeconds).toList());
+    assertEquals(
+        List.of(RA, RZ, RA, RZ, RZ, RA, RZ, RA, RZ),
+        grid.slots().stream().map(GroupGrid.Slot::routeId).toList());
+    assertEquals(
+        List.of(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        grid.slots().stream().map(GroupGrid.Slot::slot).toList());
+  }
 }

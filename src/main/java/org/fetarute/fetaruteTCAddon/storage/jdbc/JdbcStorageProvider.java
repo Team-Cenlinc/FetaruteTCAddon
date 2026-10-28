@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeReposito
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.plan.TimetablePlanRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
@@ -58,6 +59,7 @@ import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRouteRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRouteStopRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcStationGroupRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcStationRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetablePlanRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetableRepository;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
@@ -94,6 +96,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final TimetableRepository timetableRepository;
   private final HudTemplateRepository hudTemplateRepository;
   private final ConsistPlanRepository consistPlanRepository;
+  private final TimetablePlanRepository timetablePlanRepository;
   private final HudLineBindingRepository hudLineBindingRepository;
   private final PidsScreenRepository pidsScreenRepository;
   private final PidsBulletinRepository pidsBulletinRepository;
@@ -148,6 +151,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcHudTemplateRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.consistPlanRepository =
         new JdbcConsistPlanRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.timetablePlanRepository =
+        new JdbcTimetablePlanRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.hudLineBindingRepository =
         new JdbcHudLineBindingRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.pidsScreenRepository =
@@ -269,6 +274,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public TimetableRepository timetables() {
     return timetableRepository;
+  }
+
+  @Override
+  public TimetablePlanRepository timetablePlans() {
+    return timetablePlanRepository;
   }
 
   @Override

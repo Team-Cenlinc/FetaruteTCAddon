@@ -450,7 +450,8 @@ public final class CapacityReport {
         BlockingTimes.Trajectories trajectories) {
       this.profiles = profiles;
       this.index = index == null ? TimetableConflictChecker.GraphIndex.of(null) : index;
-      this.footprints = new TimetableConflictChecker.Footprints(this.index);
+      // 进入与离开取占用格；闭塞时间这里自己另加，不能再用足迹里的闭塞格。
+      this.footprints = new TimetableConflictChecker.Footprints(this.index.withoutBlocking());
       this.following = following == null ? TimetableBuildOptions.Following.NONE : following;
       this.trajectories = trajectories == null ? BlockingTimes.Trajectories.NONE : trajectories;
     }

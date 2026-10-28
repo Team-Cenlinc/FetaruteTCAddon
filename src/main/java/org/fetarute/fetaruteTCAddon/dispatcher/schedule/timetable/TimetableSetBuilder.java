@@ -32,28 +32,15 @@ public final class TimetableSetBuilder {
 
   private final TimetableBuildProgress progress;
 
-  private final int threads;
-
   public TimetableSetBuilder() {
     this(TimetableBuildProgress.untracked());
   }
 
   /**
-   * 串行编表。
-   *
    * @param progress 进度，交给内部的单次构建去报
    */
   public TimetableSetBuilder(TimetableBuildProgress progress) {
-    this(progress, 1);
-  }
-
-  /**
-   * @param progress 进度，交给内部的单次构建去报
-   * @param threads 编表线程数（{@link TimetableBuilder#TimetableBuilder(TimetableBuildProgress, int)}）
-   */
-  public TimetableSetBuilder(TimetableBuildProgress progress, int threads) {
     this.progress = Objects.requireNonNull(progress, "progress");
-    this.threads = Math.max(1, threads);
   }
 
   /**
@@ -165,8 +152,7 @@ public final class TimetableSetBuilder {
       }
       TimetableBuilder.BuildInput single =
           withNeighbors(only.input(), input.neighbors(), ownership);
-      TimetableBuildResult result =
-          new TimetableBuilder(progress, threads).build(single, options, builtAt);
+      TimetableBuildResult result = new TimetableBuilder(progress).build(single, options, builtAt);
       Map<UUID, Timetable> tables = new LinkedHashMap<>();
       Map<UUID, List<TimetableBaseline>> baselines = new LinkedHashMap<>();
       result
@@ -219,8 +205,7 @@ public final class TimetableSetBuilder {
             members.stream()
                 .map(member -> member.input().couplings())
                 .reduce(CouplingInputs.NONE, CouplingInputs::merge));
-    TimetableBuildResult result =
-        new TimetableBuilder(progress, threads).build(joint, options, builtAt);
+    TimetableBuildResult result = new TimetableBuilder(progress).build(joint, options, builtAt);
     if (result.timetable().isEmpty()) {
       return new SetResult(result, Map.of(), Map.of());
     }

@@ -1066,6 +1066,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new org.fetarute.fetaruteTCAddon.command.FtaConsistCommand(this).register(commandManager);
     new FtaHealthCommand(this).register(commandManager);
     new FtaTimetableCommand(this).register(commandManager);
+    new org.fetarute.fetaruteTCAddon.command.FtaTimetablePlanCommand(this).register(commandManager);
     new FtaPidsCommand(this).register(commandManager);
     new FtaPidsBulletinCommand(this).register(commandManager);
     new FtaTripCommand(this).register(commandManager);

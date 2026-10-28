@@ -22,7 +22,7 @@ import java.util.UUID;
  * <p>同一个站台可以被两条 route 以不同的 dwell 终到（快车停 20 秒、慢车停 30 秒）。按节点建表会把两者压成一个数， 于是快车被慢车拖慢。按 routeId
  * 建表是精确的，而且每一个使用点手上都有 routeId。
  *
- * <p>"需要等更久"这件事不由本表表达：端点串行（{@link TerminalSerializer}）与让车修复（{@link ResourceRepair}）
+ * <p>"需要等更久"这件事不由本表表达：周期层求解（{@link PeriodicSolver}）与预订表（{@link ReservationScheduler}）
  * 会在资源要求的时候把发车往后推。本表只回答"物理上最早什么时候能走"。
  *
  * @param byRoute 按 route 的折返秒数

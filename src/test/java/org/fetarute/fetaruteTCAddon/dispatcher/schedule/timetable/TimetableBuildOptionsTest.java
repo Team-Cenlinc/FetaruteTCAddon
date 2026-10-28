@@ -92,7 +92,6 @@ class TimetableBuildOptionsTest {
         java.util.List.of(
             options.withHeadway(Duration.ofSeconds(200)),
             options.withRepair(TimetableBuildOptions.Repair.none()),
-            options.withRapidStagger(true),
             options.withFollowing(TimetableBuildOptions.Following.NONE),
             options.withTurnaround(TurnaroundTable.fixed(45)))) {
       assertEquals(10, derived.recoveryMinDwellSeconds());
@@ -142,28 +141,5 @@ class TimetableBuildOptionsTest {
     assertEquals(21, byShare.maxCancelTripsFor(2112));
     assertEquals(7, byShare.withMaxCancelTrips(7).maxCancelTripsFor(2112));
     assertEquals(0, byShare.withMaxCancelTrips(0).maxCancelTripsFor(2112));
-  }
-
-  /** 错峰时限：旧构造都是 0（不限，旧行为），各个 with 原样带过去，负值按 0；缺省值由命令层补上。 */
-  @Test
-  void theStaggerLimitSurvivesTheWithers() {
-    TimetableBuildOptions legacy = TimetableBuildOptions.defaults(ZoneId.of("UTC"));
-    assertEquals(0, legacy.staggerMinutes());
-
-    TimetableBuildOptions options =
-        legacy.withStaggerMinutes(TimetableBuildOptions.DEFAULT_STAGGER_MINUTES);
-    for (TimetableBuildOptions derived :
-        java.util.List.of(
-            options.withHeadway(Duration.ofSeconds(200)),
-            options.withRepair(TimetableBuildOptions.Repair.none()),
-            options.withRapidStagger(true),
-            options.withFollowing(TimetableBuildOptions.Following.NONE),
-            options.withTurnaround(TurnaroundTable.fixed(45)),
-            options.withRecoveryMinDwell(10),
-            options.withMaxCancelTrips(7),
-            options.withHoldMax(40))) {
-      assertEquals(TimetableBuildOptions.DEFAULT_STAGGER_MINUTES, derived.staggerMinutes());
-    }
-    assertEquals(0, legacy.withStaggerMinutes(-3).staggerMinutes());
   }
 }

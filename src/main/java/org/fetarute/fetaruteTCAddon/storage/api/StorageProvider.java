@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeReposito
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.plan.TimetablePlanRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
@@ -76,6 +77,9 @@ public interface StorageProvider extends AutoCloseable {
   PortalLinkRepository portalLinks();
 
   TimetableRepository timetables();
+
+  /** 运行计划书（分时段频率与定点班次）及其与时刻表编号的绑定。 */
+  TimetablePlanRepository timetablePlans();
 
   HudTemplateRepository hudTemplates();
 

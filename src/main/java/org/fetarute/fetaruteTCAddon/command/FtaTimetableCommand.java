@@ -45,7 +45,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPatternLength;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.BuildPool;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CapacityReport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ConsistFleet;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
@@ -365,7 +364,7 @@ public final class FtaTimetableCommand {
                 + " --max-duty-minutes --turnaround --separation --max-wait --max-idle --strict"
                 + " --max-cancel（缺省为运营班次的 "
                 + TimetableBuildOptions.DEFAULT_MAX_CANCEL_PERCENT
-                + "%，至少 1 班） --rapid-stagger --stagger-minutes --name --prefix",
+                + "%，至少 1 班） --name --prefix",
             NamedTextColor.DARK_GRAY));
     sender.sendMessage(hint("参数一览", "/fta timetable config <company> <operator> <line>"));
     sender.sendMessage(hint("列表", "/fta timetable list <company> <operator> <line>"));
@@ -377,6 +376,7 @@ public final class FtaTimetableCommand {
     sender.sendMessage(hint("导出 CSV", "/fta timetable export <company> <operator> <line> <code>"));
     sender.sendMessage(hint("运行态与编表进度", "/fta timetable status"));
     sender.sendMessage(hint("取消编表", "/fta timetable cancel <任务号|\"线路/code\">"));
+    sender.sendMessage(hint("运行计划书（分时段频率与定点发车）", "/fta timetable plan"));
     sender.sendMessage(Component.text("时刻表由 FTCA 按路网算出，不需要先去实服录制。", NamedTextColor.GRAY));
     sender.sendMessage(
         Component.text(
@@ -517,7 +517,7 @@ public final class FtaTimetableCommand {
               + TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS
               + "s 复算，两次判据可能不一致。要长期生效得改默认值，不能只靠这个 flag。");
     }
-    // 快车被卡与错峰按闭塞时间量：跟车规则取运行时配置，车长按出车编组。
+    // 快车被卡按闭塞时间量：跟车规则取运行时配置，车长按出车编组。
     Map<UUID, Long> trainLengths = new java.util.HashMap<>();
     java.util.Set<String> unknownLength = new java.util.TreeSet<>();
     for (LineRoutes member : members) {
@@ -544,7 +544,7 @@ public final class FtaTimetableCommand {
       buildWarnings.add(
           "读不到出车编组、车长未知：" + String.join("、", unknownLength) + "。快车跟在它们后面时，被卡按占用区间量，不按闭塞时间。");
     }
-    TimetableBuildOptions options =
+    TimetableBuildOptions unplanned =
         new TimetableBuildOptions(
             serviceStart,
             serviceEnd,
@@ -564,7 +564,6 @@ public final class FtaTimetableCommand {
             flags.strict(),
             groupIntervals,
             repairOptions(sender, flags.maxWaitSeconds()),
-            flags.rapidStagger(),
             following,
             // 顺推按运行时晚点追赶的停站压缩判：与运行时用同一份配置。
             timetableSettings().recoveryMinDwellSeconds(),
@@ -574,8 +573,64 @@ public final class FtaTimetableCommand {
                 Math.min(
                     holdMaxSeconds(),
                     org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator
-                        .HOLD_CEILING.toSeconds()),
-            flags.staggerMinutesOrDefault());
+                        .HOLD_CEILING.toSeconds()));
+    // 运行计划书：按（运营商，表编号）绑定；书里有错就不编表，不悄悄按没有计划书编。
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.plan.ResolvedPlan> plan =
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.plan.TimetablePlans.resolve(
+            provider, members.get(0).line().operator().id(), code);
+    if (plan.isPresent() && !plan.get().issues().isEmpty()) {
+      sender.sendMessage(
+          Component.text(
+              "运行计划书 "
+                  + plan.get().planCode()
+                  + " 解析失败，没有编表："
+                  + String.join("；", plan.get().issues()),
+              NamedTextColor.RED));
+      return;
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceSchedule schedule =
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceSchedule.NONE;
+    if (plan.isPresent()) {
+      Map<String, List<String>> groupsByLine = new java.util.LinkedHashMap<>();
+      java.util.Set<String> explicit = new java.util.HashSet<>();
+      for (LineRoutes member : members) {
+        String lineCode = member.line().line().code();
+        List<String> names =
+            ServiceGroupClassifier.classify(member.inputs()).groups().stream()
+                .map(ServiceGroupClassifier.Group::name)
+                .toList();
+        groupsByLine.put(lineCode, names);
+        for (String name : names) {
+          // 与上面解析间隔同一规则：线路编号不分大小写，组名按原样比。两边口径不一时，被点名的组两个间隔都不生效。
+          if (explicitByGroup.containsKey(name)
+              || explicitByGroup.keySet().stream()
+                  .anyMatch(
+                      key -> {
+                        int slash = key.indexOf('/');
+                        return slash > 0
+                            && key.substring(0, slash).equalsIgnoreCase(lineCode)
+                            && key.substring(slash + 1).equals(name);
+                      })) {
+            explicit.add(TimetableSetBuilder.groupKey(lineCode, Optional.of(name), joint));
+          }
+        }
+      }
+      schedule =
+          org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceSchedule.of(
+              plan.get().pattern(), groupsByLine, joint, explicit);
+      buildWarnings.add(
+          "按运行计划书 "
+              + plan.get().planCode()
+              + " 编表：时段 "
+              + plan.get().pattern().bands().size()
+              + " 条、定点 "
+              + plan.get().pattern().pins().size()
+              + " 班"
+              + (explicit.isEmpty()
+                  ? ""
+                  : "；--group-headway 点名的 " + String.join("、", explicit) + " 全天按命令给的间隔"));
+    }
+    TimetableBuildOptions options = unplanned.withSchedule(schedule);
     String timetableName = flags.name() == null ? code : flags.name();
 
     // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是
@@ -645,23 +700,13 @@ public final class FtaTimetableCommand {
         Component.text(joint ? "正在按路网联编 " + lines.size() + " 条线…" : "正在按路网编表…", NamedTextColor.GRAY)
             .append(Component.text(" "))
             .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与所处阶段")));
-    if (flags.rapidStagger()) {
-      int staggerMinutes = flags.staggerMinutesOrDefault();
+    if (flags.rapidStagger() || flags.staggerMinutes() != null) {
       sender.sendMessage(
           Component.text(
-              "已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟"
-                  + (staggerMinutes > 0
-                      ? "（约 " + staggerMinutes + " 分钟上限，到点后编完当时那一批，就在已编过的候选里挑）"
-                      : "（不限时）")
-                  + "；在后台线程运行，不阻塞服务器主线程。",
+              "快车错峰已并入默认编表（周期层把快车被卡作为目标并允许慢车待避越行），--rapid-stagger 与 --stagger-minutes 不再需要，这次忽略。",
               NamedTextColor.GRAY));
-    } else if (flags.staggerMinutes() != null) {
-      sender.sendMessage(
-          Component.text(
-              "--stagger-minutes 只在 --rapid-stagger 时生效；这次没开快车错峰搜索，忽略。", NamedTextColor.GRAY));
     }
     Instant builtAt = Instant.now();
-    int threads = buildThreads();
     TimetableHeadwayDefaults.Choice headwayChoice = headway;
     plugin
         .getServer()
@@ -685,7 +730,7 @@ public final class FtaTimetableCommand {
                     neighborInputs.project(graphSnapshot, index, footprint, options);
                 progress.checkpoint();
                 result =
-                    new TimetableSetBuilder(progress, threads)
+                    new TimetableSetBuilder(progress)
                         .build(
                             new TimetableSetBuilder.SetInput(setMembers, neighbors),
                             options,
@@ -2005,13 +2050,6 @@ public final class FtaTimetableCommand {
             CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-cancel ", "只对这一次构建生效")));
     sender.sendMessage(
         configRow(
-            "快车错峰时限",
-            TimetableBuildOptions.DEFAULT_STAGGER_MINUTES + " 分钟",
-            "默认（无持久化位置），仅 --rapid-stagger 时生效；到点后编完当时那一批才停；0 为不限",
-            CommandUx.suggestAction(
-                "[本次覆盖]", buildPrefix + " --rapid-stagger --stagger-minutes ", "只对这一次构建生效")));
-    sender.sendMessage(
-        configRow(
             "占用裕量",
             TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS + "s",
             "默认（无持久化位置）",
@@ -2036,16 +2074,6 @@ public final class FtaTimetableCommand {
             "停站开销",
             run.stationStopOverheadSeconds() + "s",
             "config.yml 的 timetable.station-stop-overhead-seconds：车站停车在 dwell 之外多算的秒数",
-            Component.empty()));
-    sender.sendMessage(
-        configRow(
-            "编表线程",
-            buildThreads() + " 个",
-            settings.buildThreads() == ConfigManager.TimetableSettings.AUTO_BUILD_THREADS
-                ? "config.yml 的 timetable.build-threads（auto：核数的一半，至多 "
-                    + BuildPool.DEFAULT_MAX_THREADS
-                    + " 个）；只影响编表快慢，不影响结果"
-                : "config.yml 的 timetable.build-threads；只影响编表快慢，不影响结果",
             Component.empty()));
     sender.sendMessage(
         configRow(
@@ -2937,8 +2965,8 @@ public final class FtaTimetableCommand {
   }
 
   /**
-   * 编表的跟车规则：与运行时控车读同一组配置，快车被卡与错峰都按它算闭塞时间。减速度按默认车种（与 {@link #runCurveSettings} 同一来源）。 车长不在配置里，由
-   * build 按出车编组补上（{@link #trainLengthsOf}）。
+   * 编表的跟车规则：与运行时控车读同一组配置，快车被卡按它算闭塞时间。减速度按默认车种（与 {@link #runCurveSettings} 同一来源）。 车长不在配置里，由 build
+   * 按出车编组补上（{@link #trainLengthsOf}）。
    *
    * @param config 当前配置；为空时（插件未加载配置）不按闭塞时间算
    */
@@ -3130,11 +3158,6 @@ public final class FtaTimetableCommand {
     }
     return new TimetableBuildOptions.Repair(
         Duration.ofSeconds(maxWait), Duration.ofSeconds(tolerance));
-  }
-
-  /** 编表线程数：{@code timetable.build-threads} 换算后的值（auto 按核数取）。 */
-  private int buildThreads() {
-    return BuildPool.resolveThreads(timetableSettings().buildThreads());
   }
 
   /** 当前的时刻表配置；读不到时用缺省值。 */
@@ -3690,8 +3713,8 @@ public final class FtaTimetableCommand {
    * @param separationSeconds 冲突检查里相邻占用之间的最小间隔
    * @param strict 目标 headway 有冲突时构建失败而不是回退
    * @param maxCancelTrips 严格模式最多取消几班让不掉的班次；0 表示不取消；没给 {@code --max-cancel} 时为负，按运营班次的比例定
-   * @param rapidStagger 快车错峰搜索：逐个试原地折返端的折返、快车组的平移与停站、按成品表实测挑（慢）
-   * @param staggerMinutes 快车错峰搜索的时间上限（分钟，0 表示不限）；没给 {@code --stagger-minutes} 时为空
+   * @param rapidStagger 带了 {@code --rapid-stagger}：已并入默认编表，只用来回显"不再需要"
+   * @param staggerMinutes 给了 {@code --stagger-minutes}：同上；没给时为空
    * @param name 时刻表展示名
    * @param tripCodePrefix 车次号前缀
    */
@@ -3712,13 +3735,5 @@ public final class FtaTimetableCommand {
       boolean rapidStagger,
       Integer staggerMinutes,
       String name,
-      String tripCodePrefix) {
-
-    /** 错峰时间上限：没给时取缺省值。 */
-    int staggerMinutesOrDefault() {
-      return staggerMinutes == null
-          ? TimetableBuildOptions.DEFAULT_STAGGER_MINUTES
-          : staggerMinutes;
-    }
-  }
+      String tripCodePrefix) {}
 }

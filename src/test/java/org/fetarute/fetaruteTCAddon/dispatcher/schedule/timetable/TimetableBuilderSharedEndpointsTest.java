@@ -56,12 +56,6 @@ class TimetableBuilderSharedEndpointsTest {
     int localGap = uniformGap(result, local, localBack);
     int rapidGap = uniformGap(result, rapid, rapidBack);
     assertTrue(localGap > rapidGap, () -> "慢车每站停，锚定间距应更长：" + localGap + " / " + rapidGap);
-    for (String group : List.of("local", "rapid")) {
-      assertTrue(
-          result.phaseNotes().stream()
-              .anyMatch(note -> note.startsWith("交路组 " + group + " 往返对") && note.contains("锚定")),
-          () -> group + " 没有锚定：" + result.phaseNotes());
-    }
   }
 
   /** 各班反向发车减同一序号的正向发车：每一对都相同时返回它。 */

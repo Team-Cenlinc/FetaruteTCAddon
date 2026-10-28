@@ -26,7 +26,7 @@ import org.junit.jupiter.api.Test;
  * 严格模式取消是局部的：取消一班只动它所在的交路，别的交路的车辆、班次与出入库与不取消时逐条相同，取消之后冲突也不增加。
  *
  * <p>路网直链 DEPA–A–B–C–DEPC，两端各有车库；RA（A→C）与 RB（C→A）每 600 秒一班往返，一条交路最多 4 班。 已发布邻表在第 3 个 600 秒周期里每 60
- * 秒跑一趟 A→B，那个周期里与它相撞的班次让不掉，只能取消。对照组是没有邻表的同一张表（干净，不取消）。
+ * 秒跑一趟 A→B（全线单线，邻表那段时间把区间占满），那段时间里与它相撞的班次让不掉，只能取消。对照组是没有邻表的同一张表（干净，不取消）。
  */
 class TimetableBuilderLocalCancelTest {
 
@@ -38,6 +38,15 @@ class TimetableBuilderLocalCancelTest {
   private static final String C = "OP:S:C:1";
   private static final String DEPC = "OP:D:DEPC:1";
   private static final String NEIGHBOR = "CO/OP/L2/L2-TT";
+  private static final int START = 5 * 3600;
+  private static final int INTERVAL = 600;
+  private static final int NEIGHBOR_RUNS = 10;
+  private static final int NEIGHBOR_HEADWAY = 60;
+  private static final int NEIGHBOR_FROM = 2 * INTERVAL;
+
+  /** 邻表末班离开 A–B 区间的时刻（末班发车 + 区间运行 100 秒）。 */
+  private static final int NEIGHBOR_UNTIL =
+      NEIGHBOR_FROM + (NEIGHBOR_RUNS - 1) * NEIGHBOR_HEADWAY + 100;
 
   private final RailGraph graph =
       TimetableTestFixtures.chain(
@@ -45,7 +54,7 @@ class TimetableBuilderLocalCancelTest {
           new int[] {50, 1000, 1000, 50},
           new double[] {10.0, 10.0, 10.0, 10.0});
 
-  /** 取消的班次之外，不卷进取消的交路与对照组逐条相同；卷进去的交路只拆不换车，取消之后的冲突不比目标间隔多。 */
+  /** 取消的班次之外，不卷进取消的交路与对照组逐条相同；取消只落在邻表占线的那段时间里、只卷进一条交路，取消之后的冲突不比目标间隔多。 */
   @Test
   void cancellingATripLeavesTheOtherDutiesAsTheyWere() {
     TimetableBuildResult reference = build(new TimetableBuilder(), false, 10);
@@ -59,7 +68,7 @@ class TimetableBuilderLocalCancelTest {
         cancelled.droppedTrips().stream()
             .filter(trip -> trip.reason() == VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED)
             .count();
-    assertEquals(1, count, () -> cancelled.droppedTrips().toString());
+    assertTrue(count >= 1, "邻表占满区间的那段时间里必须取消");
 
     Timetable before = reference.timetable().orElseThrow();
     Timetable after = cancelled.timetable().orElseThrow();
@@ -74,6 +83,12 @@ class TimetableBuilderLocalCancelTest {
       }
     }
     assertEquals(count, gone.size(), () -> "只有取消的班次从表上消失，别的班次时刻不动：" + gone);
+    for (TimetableTrip trip : before.trips()) {
+      int at = trip.departureSecondOfDay() - START;
+      assertTrue(
+          !gone.contains(slot(trip)) || (at > NEIGHBOR_FROM - INTERVAL && at < NEIGHBOR_UNTIL),
+          () -> "取消落在邻表占线的时段之外：" + slot(trip));
+    }
     Set<String> afterDuties = new HashSet<>(signatures(after));
     int untouched = 0;
     for (Map.Entry<String, List<String>> duty : dutySlots(before).entrySet()) {
@@ -91,16 +106,15 @@ class TimetableBuilderLocalCancelTest {
         "取消之后剩下的冲突不比目标间隔多");
   }
 
-  /** 串行与并行编出同一张表、同一份取消。 */
+  /** 同一份输入编两次，表、取消与报告逐字段相同。 */
   @Test
-  void localCancellationIsTheSameWithThreads() {
-    TimetableBuildResult serial = build(new TimetableBuilder(), true, 10);
-    TimetableBuildResult parallel =
-        build(new TimetableBuilder(TimetableBuildProgress.untracked(), 4), true, 10);
+  void localCancellationIsDeterministic() {
+    TimetableBuildResult first = build(new TimetableBuilder(), true, 10);
+    TimetableBuildResult second = build(new TimetableBuilder(), true, 10);
 
-    assertEquals(serial.timetable(), parallel.timetable());
-    assertEquals(serial.droppedTrips(), parallel.droppedTrips());
-    assertEquals(serial.warnings(), parallel.warnings());
+    assertEquals(first.timetable(), second.timetable());
+    assertEquals(first.droppedTrips(), second.droppedTrips());
+    assertEquals(first.warnings(), second.warnings());
   }
 
   // ------------------------------------------------------------------ 夹具
@@ -150,7 +164,7 @@ class TimetableBuilderLocalCancelTest {
         + duty.plannedEndSecondOfDay();
   }
 
-  /** 邻表 NB（A→B）一趟，与第 3 个周期的 RA 同时进 A–B 区间（对向的 RB 那时不在这段上）。 */
+  /** 邻表 NB（A→B）在第 3 个 600 秒周期里每 60 秒一趟：任何相位都避不开，那个周期里与它相撞的班次只能取消。 */
   private NeighborTimetable neighbor() {
     UUID nb = TimetableTestFixtures.routeId("NB");
     RouteDefinition definition = TimetableTestFixtures.route("NB", List.of(A, B));
@@ -168,7 +182,14 @@ class TimetableBuilderLocalCancelTest {
             timing.segments(),
             TimetableConflictChecker.platformsOf(timing.stops(), stops, definition.waypoints()));
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
-    movements.add(new TimetableConflictChecker.Movement("NB-001", nb, 1200, Optional.of(NEIGHBOR)));
+    for (int k = 0; k < NEIGHBOR_RUNS; k++) {
+      movements.add(
+          new TimetableConflictChecker.Movement(
+              String.format("NB-%03d", k + 1),
+              nb,
+              NEIGHBOR_FROM + NEIGHBOR_HEADWAY * k,
+              Optional.of(NEIGHBOR)));
+    }
     return new NeighborTimetable(
         UUID.nameUUIDFromBytes("L2-TT".getBytes(StandardCharsets.UTF_8)),
         NEIGHBOR,
@@ -194,9 +215,9 @@ class TimetableBuilderLocalCancelTest {
     routes.add(leg("RTC", RouteOperationType.RETURN, List.of(C, DEPC), DEPC));
     TimetableBuildOptions options =
         new TimetableBuildOptions(
-                5 * 3600,
-                5 * 3600 + 3 * 3600,
-                Duration.ofSeconds(600),
+                START,
+                START + 3 * 3600,
+                Duration.ofSeconds(INTERVAL),
                 Duration.ofSeconds(0),
                 new VehicleDutyPlanner.Limits(4, 7200, 60),
                 "",

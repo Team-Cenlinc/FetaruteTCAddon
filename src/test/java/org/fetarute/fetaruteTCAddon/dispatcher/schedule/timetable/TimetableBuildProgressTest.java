@@ -63,19 +63,18 @@ class TimetableBuildProgressTest {
     assertEquals(Duration.ofSeconds(2), progress.snapshot().stageElapsed());
   }
 
-  /** 完整构建按用途分开数：第三层完整候选、严格取消重排、错峰候选各几次，报告里一行写清。 */
+  /** 完整构建按用途分开数：放宽确认、严格取消重排各几次，报告里一行写清。 */
   @Test
   void trialsAreCountedByKind() {
     TimetableBuildProgress progress = new TimetableBuildProgress();
-    progress.trial(TimetableBuildProgress.Trial.PHASE_CANDIDATE);
-    progress.trial(TimetableBuildProgress.Trial.PHASE_CANDIDATE);
-    progress.trial(TimetableBuildProgress.Trial.STAGGER_CANDIDATE);
+    progress.trial(TimetableBuildProgress.Trial.RELAX_CONFIRM);
+    progress.trial(TimetableBuildProgress.Trial.RELAX_CONFIRM);
+    progress.trial(TimetableBuildProgress.Trial.CANCEL_RETRY);
 
     TimetableBuildProgress.Snapshot snapshot = progress.snapshot();
-    assertEquals(2, snapshot.trials(TimetableBuildProgress.Trial.PHASE_CANDIDATE));
-    assertEquals(0, snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY));
-    assertEquals(1, snapshot.trials(TimetableBuildProgress.Trial.STAGGER_CANDIDATE));
-    assertEquals("第三层完整候选 2、严格取消重排 0、错峰候选 1", snapshot.describeTrials());
+    assertEquals(2, snapshot.trials(TimetableBuildProgress.Trial.RELAX_CONFIRM));
+    assertEquals(1, snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY));
+    assertEquals("放宽确认 2、严格取消重排 1", snapshot.describeTrials());
   }
 
   @Test

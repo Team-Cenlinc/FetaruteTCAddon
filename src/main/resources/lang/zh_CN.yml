@@ -1149,6 +1149,85 @@ command:
     build:
       restricted-unplaced: "<prefix> <red>编表失败：限定股道的 DYNAMIC 停靠有 <white><count></white> 段连续停留排不出一条始终空闲的股道，请放宽允许的股道或调整发车间隔</red>"
       restricted-plan-failed: "<prefix> <red>编表失败：限定股道的 DYNAMIC 停靠排台时出错，无法确认每段停留都有可用股道</red> <gray>(<white><reason></white>)</gray>"
+    plan:
+      help:
+        header: "<prefix> <dark_aqua>运行计划书</dark_aqua> <gray>（分时段频率与定点发车，按时刻表编号绑定）</gray>"
+        entry: "<click:suggest_command:'<command> '><hover:show_text:'<gray>点击填入</gray>'><gray><command></gray> <white><args></white></hover></click> <white>-</white> <dark_aqua><description></dark_aqua>"
+        create: "领取空白计划书"
+        edit: "领取载入现有计划的书"
+        define: "手持计划书校验并保存"
+        info: "查看时段、定点与绑定"
+        list: "列出运营商下的计划书"
+        delete: "删除计划书（须先解除绑定）"
+        bind: "把时刻表编号绑定到计划书"
+        unbind: "解除时刻表编号的绑定"
+      invalid-code: "<prefix> <red>计划 code 只能使用字母、数字与 _ - . +，且不超过 64 个字符</red>"
+      not-found: "<prefix> <red>未找到运行计划书：</red><white><operator></white><gray>/</gray><white><plan></white>"
+      create:
+        exists: "<prefix> <red>运行计划书已存在，请使用 edit 修改：</red><white><plan></white>"
+      editor:
+        give:
+          success: "<prefix> <dark_aqua>已发放运行计划书</dark_aqua> <gray>编写完成后手持此书执行 /fta timetable plan define</gray>"
+          dropped: "<prefix> <gray>背包已满，运行计划书已掉落在脚下</gray>"
+        book:
+          name: "<dark_aqua>运行计划书</dark_aqua> <gray>(<operator>/<plan>)</gray>"
+          lore-1: "<gray>[时段] 组键 起-止 秒 / [定点] 时刻 route [加开]</gray>"
+          lore-2: "<gray>编写完成后执行 /fta timetable plan define</gray>"
+          empty-template:
+            - "# 运行计划书"
+            - "# # 之后为注释"
+            - "[时段]"
+            - "# 组键 起-止 间隔秒"
+            - "# 组键可写 线/组"
+            - "# WS/WS_Full 06:00-07:00 300"
+            - "# WS_Full 07:00-09:30 180"
+            - "[定点]"
+            - "# 时刻 route [加开]"
+            - "# 05:32 WS-2C_FullR"
+            - "# 07:15:30 MT-3N_DPExp 加开"
+      define:
+        book:
+          missing: "<prefix> <red>请手持运行计划书</red>"
+          invalid: "<prefix> <red>这不是运行计划书</red>"
+        problem-header: "<prefix> <red>运行计划书有误，未保存：</red>"
+        problem: "<gray>第 <white><page></white> 页第 <white><line></white> 行：</gray><red><reason></red>"
+        problem-book: "<gray>整本：</gray><red><reason></red>"
+        success: "<prefix> <dark_aqua>已保存运行计划书</dark_aqua> <white><plan></white> <gray>（<bands> 条时段，<pins> 个定点）</gray>"
+        warning-line: "<yellow>提示：</yellow><gray>运营商下没有线路</gray> <white><line></white><gray>，时段</gray> <white><key></white> <gray>不会生效</gray>"
+        warning-group: "<yellow>提示：</yellow><gray>运营商下没有交路组</gray> <white><group></white><gray>，时段</gray> <white><key></white> <gray>可能不会生效</gray>"
+        warning-route: "<yellow>提示：</yellow><gray>运营商下没有 route</gray> <white><route></white><gray>，</gray><white><time></white> <gray>的定点不会生效</gray>"
+      info:
+        header: "<prefix> <dark_aqua>运行计划书</dark_aqua> <white><plan></white> <gray>（<name>，<operator>，更新于 <updated>）</gray>"
+        broken: "<red>库中的正文无法解析，编表时将报错：</red>"
+        issue: "<gray>-</gray> <red><reason></red>"
+        bands: "<gray>分时段频率：</gray>"
+        bands-none: "<gray>分时段频率：未填写（全天按编表参数）</gray>"
+        band: "<gray>-</gray> <white><key></white> <dark_aqua><from>-<to></dark_aqua> <gray>间隔</gray> <white><interval></white> <gray>秒</gray>"
+        pins: "<gray>定点班次：</gray>"
+        pins-none: "<gray>定点班次：未填写</gray>"
+        pin: "<gray>-</gray> <dark_aqua><time></dark_aqua> <white><route></white> <gray>替换同方向最近的周期格位</gray>"
+        pin-extra: "<gray>-</gray> <dark_aqua><time></dark_aqua> <white><route></white> <gold>加开</gold>"
+        bindings: "<gray>绑定的时刻表编号：</gray><white><codes></white>"
+        bindings-none: "<gray>尚无时刻表编号绑定此计划书</gray>"
+        actions: "<click:run_command:'/fta timetable plan edit <company_arg> <operator_arg> <plan_arg>'><hover:show_text:'<gray>领取载入本计划的书</gray>'><dark_aqua>[编辑]</dark_aqua></hover></click> <click:suggest_command:'/fta timetable plan bind <company_arg> <operator_arg> '><hover:show_text:'<gray>填入绑定命令，随后输入</gray> <white>&lt;code&gt; &lt;plan&gt;</white>'><dark_aqua>[绑定]</dark_aqua></hover></click> <click:suggest_command:'/fta timetable plan delete <company_arg> <operator_arg> <plan_arg> --confirm'><hover:show_text:'<gray>填入删除命令</gray>'><red>[删除]</red></hover></click>"
+      list:
+        header: "<prefix> <dark_aqua>运行计划书</dark_aqua> <gray>(<operator>，共 <count> 本)</gray>"
+        empty: "<prefix> <gray>暂无运行计划书</gray>"
+        entry: "<gray>-</gray> <click:run_command:'/fta timetable plan info <company_arg> <operator_arg> <plan_arg>'><hover:show_text:'<gray>点击查看详情</gray>'><dark_aqua><plan></dark_aqua></hover></click> <gray>（<name>，<bands> 条时段，<pins> 个定点）绑定：</gray><white><codes></white>"
+        broken: "<gray>-</gray> <click:run_command:'/fta timetable plan info <company_arg> <operator_arg> <plan_arg>'><hover:show_text:'<gray>点击查看详情</gray>'><red><plan></red></hover></click> <gray>（<name>，正文无法解析）绑定：</gray><white><codes></white>"
+        codes-none: "无"
+      delete:
+        bound: "<prefix> <red>仍有时刻表编号绑定此计划书，未删除：</red><white><codes></white> <gray>请先执行 /fta timetable plan unbind</gray>"
+        success: "<prefix> <dark_aqua>已删除运行计划书</dark_aqua> <white><plan></white>"
+      bind:
+        success: "<prefix> <dark_aqua>已将时刻表编号</dark_aqua> <white><code></white> <dark_aqua>绑定到运行计划书</dark_aqua> <white><plan></white>"
+        replaced: "<prefix> <dark_aqua>已将时刻表编号</dark_aqua> <white><code></white> <dark_aqua>改绑到运行计划书</dark_aqua> <white><plan></white> <gray>（原为 <previous>）</gray>"
+        unchanged: "<prefix> <gray>时刻表编号</gray> <white><code></white> <gray>已绑定</gray> <white><plan></white><gray>，无需改动</gray>"
+        no-timetable: "<gray>运营商下暂无编号为</gray> <white><code></white> <gray>的时刻表；之后以此编号编表时生效</gray>"
+        rebuild: "<gray>绑定只在编表时读取：已编成的表须重新执行 /fta timetable build 才会按计划书出车</gray>"
+      unbind:
+        success: "<prefix> <dark_aqua>已解除时刻表编号</dark_aqua> <white><code></white> <dark_aqua>的绑定</dark_aqua>"
+        not-bound: "<prefix> <gray>时刻表编号</gray> <white><code></white> <gray>未绑定运行计划书</gray>"
 
   station:
     not-found: "<prefix> <red>未找到站点：</red><white><operator></white><gray>/</gray><white><station></white>"

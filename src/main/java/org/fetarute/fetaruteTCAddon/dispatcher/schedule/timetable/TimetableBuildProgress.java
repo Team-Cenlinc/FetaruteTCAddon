@@ -10,13 +10,12 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * 一次编表的进度：编表线程写（并行编候选时是池内几个线程一起写），主线程随时读；各字段都是 volatile 或原子量。
  *
- * <p>编表的耗时几乎全在完整构建（{@code attempt}：派车、串行、让车修复、冲突扫描）的次数上——目标间隔排不开时放宽搜索、
- * 逐组收紧、快车错峰的每个候选都要完整构建一次。所以除了阶段， 还报完整构建了几次：次数在涨就是在干活，不是卡死。
+ * <p>编表的耗时主要在完整构建（铺网格、派车、预订表、冲突扫描）的次数上：周期层判可行之后才完整构建，目标间隔排不开时
+ * 放宽、逐组收紧与严格模式取消各要再构建几次。所以除了阶段，还报完整构建了几次：次数在涨就是在干活，不是卡死。
  *
  * <p>只记不算：不知道总共要编几次（搜索会提前收手），不给百分比。
  *
- * <p>取消是协作式的：每次完整构建开始前查一次（{@link #checkpoint}），被取消就抛 {@link Cancelled}，最多等完当前这一次构建；
- * 并行的各候选共用这一份，取消后都在各自的下一次完整构建前停下。 编完交给落库（{@link
+ * <p>取消是协作式的：每次完整构建开始前查一次（{@link #checkpoint}），被取消就抛 {@link Cancelled}，最多等完当前这一次构建。 编完交给落库（{@link
  * #beginSaving}）之后就取消不了：取消与开始保存只有一个能成，不会出现"说了不保存却存上了"。
  */
 public final class TimetableBuildProgress {
@@ -29,7 +28,6 @@ public final class TimetableBuildProgress {
     TARGET("按目标间隔编排"),
     RELAX("放宽间隔搜索"),
     TIGHTEN("逐组收紧"),
-    STAGGER("快车错峰搜索"),
     PLATFORMS("排计划站台与量瓶颈"),
     REPORT("汇报与保存");
 
@@ -46,12 +44,10 @@ public final class TimetableBuildProgress {
 
   /** 完整构建的几种用途：编表用时大多花在这几处，分开数才看得出时间去了哪。 */
   public enum Trial {
-    /** 相位第三层在完整交路上试的候选。 */
-    PHASE_CANDIDATE("第三层完整候选"),
+    /** 放宽或收紧间隔时，周期层判可行之后的完整构建确认。 */
+    RELAX_CONFIRM("放宽确认"),
     /** 严格模式取消一班之后的重排。 */
-    CANCEL_RETRY("严格取消重排"),
-    /** 快车错峰候选里的完整构建。 */
-    STAGGER_CANDIDATE("错峰候选");
+    CANCEL_RETRY("严格取消重排");
 
     private final String label;
 
@@ -69,7 +65,7 @@ public final class TimetableBuildProgress {
    *
    * @param stage 当前阶段
    * @param detail 阶段内正在试什么（如“试 156s”）；没有时为空串
-   * @param fullBuilds 已完整构建的次数（含错峰候选）
+   * @param fullBuilds 已完整构建的次数
    * @param elapsed 从开始编表起的用时
    * @param stageElapsed 进入当前阶段后的用时
    * @param trialCounts 按 {@link Trial} 的顺序，各用途完整构建了几次
@@ -91,7 +87,7 @@ public final class TimetableBuildProgress {
       return kind.ordinal() < trialCounts.size() ? trialCounts.get(kind.ordinal()) : 0;
     }
 
-    /** "第三层完整候选 N、严格取消重排 N、错峰候选 N"。 */
+    /** "放宽确认 N、严格取消重排 N"。 */
     public String describeTrials() {
       StringBuilder out = new StringBuilder();
       for (Trial kind : Trial.values()) {
@@ -207,7 +203,7 @@ public final class TimetableBuildProgress {
     }
   }
 
-  /** 进度时钟的当前时刻：编表里按时间截止的地方（快车错峰的时间上限）用它，与快照里的用时同一个钟。 */
+  /** 进度时钟的当前时刻：与快照里的用时同一个钟，测试可注入。 */
   public Instant now() {
     return clock.instant();
   }

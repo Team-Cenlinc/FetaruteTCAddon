@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -13,6 +14,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -44,14 +46,35 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
  * <tr><td>JUNCTION 道岔</td><td>路径穿越的 SWITCHER 节点</td><td>两次通过之间要留 separation</td></tr>
  * </table>
  *
+ * <h2>闭塞时间</h2>
+ *
+ * <p>图索引带上跟车规则时（{@link GraphIndex#withBlocking}），区间、道岔与具体股道每格旁边再登记一个闭塞格（键加 {@value
+ * #BLOCKING_SUFFIX}）：从后车授权窗口要用到它（{@link BlockingTimes#need}），到车尾与尾部保护离开、下一个调度 tick 放出它（{@link
+ * BlockingTimes#release}）。闭塞格之间不留 separation——两格首尾相接就是运行时后车恰好不减速。占用格照旧留 separation，
+ * 两种格都不撞才算排开，所以两车的最小间隔是 {@code max(占用 + separation, 闭塞时间)}：separation 仍是占用口径的余量，
+ * 闭塞时间只在它不够的地方（快车追慢车、长车出清）收紧。足迹是周期层、预订表与终判共用的，三处因此同一口径。
+ *
  * <p>每次停靠同时登记两层站台占用：站台组一层检验车辆与允许股道之间是否存在可行分配，具体股道一层抓固定股道互斥。 DYNAMIC
  * 停靠只有组一层，但携带实际股道允许集合；同一车辆连续停留取各段允许集合的交集。
  *
- * <p>本类刻意<b>不</b>建模的东西：授权窗口、制动距离扩展的 lookahead、恢复链。那些属于真调度器；回放如果发现本模型漏了约束， 修的是本模型，不是让 build 去依赖回放。
+ * <p>本类刻意<b>不</b>建模的东西：恢复链与运行时的临时让行。那些属于真调度器；回放如果发现本模型漏了约束， 修的是本模型，不是让 build 去依赖回放。
  */
 public final class TimetableConflictChecker {
 
+  /** 闭塞格的键后缀：原资源键加上它，就是这个资源按闭塞时间登记的那一格。 */
+  static final String BLOCKING_SUFFIX = "#blocking";
+
   private TimetableConflictChecker() {}
+
+  /** 这个资源键是不是闭塞格。 */
+  static boolean isBlocking(String key) {
+    return key != null && key.endsWith(BLOCKING_SUFFIX);
+  }
+
+  /** 这个资源上相邻两次占用之间要留的余量：闭塞格不留（闭塞时间里已含运行时的全部要求），其余是 separation。 */
+  static int marginOf(String key, int separation) {
+    return isBlocking(key) ? 0 : Math.max(0, separation);
+  }
 
   /**
    * 检查一组运行是否有资源冲突。
@@ -783,7 +806,78 @@ public final class TimetableConflictChecker {
           tail.leavesStop(i, stop.departureOffsetSeconds()),
           footprints);
     }
+    index.blocking().of(profile, index).ifPresent(times -> addBlockingSlots(slots, profile, times));
     return new Footprint(slots);
+  }
+
+  /**
+   * 闭塞格：区间、道岔、具体股道各格旁边登记 {@code [要用, 放出]}；起点站台补发车到放出那截，终点站台补要用到到站那截（中间是待命， 由 {@link Stay} 登记）。
+   *
+   * <p>闭塞时间每个资源只记交路第一次经过，所以只有要用不晚于进入、放出不早于离开的那格（第一次经过）才登记；车长未知放不出的不登记， 这条交路作为前车只按占用口径判。
+   */
+  private static void addBlockingSlots(
+      List<Slot> slots, RouteProfile profile, BlockingTimes times) {
+    List<Slot> shadows = new ArrayList<>();
+    Set<String> passed = new HashSet<>();
+    for (Slot slot : slots) {
+      if (!blockable(slot)) {
+        continue;
+      }
+      passed.add(slot.key());
+      OptionalInt need = times.need(slot.key());
+      OptionalInt release = times.release(slot.key());
+      if (need.isPresent()
+          && release.isPresent()
+          && need.getAsInt() <= slot.from()
+          && release.getAsInt() >= slot.to()) {
+        shadows.add(blockingSlot(slot.key(), slot.kind(), need.getAsInt(), release.getAsInt()));
+      }
+    }
+    List<TimetableStop> stops = profile.stops();
+    if (stops.size() >= 2 && profile.platforms().size() >= stops.size()) {
+      platformKey(profile.platforms().get(0))
+          .filter(key -> !passed.contains(key))
+          .ifPresent(
+              key -> {
+                int departure = stops.get(0).departureOffsetSeconds();
+                times.release(key).stream()
+                    .filter(release -> release > departure)
+                    .forEach(
+                        release ->
+                            shadows.add(blockingSlot(key, Kind.PLATFORM, departure, release)));
+              });
+      platformKey(profile.platforms().get(stops.size() - 1))
+          .filter(key -> !passed.contains(key))
+          .ifPresent(
+              key -> {
+                int arrival = stops.get(stops.size() - 1).arrivalOffsetSeconds();
+                times.need(key).stream()
+                    .filter(need -> need < arrival)
+                    .forEach(need -> shadows.add(blockingSlot(key, Kind.PLATFORM, need, arrival)));
+              });
+    }
+    slots.addAll(shadows);
+  }
+
+  /** 有闭塞时间可登记的格：区间、道岔、具体股道（站台组有容量、单线区段管对向，都不按闭塞时间）。 */
+  private static boolean blockable(Slot slot) {
+    return switch (slot.kind()) {
+      case TRACK, JUNCTION -> true;
+      case PLATFORM -> slot.key().startsWith("platform:");
+      case SINGLE_LINE -> false;
+    };
+  }
+
+  private static Slot blockingSlot(String key, Kind kind, int from, int to) {
+    return new Slot(key + BLOCKING_SUFFIX, kind, 1, from, to, 0);
+  }
+
+  /** 具体股道一层的键；动态停靠或没有股道时为空。 */
+  private static Optional<String> platformKey(Platform platform) {
+    if (platform == null || platform.dynamic() || platform.nodeId().isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.of("platform:" + platform.nodeId());
   }
 
   /**
@@ -912,6 +1006,13 @@ public final class TimetableConflictChecker {
     }
   }
 
+  /** 一段站台停留（待命、折返）的占用格，与 {@link Stay} 投影成的资源同一口径；周期层求解用它给停留占位。 */
+  static List<Slot> staySlots(Platform platform, int from, int to, Footprints footprints) {
+    List<Slot> slots = new ArrayList<>();
+    addPlatformSlots(slots, platform, from, to, footprints);
+    return slots;
+  }
+
   /** 站台键的容量：站台组一层取图里该站的股道数，具体股道一层是 1。 */
   private static int platformCapacityOf(
       String key, Platform platform, Map<String, Integer> platformCapacity) {
@@ -999,22 +1100,54 @@ public final class TimetableConflictChecker {
   // ------------------------------------------------------------------ 模型
 
   /**
-   * 只依赖图的那部分输入：单线区段索引、站台组股道数、节点类型。
+   * 一次检查的口径：只依赖图的那部分输入（单线区段索引、站台组股道数、节点类型），加上要不要登记闭塞格。
    *
    * <p>单线索引要跑一遍迭代 Tarjan 找桥，在大图上是十几到几十毫秒；headway 搜索最多几十上百次 attempt，不能每次重建。
+   *
+   * <p>闭塞格的规则挂在索引上，是因为凡是投影足迹的地方（周期层、预订表、全扫、增量索引）都拿同一个索引：口径只能有一个， 否则"自己排的时候没撞、终判却撞上"。
    *
    * @param sections 单线区段索引；无图时为 null
    * @param platformCapacity 站台组 → 股道数
    * @param nodeTypes 节点 → 类型
+   * @param blocking 闭塞格的规则；{@link Blocking#NONE} 时不登记
    */
   public record GraphIndex(
       SingleLineSectionIndex sections,
       Map<String, Integer> platformCapacity,
-      Map<NodeId, NodeType> nodeTypes) {
+      Map<NodeId, NodeType> nodeTypes,
+      Blocking blocking) {
 
     public GraphIndex {
       platformCapacity = platformCapacity == null ? Map.of() : Map.copyOf(platformCapacity);
       nodeTypes = nodeTypes == null ? Map.of() : Map.copyOf(nodeTypes);
+      blocking = blocking == null ? Blocking.NONE : blocking;
+    }
+
+    /** 不登记闭塞格。 */
+    public GraphIndex(
+        SingleLineSectionIndex sections,
+        Map<String, Integer> platformCapacity,
+        Map<NodeId, NodeType> nodeTypes) {
+      this(sections, platformCapacity, nodeTypes, Blocking.NONE);
+    }
+
+    /**
+     * 同一张图，足迹另登记闭塞格。
+     *
+     * @param following 跟车规则与车长；未启用时等于不登记
+     * @param trajectories 闭塞时间用的逐点轨迹
+     */
+    GraphIndex withBlocking(
+        TimetableBuildOptions.Following following, BlockingTimes.Trajectories trajectories) {
+      return new GraphIndex(
+          sections, platformCapacity, nodeTypes, new Blocking(following, trajectories));
+    }
+
+    /** 同一张图，不登记闭塞格：自己另算闭塞时间的地方（快车被卡、瓶颈报告）用。 */
+    GraphIndex withoutBlocking() {
+      return blocking.enabled()
+          ? new GraphIndex(sections, platformCapacity, nodeTypes, Blocking.NONE)
+          : this;
     }
 
     /** 从图快照建索引；{@code null} 图得到空索引（只剩边互斥）。 */
@@ -1026,6 +1159,39 @@ public final class TimetableConflictChecker {
           SingleLineSectionIndex.fromGraph(graph),
           TimetableConflictChecker.platformCapacity(graph),
           TimetableConflictChecker.nodeTypes(graph));
+    }
+  }
+
+  /** 闭塞格的规则（{@link BlockingTimes}）。闭塞时间按交路投影只算一次（按投影对象认：一次构建里投影不变，多停改过停站的是另一个投影）。 */
+  public static final class Blocking {
+
+    /** 不登记闭塞格。 */
+    public static final Blocking NONE =
+        new Blocking(TimetableBuildOptions.Following.NONE, BlockingTimes.Trajectories.NONE);
+
+    private final TimetableBuildOptions.Following following;
+    private final BlockingTimes.Trajectories trajectories;
+    private final Map<RouteProfile, BlockingTimes> known =
+        Collections.synchronizedMap(new IdentityHashMap<>());
+
+    Blocking(TimetableBuildOptions.Following following, BlockingTimes.Trajectories trajectories) {
+      this.following = following == null ? TimetableBuildOptions.Following.NONE : following;
+      this.trajectories = trajectories == null ? BlockingTimes.Trajectories.NONE : trajectories;
+    }
+
+    /** 是否登记。 */
+    public boolean enabled() {
+      return following.enabled();
+    }
+
+    /** 这条交路的闭塞时间；不登记时为空。 */
+    Optional<BlockingTimes> of(RouteProfile profile, GraphIndex index) {
+      if (!enabled() || profile == null) {
+        return Optional.empty();
+      }
+      return Optional.of(
+          known.computeIfAbsent(
+              profile, key -> BlockingTimes.of(key, index, following, trajectories)));
     }
   }
 
@@ -1241,6 +1407,11 @@ public final class TimetableConflictChecker {
     /** 对方邻表的显示码；内部冲突为空。 */
     public Optional<String> otherOwner() {
       return firstOwner.isPresent() ? firstOwner : secondOwner;
+    }
+
+    /** 后到的那一方要再晚多少秒才不撞：前一方离开加这个资源的余量（{@link #marginOf}），减去后一方进入。 */
+    public int waitSeconds(int separation) {
+      return firstTo + marginOf(resource, separation) - secondFrom;
     }
 
     /** 供报告使用的一行描述；时刻由调用方按需换算。 */
@@ -1513,7 +1684,7 @@ public final class TimetableConflictChecker {
 
     /** 将等待窗口内仍占用或仍处于安全裕量中的记录复制进试放桶，原桶保持不变。 */
     private void addOverlapping(Resource existing, int from, int to, int separation) {
-      int margin = Math.max(0, separation);
+      int margin = marginOf(key, separation);
       for (Occupation value : existing.occupations) {
         if ((long) value.from() > (long) to + margin) {
           break;
@@ -1552,7 +1723,8 @@ public final class TimetableConflictChecker {
      * <p>从"之前的占用在 {@code lo} 时一定已经腾空"的位置起扫：进入早于 {@code lo − maxSpan − separation} 的占用， 离开 + 裕量也早于
      * {@code lo}。这样扫到窗内时在场集合的内容与顺序都与从头扫一致，报出的冲突逐字相同。
      */
-    private List<Conflict> scan(int separation, Active active, int lo, int hi) {
+    private List<Conflict> scan(int separationSeconds, Active active, int lo, int hi) {
+      int separation = marginOf(key, separationSeconds);
       active.reset();
       int start =
           lo == Integer.MIN_VALUE ? 0 : firstEnteringAtOrAfter((long) lo - maxSpan - separation);

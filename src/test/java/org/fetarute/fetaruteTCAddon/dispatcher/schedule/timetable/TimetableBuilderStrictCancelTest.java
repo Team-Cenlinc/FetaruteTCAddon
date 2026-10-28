@@ -118,32 +118,29 @@ class TimetableBuilderStrictCancelTest {
                 trip -> trip.reason() == VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED));
   }
 
-  /** 进度按用途分开数完整构建：取消三班就有三次严格取消重排，第三层完整候选另记，没有错峰候选。 */
+  /** 进度按用途分开数完整构建：取消几班就有几次严格取消重排，严格模式不放宽、没有放宽确认。 */
   @Test
   void progressCountsTheCancelRetries() {
     TimetableBuildProgress progress = TimetableBuildProgress.untracked();
     build(new TimetableBuilder(progress), true, 10);
 
     TimetableBuildProgress.Snapshot snapshot = progress.snapshot();
-    assertEquals(3, snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY));
-    assertEquals(0, snapshot.trials(TimetableBuildProgress.Trial.STAGGER_CANDIDATE));
-    assertTrue(
-        snapshot.fullBuilds()
-            >= snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY)
-                + snapshot.trials(TimetableBuildProgress.Trial.PHASE_CANDIDATE),
+    assertEquals(0, snapshot.trials(TimetableBuildProgress.Trial.RELAX_CONFIRM));
+    assertEquals(
+        snapshot.fullBuilds() - 1,
+        snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY),
         snapshot::toString);
   }
 
-  /** 串行与并行编出同一张表、同一份取消。 */
+  /** 同一份输入编两次，表、取消与报告逐字段相同。 */
   @Test
-  void cancellationIsTheSameWithThreads() {
-    TimetableBuildResult serial = build(new TimetableBuilder(), true, 10);
-    TimetableBuildResult parallel =
-        build(new TimetableBuilder(TimetableBuildProgress.untracked(), 4), true, 10);
+  void cancellationIsDeterministic() {
+    TimetableBuildResult first = build(new TimetableBuilder(), true, 10);
+    TimetableBuildResult second = build(new TimetableBuilder(), true, 10);
 
-    assertEquals(serial.timetable(), parallel.timetable());
-    assertEquals(serial.droppedTrips(), parallel.droppedTrips());
-    assertEquals(serial.warnings(), parallel.warnings());
+    assertEquals(first.timetable(), second.timetable());
+    assertEquals(first.droppedTrips(), second.droppedTrips());
+    assertEquals(first.warnings(), second.warnings());
   }
 
   // ------------------------------------------------------------------ 夹具

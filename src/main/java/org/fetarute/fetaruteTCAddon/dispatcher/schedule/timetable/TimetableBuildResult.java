@@ -37,14 +37,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param baselines 邻表基线（成功时非空；无邻表为空）
  * @param shifts 因端点串行偏离名义时隙的班次
  * @param yields 让车清单：已写进表的延后（对邻表让的带 owner）
- * @param terminals 容量 1 端点的报告（经过次数、占用、结构下界）
- * @param throats 车库咽喉的报告（出入库经过次数、占用、出库在库内等了几班）
  * @param groupIntervals 各交路组的目标间隔与实际间隔
  * @param interleaves 共用起点站台组上的合成间隔
  * @param dutyShapes 交路形状：跑几班的交路各有多少条
  * @param phaseNotes 相位选择的说明
  * @param warnings 构建过程中的提示
- * @param rapidCatchUp 成品表上快车在共线段被慢车拖住、以及在表里让车等待的合计（{@link RapidStagger}）；报告据此提示用快车错峰重建
+ * @param rapidCatchUp 成品表上快车在共线段被慢车拖住、以及在表里让车等待的合计（{@link RapidCatchUp}）
  * @param capacity 瓶颈：成品表上最忙一小时占用最高的几个资源（{@link CapacityReport}）；编表器不量，排完计划站台后由调用方补上
  * @param consistNotes 区分车型时的报告：各车型车长、各车型时分、车型配比、按车型的交路与峰值；不区分车型时为空
  */
@@ -66,9 +64,7 @@ public record TimetableBuildResult(
     List<NeighborSummary> neighbors,
     List<TimetableBaseline> baselines,
     List<TripShift> shifts,
-    List<ResourceRepair.Yield> yields,
-    List<TerminalSerializer.TerminalReport> terminals,
-    List<TerminalSerializer.ThroatReport> throats,
+    List<TripYield> yields,
     List<GroupInterval> groupIntervals,
     List<PhasePlanner.Interleave> interleaves,
     List<DutyShape> dutyShapes,
@@ -101,9 +97,7 @@ public record TimetableBuildResult(
       List<NeighborSummary> neighbors,
       List<TimetableBaseline> baselines,
       List<TripShift> shifts,
-      List<ResourceRepair.Yield> yields,
-      List<TerminalSerializer.TerminalReport> terminals,
-      List<TerminalSerializer.ThroatReport> throats,
+      List<TripYield> yields,
       List<GroupInterval> groupIntervals,
       List<PhasePlanner.Interleave> interleaves,
       List<DutyShape> dutyShapes,
@@ -134,8 +128,6 @@ public record TimetableBuildResult(
         baselines,
         shifts,
         yields,
-        terminals,
-        throats,
         groupIntervals,
         interleaves,
         dutyShapes,
@@ -166,8 +158,6 @@ public record TimetableBuildResult(
     neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
     baselines = baselines == null ? List.of() : List.copyOf(baselines);
     shifts = shifts == null ? List.of() : List.copyOf(shifts);
-    terminals = terminals == null ? List.of() : List.copyOf(terminals);
-    throats = throats == null ? List.of() : List.copyOf(throats);
     groupIntervals = groupIntervals == null ? List.of() : List.copyOf(groupIntervals);
     interleaves = interleaves == null ? List.of() : List.copyOf(interleaves);
     dutyShapes = dutyShapes == null ? List.of() : List.copyOf(dutyShapes);
@@ -228,8 +218,6 @@ public record TimetableBuildResult(
         baselines,
         shifts,
         yields,
-        terminals,
-        throats,
         groupIntervals,
         interleaves,
         dutyShapes,
@@ -289,8 +277,6 @@ public record TimetableBuildResult(
         baselines,
         shifts,
         yields,
-        terminals,
-        throats,
         groupIntervals,
         interleaves,
         dutyShapes,
@@ -392,8 +378,6 @@ public record TimetableBuildResult(
         List.of(),
         List.of(),
         List.of(),
-        List.of(),
-        List.of(),
         absorbable,
         unabsorbable,
         resourcePhaseNotes,
@@ -433,7 +417,7 @@ public record TimetableBuildResult(
       String tripCode,
       int nominalSecondOfDay,
       int actualSecondOfDay,
-      TerminalSerializer.Shift.Reason reason) {}
+      DutyRetiming.Shift.Reason reason) {}
 
   /**
    * 一份邻表在报告里的摘要。
