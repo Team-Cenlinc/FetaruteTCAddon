@@ -864,8 +864,51 @@ class TimetableBuilderTest {
     assertTrue(result.unabsorbable().isEmpty());
   }
 
+  /** 并行只影响快慢：放宽（周期层扫描提前并行解）、严格取消（逐班试排成批编）与裕量提示（各档成批编）三条路径上， 4 个线程与串行编出的结果逐字段相同。 */
+  @Test
+  void parallelBuildMatchesSerial() {
+    TimetableBuildOptions relaxing =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(240),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE);
+    TimetableBuildOptions strict =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE,
+            Duration.ofSeconds(30),
+            true);
+    TimetableBuildOptions beyondTwice = relaxing.withHeadway(Duration.ofSeconds(150));
+    for (TimetableBuildOptions options : List.of(relaxing, strict, beyondTwice)) {
+      TimetableBuildResult serial = build(twoRouteFixture(1, 1), options, 1);
+      TimetableBuildResult parallel = build(twoRouteFixture(1, 1), options, 4);
+      assertEquals(serial.success(), parallel.success());
+      assertEquals(serial.warnings(), parallel.warnings());
+      assertEquals(serial.timetable(), parallel.timetable());
+      assertEquals(serial.effectiveHeadwaySeconds(), parallel.effectiveHeadwaySeconds());
+      assertEquals(serial.unabsorbable(), parallel.unabsorbable());
+      assertEquals(serial.absorbable(), parallel.absorbable());
+      assertEquals(serial.droppedTrips(), parallel.droppedTrips());
+      assertEquals(serial, parallel);
+    }
+  }
+
   private static TimetableBuildResult build(Fixture fixture, TimetableBuildOptions options) {
-    return new TimetableBuilder()
+    return build(fixture, options, 1);
+  }
+
+  private static TimetableBuildResult build(
+      Fixture fixture, TimetableBuildOptions options, int threads) {
+    return new TimetableBuilder(TimetableBuildProgress.untracked(), threads)
         .build(
             new TimetableBuilder.BuildInput(
                 TIMETABLE,

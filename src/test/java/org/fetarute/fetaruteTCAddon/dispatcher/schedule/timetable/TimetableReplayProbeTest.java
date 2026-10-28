@@ -20,6 +20,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
@@ -246,7 +247,10 @@ class TimetableReplayProbeTest {
     TimetableBuildProgress progress = new TimetableBuildProgress();
     long started = System.nanoTime();
     TimetableSetBuilder.SetResult result =
-        new TimetableSetBuilder(progress)
+        new TimetableSetBuilder(
+                progress,
+                Integer.parseInt(
+                    Objects.requireNonNullElse(System.getenv("FTA_REPLAY_THREADS"), "1")))
             .build(new TimetableSetBuilder.SetInput(setMembers, List.of()), options, Instant.now());
     long elapsedMillis = (System.nanoTime() - started) / 1_000_000L;
     report(out, String.join(",", lineCodes) + "/" + code, options, elapsedMillis, progress, result);

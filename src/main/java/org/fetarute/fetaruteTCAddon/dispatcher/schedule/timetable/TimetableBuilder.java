@@ -86,22 +86,42 @@ public final class TimetableBuilder {
   /** 进度：阶段与完整构建次数。 */
   private final TimetableBuildProgress progress;
 
+  /** 编表线程数（{@code timetable.build-threads} 换算后）；1 为串行。 */
+  private final int threads;
+
+  /** 这次 build 的并行池；为空时 {@link #build} 现开一个、编完关掉。 */
+  private final BuildPool pool;
+
   public TimetableBuilder() {
     this(TimetableBuildProgress.untracked());
   }
 
+  /** 串行编表：测试与不关心线程数的调用方用，不起线程。 */
   public TimetableBuilder(TimetableBuildProgress progress) {
-    this(new TimetableTimingCalculator(), progress);
+    this(progress, 1);
+  }
+
+  /**
+   * @param progress 进度
+   * @param threads 编表线程数；1 为串行。结果与线程数无关，线程数只影响快慢
+   */
+  public TimetableBuilder(TimetableBuildProgress progress, int threads) {
+    this(new TimetableTimingCalculator(), progress, threads, null);
   }
 
   public TimetableBuilder(TimetableTimingCalculator timingCalculator) {
-    this(timingCalculator, TimetableBuildProgress.untracked());
+    this(timingCalculator, TimetableBuildProgress.untracked(), 1, null);
   }
 
   private TimetableBuilder(
-      TimetableTimingCalculator timingCalculator, TimetableBuildProgress progress) {
+      TimetableTimingCalculator timingCalculator,
+      TimetableBuildProgress progress,
+      int threads,
+      BuildPool pool) {
     this.timingCalculator = Objects.requireNonNull(timingCalculator, "timingCalculator");
     this.progress = Objects.requireNonNull(progress, "progress");
+    this.threads = Math.max(1, threads);
+    this.pool = pool;
   }
 
   /**
@@ -116,6 +136,13 @@ public final class TimetableBuilder {
       BuildInput input, TimetableBuildOptions requested, Instant now) {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(requested, "requested");
+    if (pool == null) {
+      // 一次 build 一个池：互不依赖的完整构建在里面并行编，编完关掉，不留线程也不留整表。
+      try (BuildPool opened = BuildPool.open(threads)) {
+        return new TimetableBuilder(timingCalculator, progress, threads, opened)
+            .build(input, requested, now);
+      }
+    }
     TimetableBuildOptions options = withConsistLengths(input, requested);
     Built base = buildOnce(input, options, now == null ? Instant.now() : now);
     if (base.chosen().isEmpty()) {
@@ -292,22 +319,22 @@ public final class TimetableBuilder {
     stage(TimetableBuildProgress.Stage.TARGET);
     Solved solved;
     Attempt target;
-    // 分时段时有两种定多停的策略（见 solveRegimes），各完整排一次，取完整构建结果更好的那份；一份失败不连累另一份。
+    // 分时段时有两种定多停的策略（见 solveRegimes），各完整排一次（并行编），按原顺序取完整构建结果更好的那份；一份失败不连累另一份。
     Solved best = null;
     Attempt bestAttempt = null;
     String firstFailure = null;
-    for (Supplier<Solved> candidate : solveRegimes(prepared, input, options)) {
-      try {
-        Solved current = candidate.get();
-        Attempt attempt =
-            attemptAtPhases(
-                current.prepared(), options, current.input(), builtAt, current.phases());
-        if (bestAttempt == null || REGIME_ORDER.compare(attempt, bestAttempt) < 0) {
-          best = current;
-          bestAttempt = attempt;
-        }
-      } catch (BuildFailure | PeriodicSolver.HyperperiodTooLong failure) {
-        firstFailure = firstFailure == null ? failure.getMessage() : firstFailure;
+    for (BuildPool.Evaluated<RegimeTry> evaluated :
+        pool.evaluate(
+            solveRegimes(prepared, input, options),
+            candidate -> tryRegime(candidate, options, builtAt))) {
+      RegimeTry tried = evaluated.get();
+      if (tried.attempt() == null) {
+        firstFailure = firstFailure == null ? tried.failure() : firstFailure;
+        continue;
+      }
+      if (bestAttempt == null || REGIME_ORDER.compare(tried.attempt(), bestAttempt) < 0) {
+        best = tried.solved();
+        bestAttempt = tried.attempt();
       }
     }
     if (bestAttempt == null) {
@@ -540,6 +567,22 @@ public final class TimetableBuilder {
             CapacityReport.Report.NONE,
             consistNotes);
     return new Built(result, Optional.of(prepared), Optional.of(chosenPrepared), options);
+  }
+
+  /** 一份制式候选完整排一次的结果；排不出时 {@code attempt} 为空、{@code failure} 是原因。 */
+  private record RegimeTry(Solved solved, Attempt attempt, String failure) {}
+
+  /** 解一份制式候选并完整排一次；构建失败或超周期太长时记下原因，不连累同一批的别的候选。 */
+  private RegimeTry tryRegime(
+      Supplier<Solved> candidate, TimetableBuildOptions options, Instant builtAt) {
+    try {
+      Solved solved = candidate.get();
+      Attempt attempt =
+          attemptAtPhases(solved.prepared(), options, solved.input(), builtAt, solved.phases());
+      return new RegimeTry(solved, attempt, null);
+    } catch (BuildFailure | PeriodicSolver.HyperperiodTooLong failure) {
+      return new RegimeTry(null, null, failure.getMessage());
+    }
   }
 
   private void stage(TimetableBuildProgress.Stage stage) {
@@ -1790,39 +1833,70 @@ public final class TimetableBuilder {
     Attempt current = target;
     int count = 0;
     int tries = 0;
-    while (!current.clean() && cancelled.size() < limit && tries < 2 * limit) {
+    boolean stop = false;
+    while (!stop && !current.clean() && cancelled.size() < limit && tries < 2 * limit) {
+      // 接下来依次要试的几班：前一班无效放回时，下一班就是排除它之后的那一班，不依赖它的试排结果，可以一起编。
       Set<CancelSlot> skip = new HashSet<>(cancelled.keySet());
       skip.addAll(useless);
-      Optional<Cancelled> found = nextCancel(current, skip);
-      if (found.isEmpty()) {
+      List<Cancelled> batch = new ArrayList<>();
+      int room = Math.min(pool.threads(), 2 * limit - tries);
+      while (batch.size() < room) {
+        Optional<Cancelled> found = nextCancel(current, skip);
+        if (found.isEmpty()) {
+          break;
+        }
+        skip.add(found.get().slot());
+        batch.add(
+            new Cancelled(
+                found.get().slot(),
+                targetCodes.getOrDefault(found.get().slot(), found.get().tripCode()),
+                found.get().cause()));
+      }
+      if (batch.isEmpty()) {
         break;
       }
-      Cancelled next =
-          new Cancelled(
-              found.get().slot(),
-              targetCodes.getOrDefault(found.get().slot(), found.get().tripCode()),
-              found.get().cause());
-      cancelled.put(next.slot(), next);
-      tries++;
-      detail("严格模式取消让不掉的班次：第 " + cancelled.size() + " 班（上限 " + limit + "）");
-      progress.trial(TimetableBuildProgress.Trial.CANCEL_RETRY);
-      Attempt retried;
-      try {
-        retried =
-            attemptAtPhases(
-                prepared, options, input, builtAt, target.phases(), Set.copyOf(cancelled.keySet()));
-      } catch (BuildFailure failure) {
-        cancelled.remove(next.slot());
-        break;
-      }
-      if (retried.unabsorbable().size() >= current.unabsorbable().size()) {
-        cancelled.remove(next.slot());
-        useless.add(next.slot());
-        continue;
-      }
-      current = retried;
-      count = Math.max(cancelled.size(), current.dropped().size() - target.dropped().size());
-      if (count > limit) {
+      Set<CancelSlot> kept = Set.copyOf(cancelled.keySet());
+      List<BuildPool.Evaluated<Optional<Attempt>>> retried =
+          pool.evaluate(
+              batch,
+              next -> {
+                Set<CancelSlot> withNext = new HashSet<>(kept);
+                withNext.add(next.slot());
+                progress.trial(TimetableBuildProgress.Trial.CANCEL_RETRY);
+                try {
+                  return Optional.of(
+                      attemptAtPhases(
+                          prepared,
+                          options,
+                          input,
+                          builtAt,
+                          target.phases(),
+                          Set.copyOf(withNext)));
+                } catch (BuildFailure failure) {
+                  return Optional.empty();
+                }
+              });
+      // 按原顺序逐班消费：第一班有效就收下、本批其余作废（取消的班次变了，它们的试排不再对应）；无效的放回、看下一班。
+      stop = true;
+      for (int i = 0; i < batch.size(); i++) {
+        Cancelled next = batch.get(i);
+        tries++;
+        detail("严格模式取消让不掉的班次：第 " + (cancelled.size() + 1) + " 班（上限 " + limit + "）");
+        Optional<Attempt> one = retried.get(i).get();
+        if (one.isEmpty()) {
+          break;
+        }
+        if (one.get().unabsorbable().size() >= current.unabsorbable().size()) {
+          useless.add(next.slot());
+          if (i == batch.size() - 1) {
+            stop = false;
+          }
+          continue;
+        }
+        cancelled.put(next.slot(), next);
+        current = one.get();
+        count = Math.max(cancelled.size(), current.dropped().size() - target.dropped().size());
+        stop = count > limit;
         break;
       }
     }
@@ -1848,6 +1922,7 @@ public final class TimetableBuilder {
       return Optional.empty();
     }
     stage(TimetableBuildProgress.Stage.SEPARATION);
+    List<SeparationTry> trials = new ArrayList<>();
     int lowest = current;
     for (int step = 1; step <= SEPARATION_PROBE_LIMIT; step++) {
       int candidate = current - step * SEPARATION_PROBE_STEP;
@@ -1855,24 +1930,44 @@ public final class TimetableBuilder {
         break;
       }
       lowest = candidate;
-      detail("间隔裕量试 " + candidate + "s");
       TimetableBuildOptions at = options.withSeparation(Duration.ofSeconds(candidate));
-      for (Supplier<Solved> supplier : solveRegimes(prepared, input, at)) {
-        try {
-          Solved solved = supplier.get();
-          Attempt attempt =
-              attemptAtPhases(solved.prepared(), at, solved.input(), builtAt, solved.phases());
-          if (attempt.clean()) {
-            return Optional.of(TimetableBuildReportText.separationHint(current, candidate));
-          }
-        } catch (BuildFailure | PeriodicSolver.HyperperiodTooLong failure) {
-          // 这一档本身构建不了：当作不行，试下一档。
+      for (Supplier<Solved> regime : solveRegimes(prepared, input, at)) {
+        trials.add(new SeparationTry(candidate, at, regime));
+      }
+    }
+    // 一批编线程数个，按原顺序第一个干净的就是答案；同一批里排在它后面的白编，批不大于线程数，浪费有限。
+    for (int from = 0; from < trials.size(); from += pool.threads()) {
+      List<SeparationTry> batch =
+          trials.subList(from, Math.min(trials.size(), from + pool.threads()));
+      List<BuildPool.Evaluated<Boolean>> clean =
+          pool.evaluate(batch, trial -> separationClean(trial, builtAt));
+      for (int i = 0; i < clean.size(); i++) {
+        if (clean.get(i).get()) {
+          return Optional.of(
+              TimetableBuildReportText.separationHint(current, batch.get(i).separation()));
         }
       }
     }
     return lowest < current
         ? Optional.of(TimetableBuildReportText.separationHintNone(current, lowest))
         : Optional.empty();
+  }
+
+  /** 间隔裕量探测的一档里的一份制式候选。 */
+  private record SeparationTry(
+      int separation, TimetableBuildOptions options, Supplier<Solved> regime) {}
+
+  /** 按这一档裕量完整构建一次，有没有让不掉的冲突；这一档本身构建不了时当作不行。 */
+  private boolean separationClean(SeparationTry trial, Instant builtAt) {
+    detail("间隔裕量试 " + trial.separation() + "s");
+    try {
+      Solved solved = trial.regime().get();
+      return attemptAtPhases(
+              solved.prepared(), trial.options(), solved.input(), builtAt, solved.phases())
+          .clean();
+    } catch (BuildFailure | PeriodicSolver.HyperperiodTooLong failure) {
+      return false;
+    }
   }
 
   /** 下一班取消谁：按残余的顺序，先后车、再对方；只取本表的运营班次，已经取消过的与定点班次跳过。 */
@@ -2506,7 +2601,9 @@ public final class TimetableBuilder {
       Map<UUID, String> codes = routeCodes(prepared);
       List<RouteInput> routes = new ArrayList<>(input.routes().size());
       for (RouteInput route : input.routes()) {
-        Map<Integer, Integer> holds = solution.holds().getOrDefault(route.routeId(), Map.of());
+        // 按停靠点顺序：说明的行序与 JVM 的散列种子无关。
+        Map<Integer, Integer> holds =
+            new TreeMap<>(solution.holds().getOrDefault(route.routeId(), Map.of()));
         RouteInput next = route;
         for (Map.Entry<Integer, Integer> hold : holds.entrySet()) {
           next = heldAt(next, hold.getKey(), hold.getValue(), options.defaultDwell());
@@ -2627,7 +2724,7 @@ public final class TimetableBuilder {
               + "–"
               + clock(secondOfDay(regime.to(), options))
               + " "
-              + regime.intervals()
+              + new TreeMap<>(regime.intervals())
               + "："
               + solution.describe());
     }
@@ -2809,6 +2906,10 @@ public final class TimetableBuilder {
     private final Map<Map<String, Integer>, Optional<PeriodicSolver.Solution>> solved =
         new HashMap<>();
 
+    /** 提前并行解好、扫描还没问到的档（{@link #prefetch}）：问到时才移进 {@link #solved}，次数照问到的算。 */
+    private final Map<Map<String, Integer>, BuildPool.Evaluated<Optional<PeriodicSolver.Solution>>>
+        prefetched = new HashMap<>();
+
     /** 只认出入库走行也排开的解（{@link PeriodicSolver.Solution#depotConflicts} 为 0）。 */
     boolean depotClean;
 
@@ -2830,9 +2931,11 @@ public final class TimetableBuilder {
         if (solved.size() >= RELAX_SOLVE_LIMIT) {
           return OptionalInt.empty();
         }
+        prefetch(x, to, coarse, intervalsAt);
         if (accepted(intervalsAt.apply(x)).isEmpty()) {
           continue;
         }
+        prefetch(Math.max(from, x - coarse + fine), x - 1, fine, intervalsAt);
         for (int y = Math.max(from, x - coarse + fine); y < x; y += fine) {
           if (solved.size() < RELAX_SOLVE_LIMIT && accepted(intervalsAt.apply(y)).isPresent()) {
             return OptionalInt.of(y);
@@ -2850,19 +2953,53 @@ public final class TimetableBuilder {
 
     /** 周期层在这组间隔下排得开时的解；排不开为空。 */
     Optional<PeriodicSolver.Solution> periodic(Map<String, Integer> intervals) {
-      return solved.computeIfAbsent(
-          Map.copyOf(intervals),
-          key -> {
-            detail("周期层试 " + key);
-            try {
-              PeriodicSolver.Solution solution =
-                  PeriodicSolver.solve(solverInput(prepared, input, at(key)));
-              return solution.conflicts() == 0 ? Optional.of(solution) : Optional.empty();
-            } catch (PeriodicSolver.HyperperiodTooLong tooLong) {
-              // 这组间隔的超周期太长、环放不下：当作排不开，换下一档。
-              return Optional.empty();
-            }
-          });
+      Map<String, Integer> key = Map.copyOf(intervals);
+      if (solved.containsKey(key)) {
+        return solved.get(key);
+      }
+      BuildPool.Evaluated<Optional<PeriodicSolver.Solution>> early = prefetched.remove(key);
+      Optional<PeriodicSolver.Solution> answer = early != null ? early.get() : solve(key);
+      solved.put(key, answer);
+      return answer;
+    }
+
+    private Optional<PeriodicSolver.Solution> solve(Map<String, Integer> key) {
+      detail("周期层试 " + key);
+      try {
+        PeriodicSolver.Solution solution =
+            PeriodicSolver.solve(solverInput(prepared, input, at(key)));
+        return solution.conflicts() == 0 ? Optional.of(solution) : Optional.empty();
+      } catch (PeriodicSolver.HyperperiodTooLong tooLong) {
+        // 这组间隔的超周期太长、环放不下：当作排不开，换下一档。
+        return Optional.empty();
+      }
+    }
+
+    /**
+     * 扫描接下来要问的几档（从 {@code from} 起每 {@code step} 一档、不超过 {@code to}，至多线程数档、不超过剩余次数）先并行解好。
+     * 扫描照旧按原顺序逐档问、逐档计数，所以找到的档与串行相同；早停之后没问到的白解。串行时不做。
+     */
+    private void prefetch(
+        int from, int to, int step, IntFunction<Map<String, Integer>> intervalsAt) {
+      if (pool.threads() < 2) {
+        return;
+      }
+      int room = Math.min(pool.threads(), RELAX_SOLVE_LIMIT - solved.size());
+      List<Map<String, Integer>> batch = new ArrayList<>();
+      for (int value = from; value <= to && batch.size() < room; value += step) {
+        Map<String, Integer> key = Map.copyOf(intervalsAt.apply(value));
+        if (!solved.containsKey(key) && !prefetched.containsKey(key) && !batch.contains(key)) {
+          batch.add(key);
+        }
+      }
+      if (batch.size() < 2) {
+        return;
+      }
+      List<BuildPool.Evaluated<Optional<PeriodicSolver.Solution>>> out =
+          pool.evaluate(batch, this::solve);
+      for (int i = 0; i < out.size(); i++) {
+        prefetched.put(batch.get(i), out.get(i));
+      }
     }
 
     /** 按周期层的解完整构建一次；周期层排不开或构建失败时为空。 */
