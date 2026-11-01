@@ -14,6 +14,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Executor;
+import net.kyori.adventure.text.Component;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
@@ -32,6 +34,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -778,20 +782,33 @@ public final class FtaStationCommand {
                       worldIds.add(world.getUID());
                     }
                   }
-                  executeDelete(
-                      sender,
-                      provider,
-                      resolved.operator(),
-                      resolved.station(),
-                      ctx.flags().isPresent(confirmFlag),
-                      worldIds);
+                  boolean confirmed = ctx.flags().isPresent(confirmFlag);
+                  // 要扫全部线路的停靠表：放到异步线程，提示与刷新回主线程
+                  Executor mainThread =
+                      task -> plugin.getServer().getScheduler().runTask(plugin, task);
+                  plugin
+                      .getServer()
+                      .getScheduler()
+                      .runTaskAsynchronously(
+                          plugin,
+                          () ->
+                              executeDelete(
+                                  sender,
+                                  provider,
+                                  resolved.operator(),
+                                  resolved.station(),
+                                  confirmed,
+                                  worldIds,
+                                  mainThread));
                 }));
   }
 
   /**
    * 执行站点删除：有停靠点引用时拒绝并列出；未确认只预览；确认后删除记录，车站组成员随之移除。
    *
-   * <p>牌子仍在时两种情况都提示下次建图会重建该站点记录。
+   * <p>本方法只读写存储，可在异步线程调用；提示、目录刷新与车站组通知都交给 {@code mainThread}。牌子仍在、站台屏等仍绑定该站时，预览与删除后都提示。
+   *
+   * @param mainThread 主线程执行器；同步调用时传 {@code Runnable::run}
    */
   void executeDelete(
       CommandSender sender,
@@ -799,93 +816,161 @@ public final class FtaStationCommand {
       Operator operator,
       Station station,
       boolean confirmed,
-      List<UUID> worldIds) {
+      List<UUID> worldIds,
+      Executor mainThread) {
     LocaleManager locale = plugin.getLocaleManager();
-    StationDeletionImpact impact = assessDeletion(provider, operator, station, worldIds);
     Map<String, String> base =
         Map.of("operator", operator.code(), "code", station.code(), "name", station.name());
+    StationDeletionImpact impact;
+    try {
+      impact = assessDeletion(provider, operator, station, worldIds);
+    } catch (StorageException ex) {
+      reportDeleteFailure(sender, locale, base, ex, mainThread);
+      return;
+    }
+    List<Component> messages = new ArrayList<>();
 
     if (!impact.routeStops().isEmpty()) {
-      sender.sendMessage(locale.component("command.station.delete.referenced", base));
+      messages.add(locale.component("command.station.delete.referenced", base));
       int limit = Math.min(20, impact.routeStops().size());
       for (int i = 0; i < limit; i++) {
-        sender.sendMessage(
+        messages.add(
             locale.component(
                 "command.station.delete.referenced-entry",
                 Map.of("stop", impact.routeStops().get(i))));
       }
       if (impact.routeStops().size() > limit) {
-        sender.sendMessage(
+        messages.add(
             locale.component(
                 "command.station.delete.more",
                 Map.of("count", String.valueOf(impact.routeStops().size() - limit))));
       }
+      mainThread.execute(() -> messages.forEach(sender::sendMessage));
       return;
     }
 
     if (!confirmed) {
-      sender.sendMessage(locale.component("command.station.delete.preview", base));
+      messages.add(locale.component("command.station.delete.preview", base));
       for (StationGroup group : impact.groups()) {
-        sender.sendMessage(
+        messages.add(
             locale.component("command.station.delete.group", Map.of("group", group.code())));
       }
-      sendSignWarning(sender, locale, impact);
-      sender.sendMessage(locale.component("command.common.confirm-required"));
+      addImpactWarnings(messages, locale, impact);
+      messages.add(locale.component("command.common.confirm-required"));
+      mainThread.execute(
+          () -> {
+            logUnreadWorlds(station, impact);
+            messages.forEach(sender::sendMessage);
+          });
       return;
     }
 
     Instant now = Instant.now();
-    provider
-        .transactionManager()
-        .execute(
-            () -> {
-              provider.stations().delete(station.id());
-              for (StationGroup group : impact.groups()) {
-                provider
-                    .stationGroups()
-                    .save(
-                        new StationGroup(
-                            group.id(),
-                            group.companyId(),
-                            group.code(),
-                            group.name(),
-                            group.secondaryName(),
-                            group.metadata(),
-                            group.createdAt(),
-                            now));
-              }
-              return null;
-            });
-    if (impact.groups().isEmpty()) {
-      plugin.refreshStationDirectory();
-    }
-    // 车站组变化通知内部会刷新车站目录，有组时不再重复刷新
-    for (StationGroup group : impact.groups()) {
-      plugin.notifyStationGroupChanged(
-          new StationGroupChange(
-              group.id(),
-              group.companyId(),
-              group.code(),
-              StationGroupChange.Kind.MEMBER_REMOVED,
-              Optional.of(station.id())));
-    }
-    sender.sendMessage(locale.component("command.station.delete.success", base));
-    sendSignWarning(sender, locale, impact);
-  }
-
-  private static void sendSignWarning(
-      CommandSender sender, LocaleManager locale, StationDeletionImpact impact) {
-    if (impact.signNodes().isEmpty()) {
+    try {
+      provider
+          .transactionManager()
+          .execute(
+              () -> {
+                provider.stations().delete(station.id());
+                for (StationGroup group : impact.groups()) {
+                  provider
+                      .stationGroups()
+                      .save(
+                          new StationGroup(
+                              group.id(),
+                              group.companyId(),
+                              group.code(),
+                              group.name(),
+                              group.secondaryName(),
+                              group.metadata(),
+                              group.createdAt(),
+                              now));
+                }
+                return null;
+              });
+    } catch (StorageException ex) {
+      reportDeleteFailure(sender, locale, base, ex, mainThread);
       return;
     }
-    sender.sendMessage(
-        locale.component(
-            "command.station.delete.signs",
-            Map.of(
-                "count",
-                String.valueOf(impact.signNodes().size()),
-                "nodes",
-                String.join(", ", impact.signNodes()))));
+    messages.add(locale.component("command.station.delete.success", base));
+    addImpactWarnings(messages, locale, impact);
+    mainThread.execute(
+        () -> {
+          if (impact.groups().isEmpty()) {
+            plugin.refreshStationDirectory();
+          }
+          // 车站组变化通知内部会刷新车站目录，有组时不再重复刷新
+          for (StationGroup group : impact.groups()) {
+            plugin.notifyStationGroupChanged(
+                new StationGroupChange(
+                    group.id(),
+                    group.companyId(),
+                    group.code(),
+                    StationGroupChange.Kind.MEMBER_REMOVED,
+                    Optional.of(station.id())));
+          }
+          logUnreadWorlds(station, impact);
+          messages.forEach(sender::sendMessage);
+        });
+  }
+
+  private void reportDeleteFailure(
+      CommandSender sender,
+      LocaleManager locale,
+      Map<String, String> base,
+      StorageException ex,
+      Executor mainThread) {
+    Map<String, String> placeholders = new HashMap<>(base);
+    placeholders.put("reason", String.valueOf(ex.getMessage()));
+    mainThread.execute(
+        () -> {
+          plugin.getLogger().warning("删除站点失败: " + base + " " + ex);
+          sender.sendMessage(locale.component("command.station.delete.failed", placeholders));
+        });
+  }
+
+  private void logUnreadWorlds(Station station, StationDeletionImpact impact) {
+    if (!impact.unreadWorlds().isEmpty()) {
+      plugin
+          .getLogger()
+          .warning(
+              "删除站点 "
+                  + station.code()
+                  + " 时读取 rail_nodes 失败，牌子检查不完整: worlds="
+                  + impact.unreadWorlds());
+    }
+  }
+
+  private static void addImpactWarnings(
+      List<Component> messages, LocaleManager locale, StationDeletionImpact impact) {
+    if (!impact.signNodes().isEmpty()) {
+      messages.add(
+          locale.component(
+              "command.station.delete.signs",
+              Map.of(
+                  "count",
+                  String.valueOf(impact.signNodes().size()),
+                  "nodes",
+                  String.join(", ", impact.signNodes()))));
+    }
+    if (!impact.unreadWorlds().isEmpty()) {
+      messages.add(
+          locale.component(
+              "command.station.delete.signs-unknown",
+              Map.of("count", String.valueOf(impact.unreadWorlds().size()))));
+    }
+    if (impact.screens() + impact.bulletins() + impact.pendingCalls() > 0) {
+      messages.add(
+          locale.component(
+              "command.station.delete.bindings",
+              Map.of(
+                  "screens",
+                  String.valueOf(impact.screens()),
+                  "bulletins",
+                  String.valueOf(impact.bulletins()),
+                  "calls",
+                  String.valueOf(impact.pendingCalls()))));
+    }
   }
 
   /**
@@ -894,14 +979,26 @@ public final class FtaStationCommand {
    * @param routeStops 引用该站的停靠点，形如 {@code 运营商/线路/交路#序号}；非空即拒绝删除
    * @param groups 该站所在的车站组（删除时成员关系随之移除）
    * @param signNodes 已加载世界的 rail_nodes 中仍挂着该车站代码的 STATION 节点；下次建图会按它们重建站点记录
+   * @param unreadWorlds 读取 rail_nodes 失败的世界；非空时 {@code signNodes} 不完整
+   * @param screens 按运营商与站码绑定该站的站台屏数；删站后它们失去车站信息
+   * @param bulletins 投放到该站的站台公告数
+   * @param pendingCalls 该站还没派出的叫车数
    */
   record StationDeletionImpact(
-      List<String> routeStops, List<StationGroup> groups, List<String> signNodes) {}
+      List<String> routeStops,
+      List<StationGroup> groups,
+      List<String> signNodes,
+      List<UUID> unreadWorlds,
+      int screens,
+      int bulletins,
+      int pendingCalls) {}
 
   /**
    * 汇总删除站点的影响。
    *
-   * <p>停靠表扫描全部线路而非仅本运营商：直通运转的交路可以停靠他家车站。
+   * <p>停靠表扫描全部线路而非仅本运营商：直通运转的交路可以停靠他家车站。站台屏、公告与叫车按运营商代码与站码绑定车站，没有外键，这里一并数出来提示。
+   *
+   * @throws StorageException 读停靠表、车站组、站台屏、公告或叫车失败时；单个世界的 rail_nodes 读取失败只记入 {@code unreadWorlds}
    */
   static StationDeletionImpact assessDeletion(
       StorageProvider provider, Operator operator, Station station, List<UUID> worldIds) {
@@ -938,12 +1035,14 @@ public final class FtaStationCommand {
         .ifPresent(groups::add);
 
     List<String> signNodes = new ArrayList<>();
+    List<UUID> unreadWorlds = new ArrayList<>();
     String code = station.code() == null ? "" : station.code().trim();
     for (UUID worldId : worldIds) {
       List<RailNodeRecord> nodes;
       try {
         nodes = provider.railNodes().listByWorld(worldId);
-      } catch (Exception ignored) {
+      } catch (StorageException ex) {
+        unreadWorlds.add(worldId);
         continue;
       }
       for (RailNodeRecord node : nodes) {
@@ -962,8 +1061,41 @@ public final class FtaStationCommand {
       }
     }
     signNodes.sort(String.CASE_INSENSITIVE_ORDER);
+
+    int screens =
+        (int)
+            provider.pidsScreens().listAll().stream()
+                .filter(screen -> screen != null)
+                .filter(
+                    screen ->
+                        screen.station().filter(key -> isStation(key, operator, code)).isPresent())
+                .count();
+    int bulletins =
+        (int)
+            provider.pidsBulletins().listAll().stream()
+                .filter(bulletin -> bulletin != null)
+                .filter(bulletin -> bulletin.operatorCode().equalsIgnoreCase(operator.code()))
+                .filter(bulletin -> bulletin.stations().stream().anyMatch(code::equalsIgnoreCase))
+                .count();
+    int pendingCalls =
+        (int)
+            provider.pendingCalls().listAll().stream()
+                .filter(call -> call != null && isStation(call.station(), operator, code))
+                .count();
     return new StationDeletionImpact(
-        List.copyOf(routeStops), List.copyOf(groups), List.copyOf(signNodes));
+        List.copyOf(routeStops),
+        List.copyOf(groups),
+        List.copyOf(signNodes),
+        List.copyOf(unreadWorlds),
+        screens,
+        bulletins,
+        pendingCalls);
+  }
+
+  private static boolean isStation(PidsStationKey key, Operator operator, String stationCode) {
+    return !stationCode.isEmpty()
+        && key.operatorCode().equalsIgnoreCase(operator.code())
+        && key.stationCode().equalsIgnoreCase(stationCode);
   }
 
   /**

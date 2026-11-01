@@ -10,18 +10,6 @@ public final class RailEdgeCostModels {
 
   private RailEdgeCostModels() {}
 
-  /** 基于区间长度（blocks）的最短路：代价为 {@link RailEdge#lengthBlocks()}。 */
-  public static RailEdgeCostModel lengthBlocks() {
-    return (graph, edge, from, to) -> {
-      Objects.requireNonNull(edge, "edge");
-      int length = edge.lengthBlocks();
-      if (length <= 0) {
-        return OptionalDouble.empty();
-      }
-      return OptionalDouble.of(length);
-    };
-  }
-
   /**
    * 进路规划用的代价：区间长度再加每条区间 1 格。
    *

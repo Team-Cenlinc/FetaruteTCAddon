@@ -17,6 +17,8 @@ import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import org.bukkit.command.CommandSender;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.call.PendingCallRecord;
+import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.command.FtaStationCommand.StationDeletionImpact;
 import org.fetarute.fetaruteTCAddon.company.api.StationGroupChange;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
@@ -39,6 +41,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeReposito
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletin;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
+import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
+import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransaction;
@@ -61,6 +68,9 @@ final class FtaStationCommandDeleteImpactTest {
   private StationGroupRepository groups;
   private RailNodeRepository railNodes;
   private StationRepository stations;
+  private PidsScreenRepository screens;
+  private PidsBulletinRepository bulletins;
+  private PendingCallRepository calls;
   private Operator operator;
   private Station station;
 
@@ -82,6 +92,15 @@ final class FtaStationCommandDeleteImpactTest {
     when(provider.stationGroups()).thenReturn(groups);
     when(provider.railNodes()).thenReturn(railNodes);
     when(provider.operators()).thenReturn(operators);
+    screens = mock(PidsScreenRepository.class);
+    bulletins = mock(PidsBulletinRepository.class);
+    calls = mock(PendingCallRepository.class);
+    when(provider.pidsScreens()).thenReturn(screens);
+    when(provider.pidsBulletins()).thenReturn(bulletins);
+    when(provider.pendingCalls()).thenReturn(calls);
+    when(screens.listAll()).thenReturn(List.of());
+    when(bulletins.listAll()).thenReturn(List.of());
+    when(calls.listAll()).thenReturn(List.of());
 
     operator = mock(Operator.class);
     when(operator.id()).thenReturn(operatorId);
@@ -192,7 +211,8 @@ final class FtaStationCommandDeleteImpactTest {
     FetaruteTCAddon plugin = plugin();
 
     new FtaStationCommand(plugin)
-        .executeDelete(mock(CommandSender.class), provider, operator, station, true, List.of());
+        .executeDelete(
+            mock(CommandSender.class), provider, operator, station, true, List.of(), Runnable::run);
 
     verify(stations, never()).delete(any());
     verify(plugin, never()).refreshStationDirectory();
@@ -203,7 +223,14 @@ final class FtaStationCommandDeleteImpactTest {
     FetaruteTCAddon plugin = plugin();
 
     new FtaStationCommand(plugin)
-        .executeDelete(mock(CommandSender.class), provider, operator, station, false, List.of());
+        .executeDelete(
+            mock(CommandSender.class),
+            provider,
+            operator,
+            station,
+            false,
+            List.of(),
+            Runnable::run);
 
     verify(stations, never()).delete(any());
     verify(plugin, never()).refreshStationDirectory();
@@ -214,7 +241,8 @@ final class FtaStationCommandDeleteImpactTest {
     FetaruteTCAddon plugin = plugin();
 
     new FtaStationCommand(plugin)
-        .executeDelete(mock(CommandSender.class), provider, operator, station, true, List.of());
+        .executeDelete(
+            mock(CommandSender.class), provider, operator, station, true, List.of(), Runnable::run);
 
     verify(stations).delete(stationId);
     verify(plugin).refreshStationDirectory();
@@ -243,7 +271,8 @@ final class FtaStationCommandDeleteImpactTest {
     FetaruteTCAddon plugin = plugin();
 
     new FtaStationCommand(plugin)
-        .executeDelete(mock(CommandSender.class), provider, operator, station, true, List.of());
+        .executeDelete(
+            mock(CommandSender.class), provider, operator, station, true, List.of(), Runnable::run);
 
     verify(stations).delete(stationId);
     verify(groups)
@@ -260,6 +289,56 @@ final class FtaStationCommandDeleteImpactTest {
                 "PTK-HUB",
                 StationGroupChange.Kind.MEMBER_REMOVED,
                 Optional.of(stationId)));
+  }
+
+  @Test
+  void countsScreensBulletinsAndCallsBoundByStationCode() {
+    PidsScreen bound = mock(PidsScreen.class);
+    when(bound.station()).thenReturn(Optional.of(new PidsStationKey("surn", "ptk")));
+    PidsScreen otherOperator = mock(PidsScreen.class);
+    when(otherOperator.station()).thenReturn(Optional.of(new PidsStationKey("SURC", "PTK")));
+    PidsScreen unbound = mock(PidsScreen.class);
+    when(unbound.station()).thenReturn(Optional.empty());
+    when(screens.listAll()).thenReturn(List.of(bound, otherOperator, unbound));
+    PidsBulletin bulletin = mock(PidsBulletin.class);
+    when(bulletin.operatorCode()).thenReturn("SURN");
+    when(bulletin.stations()).thenReturn(java.util.Set.of("PTK", "HHU"));
+    when(bulletins.listAll()).thenReturn(List.of(bulletin));
+    PendingCallRecord call = mock(PendingCallRecord.class);
+    when(call.station()).thenReturn(new PidsStationKey("SURN", "PTK"));
+    when(calls.listAll()).thenReturn(List.of(call));
+
+    StationDeletionImpact impact = assess();
+
+    assertEquals(1, impact.screens());
+    assertEquals(1, impact.bulletins());
+    assertEquals(1, impact.pendingCalls());
+  }
+
+  @Test
+  void unreadableRailNodesAreReportedInsteadOfIgnored() {
+    when(railNodes.listByWorld(worldId)).thenThrow(new StorageException("timeout"));
+
+    StationDeletionImpact impact = assess();
+
+    assertTrue(impact.signNodes().isEmpty());
+    assertEquals(List.of(worldId), impact.unreadWorlds());
+  }
+
+  @Test
+  void storageFailureDuringDeleteIsReportedWithoutRefreshing() {
+    org.mockito.Mockito.doThrow(new StorageException("locked")).when(stations).delete(stationId);
+    FetaruteTCAddon plugin = plugin();
+    when(plugin.getLogger()).thenReturn(java.util.logging.Logger.getAnonymousLogger());
+    CommandSender sender = mock(CommandSender.class);
+
+    new FtaStationCommand(plugin)
+        .executeDelete(sender, provider, operator, station, true, List.of(), Runnable::run);
+
+    verify(plugin, never()).refreshStationDirectory();
+    verify(plugin.getLocaleManager())
+        .component(org.mockito.ArgumentMatchers.eq("command.station.delete.failed"), anyMap());
+    verify(sender).sendMessage(any(Component.class));
   }
 
   private boolean references(RouteStop stop) {
