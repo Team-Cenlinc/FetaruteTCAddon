@@ -5,6 +5,7 @@ import static org.fetarute.fetaruteTCAddon.command.CommandSuggestionProviders.pl
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -17,14 +18,20 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.CompanyQueryService;
+import org.fetarute.fetaruteTCAddon.company.api.StationGroupChange;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
+import org.fetarute.fetaruteTCAddon.company.model.StationGroup;
 import org.fetarute.fetaruteTCAddon.company.model.StationLocation;
 import org.fetarute.fetaruteTCAddon.company.model.StationSidingPool;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -738,6 +745,249 @@ public final class FtaStationCommand {
                           "command.station.dump.success",
                           Map.of("count", String.valueOf(orphans.size()))));
                 }));
+
+    // 删除单个站点记录：仍被停靠表引用时拒绝；车站组成员随之移除；牌子仍在只警告
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("station")
+            .literal("delete")
+            .senderType(Player.class)
+            .required("company", StringParser.quotedStringParser(), companySuggestions)
+            .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
+            .required("station", StringParser.quotedStringParser(), stationSuggestions)
+            .flag(confirmFlag)
+            .handler(
+                ctx -> {
+                  Player sender = ctx.sender();
+                  Optional<StorageProvider> providerOpt = readyProvider(sender);
+                  if (providerOpt.isEmpty()) {
+                    return;
+                  }
+                  StorageProvider provider = providerOpt.get();
+                  LocaleManager locale = plugin.getLocaleManager();
+                  CompanyQueryService query = new CompanyQueryService(provider);
+
+                  ResolvedStation resolved = resolveStation(ctx, provider, locale, query, true);
+                  if (resolved == null) {
+                    return;
+                  }
+                  List<UUID> worldIds = new ArrayList<>();
+                  for (org.bukkit.World world : plugin.getServer().getWorlds()) {
+                    if (world != null) {
+                      worldIds.add(world.getUID());
+                    }
+                  }
+                  executeDelete(
+                      sender,
+                      provider,
+                      resolved.operator(),
+                      resolved.station(),
+                      ctx.flags().isPresent(confirmFlag),
+                      worldIds);
+                }));
+  }
+
+  /**
+   * 执行站点删除：有停靠点引用时拒绝并列出；未确认只预览；确认后删除记录，车站组成员随之移除。
+   *
+   * <p>牌子仍在时两种情况都提示下次建图会重建该站点记录。
+   */
+  void executeDelete(
+      CommandSender sender,
+      StorageProvider provider,
+      Operator operator,
+      Station station,
+      boolean confirmed,
+      List<UUID> worldIds) {
+    LocaleManager locale = plugin.getLocaleManager();
+    StationDeletionImpact impact = assessDeletion(provider, operator, station, worldIds);
+    Map<String, String> base =
+        Map.of("operator", operator.code(), "code", station.code(), "name", station.name());
+
+    if (!impact.routeStops().isEmpty()) {
+      sender.sendMessage(locale.component("command.station.delete.referenced", base));
+      int limit = Math.min(20, impact.routeStops().size());
+      for (int i = 0; i < limit; i++) {
+        sender.sendMessage(
+            locale.component(
+                "command.station.delete.referenced-entry",
+                Map.of("stop", impact.routeStops().get(i))));
+      }
+      if (impact.routeStops().size() > limit) {
+        sender.sendMessage(
+            locale.component(
+                "command.station.delete.more",
+                Map.of("count", String.valueOf(impact.routeStops().size() - limit))));
+      }
+      return;
+    }
+
+    if (!confirmed) {
+      sender.sendMessage(locale.component("command.station.delete.preview", base));
+      for (StationGroup group : impact.groups()) {
+        sender.sendMessage(
+            locale.component("command.station.delete.group", Map.of("group", group.code())));
+      }
+      sendSignWarning(sender, locale, impact);
+      sender.sendMessage(locale.component("command.common.confirm-required"));
+      return;
+    }
+
+    Instant now = Instant.now();
+    provider
+        .transactionManager()
+        .execute(
+            () -> {
+              provider.stations().delete(station.id());
+              for (StationGroup group : impact.groups()) {
+                provider
+                    .stationGroups()
+                    .save(
+                        new StationGroup(
+                            group.id(),
+                            group.companyId(),
+                            group.code(),
+                            group.name(),
+                            group.secondaryName(),
+                            group.metadata(),
+                            group.createdAt(),
+                            now));
+              }
+              return null;
+            });
+    if (impact.groups().isEmpty()) {
+      plugin.refreshStationDirectory();
+    }
+    // 车站组变化通知内部会刷新车站目录，有组时不再重复刷新
+    for (StationGroup group : impact.groups()) {
+      plugin.notifyStationGroupChanged(
+          new StationGroupChange(
+              group.id(),
+              group.companyId(),
+              group.code(),
+              StationGroupChange.Kind.MEMBER_REMOVED,
+              Optional.of(station.id())));
+    }
+    sender.sendMessage(locale.component("command.station.delete.success", base));
+    sendSignWarning(sender, locale, impact);
+  }
+
+  private static void sendSignWarning(
+      CommandSender sender, LocaleManager locale, StationDeletionImpact impact) {
+    if (impact.signNodes().isEmpty()) {
+      return;
+    }
+    sender.sendMessage(
+        locale.component(
+            "command.station.delete.signs",
+            Map.of(
+                "count",
+                String.valueOf(impact.signNodes().size()),
+                "nodes",
+                String.join(", ", impact.signNodes()))));
+  }
+
+  /**
+   * 删除站点前的影响评估。
+   *
+   * @param routeStops 引用该站的停靠点，形如 {@code 运营商/线路/交路#序号}；非空即拒绝删除
+   * @param groups 该站所在的车站组（删除时成员关系随之移除）
+   * @param signNodes 已加载世界的 rail_nodes 中仍挂着该车站代码的 STATION 节点；下次建图会按它们重建站点记录
+   */
+  record StationDeletionImpact(
+      List<String> routeStops, List<StationGroup> groups, List<String> signNodes) {}
+
+  /**
+   * 汇总删除站点的影响。
+   *
+   * <p>停靠表扫描全部线路而非仅本运营商：直通运转的交路可以停靠他家车站。
+   */
+  static StationDeletionImpact assessDeletion(
+      StorageProvider provider, Operator operator, Station station, List<UUID> worldIds) {
+    Map<UUID, String> operatorCodes = new HashMap<>();
+    List<String> routeStops = new ArrayList<>();
+    for (Line line : provider.lines().listAll()) {
+      if (line == null) {
+        continue;
+      }
+      for (Route route : provider.routes().listByLine(line.id())) {
+        if (route == null) {
+          continue;
+        }
+        for (RouteStop stop : provider.routeStops().listByRoute(route.id())) {
+          if (!stopReferencesStation(stop, operator, station)) {
+            continue;
+          }
+          String operatorCode =
+              operatorCodes.computeIfAbsent(
+                  line.operatorId(),
+                  id -> provider.operators().findById(id).map(Operator::code).orElse("?"));
+          routeStops.add(
+              operatorCode + "/" + line.code() + "/" + route.code() + "#" + stop.sequence());
+        }
+      }
+    }
+    routeStops.sort(String.CASE_INSENSITIVE_ORDER);
+
+    List<StationGroup> groups = new ArrayList<>();
+    provider
+        .stationGroups()
+        .findMemberByStation(station.id())
+        .flatMap(member -> provider.stationGroups().findById(member.groupId()))
+        .ifPresent(groups::add);
+
+    List<String> signNodes = new ArrayList<>();
+    String code = station.code() == null ? "" : station.code().trim();
+    for (UUID worldId : worldIds) {
+      List<RailNodeRecord> nodes;
+      try {
+        nodes = provider.railNodes().listByWorld(worldId);
+      } catch (Exception ignored) {
+        continue;
+      }
+      for (RailNodeRecord node : nodes) {
+        if (node == null) {
+          continue;
+        }
+        WaypointMetadata meta = node.waypointMetadata().orElse(null);
+        if (meta == null || meta.kind() != WaypointKind.STATION) {
+          continue;
+        }
+        if (!code.isEmpty()
+            && meta.operator().trim().equalsIgnoreCase(operator.code())
+            && meta.originStation().trim().equalsIgnoreCase(code)) {
+          signNodes.add(node.nodeId().value());
+        }
+      }
+    }
+    signNodes.sort(String.CASE_INSENSITIVE_ORDER);
+    return new StationDeletionImpact(
+        List.copyOf(routeStops), List.copyOf(groups), List.copyOf(signNodes));
+  }
+
+  /**
+   * 停靠点是否引用该站：绑定的 stationId、节点写法或 DYNAMIC 写法的车站身份（站台、咽喉）、或该站绑定的图节点，任一命中即算。
+   *
+   * <p>口径与车站目录解析停靠点一致，见 {@link RouteTerminals#stationIdentityOf}。
+   */
+  static boolean stopReferencesStation(RouteStop stop, Operator operator, Station station) {
+    if (stop == null) {
+      return false;
+    }
+    if (stop.stationId().map(station.id()::equals).orElse(false)) {
+      return true;
+    }
+    Optional<RouteTerminals.StationRef> ref = RouteTerminals.stationIdentityOf(stop);
+    if (ref.isPresent()
+        && ref.get().operatorCode().equalsIgnoreCase(operator.code())
+        && ref.get().stationCode().equalsIgnoreCase(station.code())) {
+      return true;
+    }
+    Optional<String> boundNode =
+        station.graphNodeId().map(String::trim).filter(node -> !node.isEmpty());
+    return boundNode.isPresent()
+        && stop.waypointNodeId().map(String::trim).map(boundNode.get()::equals).orElse(false);
   }
 
   private Optional<StorageProvider> readyProvider(CommandSender sender) {

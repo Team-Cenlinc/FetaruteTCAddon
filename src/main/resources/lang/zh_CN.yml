@@ -1250,6 +1250,14 @@ command:
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
       more: "<gray>… 另有 <white><count></white> 项未显示</gray>"
       success: "<prefix> <dark_aqua>站点清理完成</dark_aqua> <gray>(count=<white><count></white>)</gray>"
+    delete:
+      referenced: "<prefix> <red>站点</red> <white><operator></white><gray>/</gray><white><code></white> <red>仍被以下停靠点引用，未删除；请先修改相关交路：</red>"
+      referenced-entry: "<gray>-</gray> <white><stop></white>"
+      more: "<gray>… 另有 <white><count></white> 项未显示</gray>"
+      preview: "<prefix> <dark_aqua>将删除站点</dark_aqua> <white><operator></white><gray>/</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+      group: "<gray>- 将移出车站组</gray> <white><group></white>"
+      signs: "<yellow>已加载世界中仍有 <white><count></white> 个该车站代码的车站牌子（<white><nodes></white>），下次执行 /fta graph build 将重建此站点记录（名称恢复为车站代码）</yellow>"
+      success: "<prefix> <dark_aqua>站点已删除：</dark_aqua><white><operator></white><gray>/</gray><white><code></white>"
     group:
       not-found: "<prefix> <red>未找到车站组：</red><white><group></white>"
       ambiguous: "<prefix> <red>车站组代码 <white><group></white> 存在于多家公司，请以「公司代码:组代码」格式指定：</red><white><candidates></white>"

@@ -28,6 +28,14 @@
 - 不再被任何 RouteStop（stationId）引用；
 - 在已加载世界的 `rail_nodes` 中也未发现对应的站点节点（`WaypointKind.STATION`）。
 
+### 删除单个站点（delete）
+
+`/fta station delete <company> <operator> <station> [--confirm]`
+
+- 站点仍被任何交路停靠点引用时拒绝删除，并列出 `运营商/线路/交路#序号`；须先修改相关交路的停靠表。「引用」与车站目录解析停靠点的口径一致：绑定的 stationId（按车站代码定义的停靠点）、节点写法（`SURN:S:PTK:1` 站台或咽喉）、`DYNAMIC:` 写法，以及该站 `--node` 绑定的图节点，任一命中即算；也扫描其他运营商的直通交路。
+- 不带 `--confirm` 时只预览：列出该站所在的车站组，确认删除后成员关系随之移除（发出车站组成员移除事件）。
+- 已加载世界的 `rail_nodes` 中仍有同运营商、同车站代码的 STATION 节点时允许删除，但会提示下次 `/fta graph build` 将按牌子重建站点记录（名称恢复为车站代码）；要彻底删除须先拆除牌子。
+
 ### 修改主数据
 
 `/fta station set <company> <operator> <station> [flags...]`
@@ -44,7 +52,7 @@
 
 ## 权限与校验
 
-- 命令会检查公司管理权限：公司 Owner/Manager 或 `fetarute.admin` 才能执行 `set`/`dump`。
+- 命令会检查公司管理权限：公司 Owner/Manager 或 `fetarute.admin` 才能执行 `set`/`dump`/`delete`。
 - `list/info` 需要具备公司读取权限（公司成员或管理员）。
 
 ## 自动创建（graph build）
