@@ -2998,6 +2998,7 @@ public final class FtaTimetableCommand {
         margin,
         runtime.rearGuardEdges(),
         runtime.dispatchTickIntervalTicks() / 20.0D,
+        Math.max(runtime.lookaheadEdges(), runtime.minClearEdges()),
         Map.of());
   }
 

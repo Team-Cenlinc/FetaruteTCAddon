@@ -423,6 +423,7 @@ class TimetableReplayProbeTest {
         margin,
         runtime.rearGuardEdges(),
         runtime.dispatchTickIntervalTicks() / 20.0D,
+        Math.max(runtime.lookaheadEdges(), runtime.minClearEdges()),
         Map.of());
   }
 
