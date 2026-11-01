@@ -1358,6 +1358,139 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager, never()).complete(any());
   }
 
+  /**
+   * 认领了折返事务的车被时刻表从交路上解下（晚点上限）：票据随之到期，原车也过不了票据过滤，这张票再也完成不了。
+   * 必须放弃事务——释放认领、按作废结掉票据，车留在待命池交给回收；否则认领永远挡着作废、回收与滞留销毁，车占着终点站台不动。
+   */
+  @Test
+  void expiredTicketWhoseOwnerCanNoLongerTakeItAbandonsTheDispatchAttempt() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(ticket))
+        .thenReturn(List.of());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.setTicketExpiry(t -> Optional.of(t0.plusSeconds(300)));
+    assigner.tick(provider, t0);
+    layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
+    layoverRegistry.claimDispatch("inbound", ticket.id().toString(), "outbound", t0).orElseThrow();
+    assigner.setTicketOwnership((t, trainName) -> !trainName.equals("inbound"));
+    assigner.setLayoverCandidateFilter((t, trainName) -> !trainName.equals("inbound"));
+
+    assigner.tick(provider, t0.plusSeconds(299));
+    assertTrue(layoverRegistry.hasDispatchAttemptForTicket(ticket.id().toString()));
+    verify(spawnManager, never()).complete(any());
+
+    assigner.tick(provider, t0.plusSeconds(300));
+
+    verify(spawnManager).complete(ticket);
+    assertTrue(assigner.snapshotPendingTickets().isEmpty());
+    assertFalse(layoverRegistry.hasDispatchAttemptForTicket(ticket.id().toString()));
+    assertTrue(layoverRegistry.get("inbound").isPresent(), "车留在待命池，交给回收");
+    verify(runtimeDispatchService, never()).dispatchLayover(any(), any(ServiceTicket.class));
+  }
+
+  /** 票据到期时原车只是被驾乘接车或联挂暂时扣着（票据过滤拒绝），交路仍归它：扣车放开后照样能重试，保留认领与票据。 */
+  @Test
+  void expiredTicketKeepsDispatchAttemptWhileOwnerIsOnlyTemporarilyHeld() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(ticket))
+        .thenReturn(List.of());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.setTicketExpiry(t -> Optional.of(t0.plusSeconds(300)));
+    assigner.tick(provider, t0);
+    layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
+    layoverRegistry.claimDispatch("inbound", ticket.id().toString(), "outbound", t0).orElseThrow();
+    assigner.setLayoverCandidateFilter((t, trainName) -> !trainName.equals("inbound"));
+
+    assigner.tick(provider, t0.plusSeconds(300));
+
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+    assertTrue(layoverRegistry.hasDispatchAttemptForTicket(ticket.id().toString()));
+    verify(spawnManager, never()).complete(any());
+  }
+
+  /** 票据到期但原车仍能接这张票：交接做了一半，只能由同一张票重试完成，照旧保留认领与票据。 */
+  @Test
+  void expiredTicketKeepsDispatchAttemptWhileOwnerCanStillTakeIt() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(ticket))
+        .thenReturn(List.of());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.dispatchLayover(any(), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.failed("inbound", "handoff-commit-pending"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.setTicketExpiry(t -> Optional.of(t0.plusSeconds(300)));
+    assigner.tick(provider, t0);
+    layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
+    layoverRegistry.claimDispatch("inbound", ticket.id().toString(), "outbound", t0).orElseThrow();
+
+    assigner.tick(provider, t0.plusSeconds(300));
+
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+    assertTrue(layoverRegistry.hasDispatchAttemptForTicket(ticket.id().toString()));
+    verify(spawnManager, never()).complete(any());
+  }
+
   private static SpawnTicket buildTicket(UUID routeId) {
     return buildTicket(routeId, UUID.randomUUID(), "R1", 0L);
   }

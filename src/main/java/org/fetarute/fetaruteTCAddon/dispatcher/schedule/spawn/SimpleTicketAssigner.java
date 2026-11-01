@@ -131,6 +131,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private volatile java.util.function.BiPredicate<SpawnTicket, String> layoverCandidateFilter =
       (ticket, trainName) -> true;
 
+  /** 票据归属：这张票还归不归这辆车（时刻表按交路判）。只用于判断已认领的折返事务还能不能完成，不含驾乘、联挂这类暂时扣车。默认恒归属，即从不放弃事务。 */
+  private volatile java.util.function.BiPredicate<SpawnTicket, String> ticketOwnership =
+      (ticket, trainName) -> true;
+
   /** 票据级到期时刻：过了它还挂在 pending 里的票直接作废。默认没有到期。 */
   private volatile java.util.function.Function<SpawnTicket, Optional<Instant>> ticketExpiry =
       ticket -> Optional.empty();
@@ -1780,7 +1784,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
       Optional<Instant> expiry = ticketExpiry.apply(ticket);
       if (expiry.isPresent() && !now.isBefore(expiry.get())) {
-        if (preservePendingDispatchAttempt(ticket, "ticket-expiry")) {
+        if (!abandonDeadDispatchAttempt(Optional.ofNullable(provider), ticket, "ticket-expiry", now)
+            && preservePendingDispatchAttempt(ticket, "ticket-expiry")) {
           continue;
         }
         removeIds.add(ticketId);
@@ -1797,7 +1802,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
 
       if (isPendingLayoverHardExpired(pendingEntry, now, hardMaxAge)) {
-        if (preservePendingDispatchAttempt(ticket, "hard-expiry")) {
+        if (!abandonDeadDispatchAttempt(Optional.ofNullable(provider), ticket, "hard-expiry", now)
+            && preservePendingDispatchAttempt(ticket, "hard-expiry")) {
           continue;
         }
         long totalWaitSeconds =
@@ -3058,6 +3064,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /**
+   * 注册票据归属判定（见 {@link #abandonDeadDispatchAttempt}）。传入 {@code null} 恢复"恒归属"。
+   *
+   * @param ownership 票据还归这辆车时返回 true
+   */
+  public void setTicketOwnership(java.util.function.BiPredicate<SpawnTicket, String> ownership) {
+    this.ticketOwnership = ownership == null ? (ticket, trainName) -> true : ownership;
+  }
+
+  /**
    * 注册票据级到期时刻。
    *
    * <p>pending 清理时先问它：到期的票直接作废并向 SpawnManager 报完成，不走全局的 max-age。 传入 {@code null} 恢复"没有到期"。
@@ -3932,6 +3947,65 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           Instant firstAddedAt = existing == null ? now : existing.firstAddedAt();
           return new PendingLayoverEntry(ticket, addedAt, firstAddedAt);
         });
+  }
+
+  /**
+   * 票据已经作废、认领它的原车又过不了接车闸：这张票再也完成不了，放弃折返事务。
+   *
+   * <p>折返事务只能由同一张票重试完成（{@link #preservePendingDispatchAttempt}），可重试本身先要过接车闸。时刻表把车从交路上解下
+   * （晚点上限、换车）之后，原车接不了这张票，认领再也不会被重试，
+   * 却一直挡着票据作废、回收与滞留销毁，车占着终点站台不动，后车全部堵在进站前。此时释放认领、按作废结掉票据，车回到普通待命，交给回收。
+   * 交接做到一半留下的保守占用不动：车停着，直到回收把它带走或销毁。
+   *
+   * <p>只看交路归属（车辆交路闸、回库闸、{@link #ticketOwnership}），不看驾乘接车、联挂这类暂时扣车：那些放开后照样能重试，保留事务等同一张票。
+   *
+   * @param expiredBy 触发作废的检查，写进日志
+   * @return 已放弃时为 true，调用方按普通作废处理这张票
+   */
+  private boolean abandonDeadDispatchAttempt(
+      Optional<StorageProvider> providerOpt, SpawnTicket ticket, String expiredBy, Instant now) {
+    if (ticket == null || ticket.service() == null) {
+      return false;
+    }
+    String ticketId = ticket.id().toString();
+    Optional<LayoverRegistry.LayoverCandidate> owner =
+        layoverRegistry.findDispatchAttemptOwner(ticketId);
+    if (owner.isEmpty()) {
+      return false;
+    }
+    SpawnService service = ticket.service();
+    String trainName = owner.get().trainName();
+    RouteOperationType operationType =
+        loadRoute(providerOpt, service.routeId())
+            .map(Route::operationType)
+            .orElse(RouteOperationType.OPERATION);
+    boolean dutyGate =
+        switch (operationType) {
+          case OPERATION -> layoverReuseGate.test(trainName);
+          case RETURN -> returnReuseGate.test(trainName);
+          default -> true;
+        };
+    if (dutyGate && ticketOwnership.test(ticket, trainName)) {
+      return false;
+    }
+    LayoverRegistry.DispatchAttempt attempt = owner.get().dispatchAttempt().orElseThrow();
+    if (!layoverRegistry.releaseDispatchAttempt(trainName, ticketId)) {
+      return false;
+    }
+    HEALTH_LOGGER.warning(
+        "[FTA] 折返票据已作废且原车不能再接，放弃交接: ticket="
+            + ticketId
+            + " route="
+            + service.routeCode()
+            + " train="
+            + trainName
+            + " target="
+            + attempt.targetTrainName()
+            + " ageSeconds="
+            + java.time.Duration.between(attempt.claimedAt(), now).getSeconds()
+            + " by="
+            + expiredBy);
+    return true;
   }
 
   /**
