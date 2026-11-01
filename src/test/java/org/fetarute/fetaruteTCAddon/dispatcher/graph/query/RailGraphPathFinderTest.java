@@ -241,6 +241,76 @@ final class RailGraphPathFinderTest {
     assertEquals(70L, path.totalLengthBlocks());
   }
 
+  /**
+   * 量长偏短的剪刀渡线：穿菱形比直股严格短 2 格（NTA 咽喉的实测长度），仍走直股；真要渡到对面股道时照常穿菱形。
+   *
+   * <p>1 道接 NTA:1（出站），2 道接 NTA:2（进站），2622 是菱形中心。
+   */
+  @Test
+  void slightlyShorterScissorsCrossoverStillPrefersTheStraightTrack() {
+    NodeId platform1 = NodeId.of("SURC:S:NTA:1");
+    NodeId platform2 = NodeId.of("SURC:S:NTA:2");
+    NodeId out1 = NodeId.of("SURC:TPC:NTA:1:002");
+    NodeId in2 = NodeId.of("SURC:TPC:NTA:2:002");
+    String s2619 = "SWITCHER:Towny:2619";
+    String s2620 = "SWITCHER:Towny:2620";
+    String s2622 = "SWITCHER:Towny:2622";
+    String s2626 = "SWITCHER:Towny:2626";
+    String s2630 = "SWITCHER:Towny:2630";
+    String s2632 = "SWITCHER:Towny:2632";
+    RailGraph graph =
+        graph(
+            Set.of(
+                node(platform1.value()),
+                node(platform2.value()),
+                node(out1.value()),
+                node(in2.value()),
+                node(s2619),
+                node(s2620),
+                node(s2622),
+                node(s2626),
+                node(s2630),
+                node(s2632)),
+            Set.of(
+                edge(platform1.value(), s2630, 36),
+                edge(platform2.value(), s2632, 37),
+                edge(s2620, out1.value(), 19),
+                edge(s2619, in2.value(), 18),
+                edge(s2620, s2630, 11),
+                edge(s2619, s2632, 14),
+                edge(s2620, s2622, 1),
+                edge(s2619, s2622, 4),
+                edge(s2622, s2626, 3),
+                edge(s2622, s2630, 9),
+                edge(s2626, s2632, 5),
+                edge(s2626, s2630, 5)),
+            Set.of());
+    RailGraphPathFinder finder = new RailGraphPathFinder();
+    RailGraphPathFinder.Options options = RailGraphPathFinder.Options.shortestDistance();
+
+    assertEquals(
+        List.of(platform1, NodeId.of(s2630), NodeId.of(s2620), out1),
+        finder.shortestPath(graph, platform1, out1, options).orElseThrow().nodes());
+    assertEquals(
+        List.of(in2, NodeId.of(s2619), NodeId.of(s2632), platform2),
+        finder.shortestPath(graph, in2, platform2, options).orElseThrow().nodes());
+    assertEquals(
+        List.of(in2, NodeId.of(s2619), NodeId.of(s2622), NodeId.of(s2630), platform1),
+        finder.shortestPath(graph, in2, platform1, options).orElseThrow().nodes());
+    RailGraphPath crossingOut = finder.shortestPath(graph, platform2, out1, options).orElseThrow();
+    assertEquals(
+        List.of(
+            platform2,
+            NodeId.of(s2632),
+            NodeId.of(s2626),
+            NodeId.of(s2622),
+            NodeId.of(s2620),
+            out1),
+        crossingOut.nodes());
+    // 代价里多加的格数只用来选路，长度仍按区间合计。
+    assertEquals(37L + 5L + 3L + 1L + 19L, crossingOut.totalLengthBlocks());
+  }
+
   /** 区间数优先于节点序：两条等长路径，节点序偏向的那条多一条区间，仍取区间少的。 */
   @Test
   void fewerEdgesWinOverNodeOrderAmongEqualLengthPaths() {

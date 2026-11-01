@@ -35,7 +35,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  * 自然序最小的前驱</b>；同一前驱经多条区间到达时取 {@link org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId} 自然序最小者。
  *
  * <p>区间数优先是为了剪刀渡线：直股是一条区间，穿菱形是"斜线—菱形中心—斜线"三条，图上按轨道步数计长度时两者可以恰好等长。 只比节点序时规划会穿菱形，
- * 而实车沿直股开出，规划路径上的菱形资源永远等不到"经过即释放"，占用一直挂到列车销毁。 少一条区间就少过一组道岔，更接近列车实际走的那条。
+ * 而实车沿直股开出，规划路径上的菱形资源永远等不到"经过即释放"，占用一直挂到列车销毁。 少一条区间就少过一组道岔，更接近列车实际走的那条。 建图量长偏短时穿菱形甚至会严格更短，所以 {@link
+ * Options#shortestDistance()} 的代价每条区间另加 1 格，把这种情形拉回平局。
  *
  * <p>结果只取决于图的内容，与 {@link RailGraph#edgesFrom} 的遍历顺序无关——若用严格 {@code <} 松弛、优先队列只比距离，等长时"先遍历到的邻居赢"，而
  * {@code Set.copyOf} 的遍历顺序每个 JVM 随机一次，环两股道之类的等长备选就会每次重启换一条。
@@ -68,7 +69,10 @@ public final class RailGraphPathFinder {
       Objects.requireNonNull(costModel, "costModel");
     }
 
-    /** 距离最短（以 blocks 计），并默认跳过被封锁的边。 */
+    /**
+     * 距离最短（以 blocks 计，每条区间另加 1 格抵掉建图量长的少算，见 {@link
+     * RailEdgeCostModels#lengthPlusIntervalBlocks()}），并默认跳过被封锁的边。
+     */
     public static Options shortestDistance() {
       return SHORTEST_DISTANCE;
     }
@@ -76,7 +80,7 @@ public final class RailGraphPathFinder {
 
   /** {@link Options#shortestDistance()} 的唯一实例；记忆只认它。 */
   private static final Options SHORTEST_DISTANCE =
-      new Options(RailEdgeCostModels.lengthBlocks(), false);
+      new Options(RailEdgeCostModels.lengthPlusIntervalBlocks(), false);
 
   /**
    * 计算从 {@code from} 到 {@code to} 的最短路径。
