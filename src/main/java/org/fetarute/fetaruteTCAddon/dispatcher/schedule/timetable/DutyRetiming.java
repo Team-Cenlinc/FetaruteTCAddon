@@ -32,7 +32,9 @@ public final class DutyRetiming {
       /** 本车上一班延后了，就绪晚于名义时隙。 */
       VEHICLE_READY,
       /** 让车：与已排好的车在某个资源上撞了，整趟延后到对方让开之后。 */
-      YIELDED
+      YIELDED,
+      /** 让车均摊：同一条 route 上一班让车延后了，这一班接着延后一截（逐班收回），班距不一长一短。 */
+      SMOOTHED
     }
   }
 

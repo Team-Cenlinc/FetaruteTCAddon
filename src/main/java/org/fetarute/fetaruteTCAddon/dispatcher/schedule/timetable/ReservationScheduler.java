@@ -40,6 +40,12 @@ final class ReservationScheduler {
   /** 找空档时最多跳几次：每跳一次至少后移一秒，到上限还没找到就按原时刻登记。 */
   private static final int MAX_JUMPS = 400;
 
+  /** 让车均摊打的折：两班名义间隔每这么多秒，跟着的延后少一秒（360 秒间隔下比让车那班少 10 秒）。 */
+  static final int SMOOTH_RECOVERY_SECONDS = 36;
+
+  /** 让车均摊的范围：同一条 route 相邻两班名义间隔的几分之一（4 即四分之一间隔）；更大的延后不往后传，平移也不超过它。 */
+  static final int SMOOTH_DRIFT_DIVISOR = 4;
+
   /** 端点停留在下一班发车之前的暂定终点：足够远，相当于"一直占着"。 */
   private static final int OPEN = Integer.MAX_VALUE / 4;
 
@@ -134,6 +140,10 @@ final class ReservationScheduler {
     private final Timetable table;
     private final int zero;
     private final int sep;
+
+    /** 每条 route 上一班的名义发车与延后（让车均摊用）。 */
+    private final Map<UUID, Lag> lagByRoute = new HashMap<>();
+
     private final TimetableConflictChecker.Footprints footprints;
     private final Book book = new Book();
     private final List<List<TimetableTrip>> chains;
@@ -326,7 +336,32 @@ final class ReservationScheduler {
           }
           continue;
         }
-        Placement placement = earliest(cells, base, d, trip.tripCode(), in.maxWaitSeconds());
+        // 让车均摊：同一条 route 上一班让车整趟延后了，这一班从"名义 + 打了折的延后"起找，而不是弹回名义时刻。
+        // 冲突隔一班出现一次时，被让的那班晚 D、下一班准点，班距就是一长一短（360 变 290/430）；跟着延后一截，两边各差几秒。
+        // 只在四分之一间隔以内均摊（见 SMOOTH_DRIFT_DIVISOR）：更大的让车是一次扰动，摊出去只会扰动更多班；找到的发车也不超过
+        // 这个上限。打的折按两班名义间隔算（见 SMOOTH_RECOVERY_SECONDS）。均摊只用这辆车折返的余量：推迟到下一班就绪不了就不均摊，
+        // 否则延后沿交路传到对向、对向又反过来顶这一向，整张表一圈圈往后漂。
+        Lag previous = lagByRoute.get(trip.routeId());
+        int cap = previous == null ? 0 : (nominal - previous.nominal()) / SMOOTH_DRIFT_DIVISOR;
+        int carried =
+            previous == null || previous.seconds() > cap
+                ? 0
+                : previous.seconds() - (nominal - previous.nominal()) / SMOOTH_RECOVERY_SECONDS;
+        boolean smoothed = false;
+        Placement placement = null;
+        // 出库要随首班一起落位的交路首班不均摊：那条路径会从名义时刻重找一遍，均摊记下的让车就作废了。
+        if (carried > 0 && nominal + carried > base && !(i == 0 && inline.contains(d))) {
+          Scan scan = scan(cells, nominal + carried, d, in.maxWaitSeconds());
+          if (scan.found()
+              && scan.time() - nominal <= cap
+              && keepsNextTrip(d, i, scan.time(), profile, trip.routeId())) {
+            placement = commit(scan, nominal + carried, trip.tripCode());
+            smoothed = true;
+          }
+        }
+        if (placement == null) {
+          placement = earliest(cells, base, d, trip.tripCode(), in.maxWaitSeconds());
+        }
         List<TimetableConflictChecker.Slot> booked = cells;
         if (i == 0 && inline.contains(d)) {
           // 插空时这条交路的出库走行让不掉：先让出库走行往前提（在首站多等，不超过闲置上限），首班不动；提前也放不下，出库车在车库里
@@ -372,6 +407,11 @@ final class ReservationScheduler {
           continue;
         }
         actual.put(trip.id(), departure);
+        // 只有真让车的延后往下一班传：车辆就绪晚、上一次均摊的延后都不传，免得均摊挪动的那几秒顶到别的车、
+        // 别的车再让、延后又绕回来，一圈圈往后漂。
+        lagByRoute.put(
+            trip.routeId(),
+            new Lag(nominal, placement.yielded && !smoothed ? departure - nominal : 0));
         if (departure != nominal) {
           shifts.add(
               new DutyRetiming.Shift(
@@ -380,7 +420,9 @@ final class ReservationScheduler {
                   departure,
                   placement.yielded
                       ? DutyRetiming.Shift.Reason.YIELDED
-                      : DutyRetiming.Shift.Reason.VEHICLE_READY));
+                      : smoothed
+                          ? DutyRetiming.Shift.Reason.SMOOTHED
+                          : DutyRetiming.Shift.Reason.VEHICLE_READY));
         }
         // 这辆车在起点的停留到发车为止；上一班到站时已经先占住了。
         closeStays(d, departure);
@@ -736,27 +778,33 @@ final class ReservationScheduler {
 
     // ---------------------------------------------------------------- 找空档
 
+    /** 这一班按 {@code departure} 发车，本车还赶不赶得上交路里下一班的名义时刻（到站 + 折返）；没有下一班算赶得上。 */
+    private boolean keepsNextTrip(
+        int d, int i, int departure, TimetableConflictChecker.RouteProfile profile, UUID routeId) {
+      if (i + 1 >= kept[d]) {
+        return true;
+      }
+      int ready =
+          departure + lastArrivalOffset(profile) + in.limits().turnaround().secondsFor(routeId);
+      return ready <= nominalOf(chains.get(d).get(i + 1));
+    }
+
     /** 一段运行最早能从哪一秒发：从 {@code base} 起，撞上谁就跳到它让开之后；延后超过 {@code limit} 按原时刻。 */
     private Placement earliest(
         List<TimetableConflictChecker.Slot> cells, int base, int vehicle, String code, int limit) {
+      Scan scan = scan(cells, base, vehicle, limit);
+      return scan.found() ? commit(scan, base, code) : new Placement(base, false);
+    }
+
+    /** 只找不记：从 {@code base} 起最早放得下的发车与第一个挡路的；超过 {@code limit} 没找到为空。 */
+    private Scan scan(List<TimetableConflictChecker.Slot> cells, int base, int vehicle, int limit) {
       int t = base;
       Occ firstBlocker = null;
       TimetableConflictChecker.Slot firstCell = null;
       for (int jump = 0; jump < MAX_JUMPS; jump++) {
         Blocked blocked = firstBlocked(cells, t, vehicle);
         if (blocked == null) {
-          if (t > base && firstBlocker != null) {
-            yields.add(
-                new TripYield(
-                    firstCell.kind(),
-                    firstCell.key(),
-                    firstBlocker.code,
-                    firstBlocker.owner,
-                    code,
-                    t - base,
-                    base + firstCell.from()));
-          }
-          return new Placement(t, t > base);
+          return new Scan(true, t, firstBlocker, firstCell);
         }
         if (firstBlocker == null) {
           firstBlocker = blocked.occ;
@@ -768,7 +816,23 @@ final class ReservationScheduler {
         }
         t = next;
       }
-      return new Placement(base, false);
+      return new Scan(false, base, null, null);
+    }
+
+    /** 采用一次找到的发车：比 {@code base} 晚就记一处让车。 */
+    private Placement commit(Scan scan, int base, String code) {
+      if (scan.time() > base && scan.firstBlocker() != null) {
+        yields.add(
+            new TripYield(
+                scan.firstCell().kind(),
+                scan.firstCell().key(),
+                scan.firstBlocker().code,
+                scan.firstBlocker().owner,
+                code,
+                scan.time() - base,
+                base + scan.firstCell().from()));
+      }
+      return new Placement(scan.time(), scan.time() > base);
     }
 
     /**
@@ -831,7 +895,12 @@ final class ReservationScheduler {
     return stops.isEmpty() ? 0 : stops.get(stops.size() - 1).arrivalOffsetSeconds();
   }
 
+  private record Lag(int nominal, int seconds) {}
+
   private record Placement(int time, boolean yielded) {}
+
+  private record Scan(
+      boolean found, int time, Occ firstBlocker, TimetableConflictChecker.Slot firstCell) {}
 
   private record Blocked(TimetableConflictChecker.Slot cell, Occ occ, int release) {}
 
