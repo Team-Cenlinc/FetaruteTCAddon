@@ -71,8 +71,14 @@ class FtaTimetableCommandMaxTripsTest {
     assertTrue(
         FtaTimetableCommand.maxTripsOverrideWarning(
                 null, List.of(group("Short", 4), group("Full", 8)))
+            .orElse("")
+            .contains("Short"),
+        "不带 flag、各组配得不一样：跨组接班按最大的排，要点名配得小的组");
+    assertTrue(
+        FtaTimetableCommand.maxTripsOverrideWarning(
+                null, List.of(group("Short", 8), group("Full", 8)))
             .isEmpty(),
-        "按组生效时与运行时一致，不该提醒");
+        "配成一样就不该提醒");
     assertTrue(
         FtaTimetableCommand.maxTripsOverrideWarning(4, List.of(group("Short", 4), group("Full", 8)))
             .isEmpty(),

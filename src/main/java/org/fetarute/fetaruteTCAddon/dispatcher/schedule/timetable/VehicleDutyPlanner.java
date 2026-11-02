@@ -859,6 +859,9 @@ public final class VehicleDutyPlanner {
     private VehicleDuty.CloseReason closeReason;
     private Optional<Leg> closingLeg = Optional.empty();
 
+    /** {@link #tripLimit} 的缓存：接班时随手更新，退班时作废（−1）。 */
+    private int tripLimit = -1;
+
     private OpenDuty(
         int sequence,
         String startDepot,
@@ -898,12 +901,16 @@ public final class VehicleDutyPlanner {
 
     private void accept(PlannedTrip trip, Limits limits) {
       trips.add(trip);
+      if (tripLimit >= 0) {
+        tripLimit = Math.max(tripLimit, limits.maxTripsFor(trip.routeId()));
+      }
       durations.add(trip.durationFor(consist));
       refresh(limits);
     }
 
     private PlannedTrip popLast() {
       PlannedTrip removed = trips.remove(trips.size() - 1);
+      tripLimit = -1;
       durations.remove(durations.size() - 1);
       // 退掉尾段后 lastTerminal/endSeconds 只在 toDuty 里再用，那里会按剩余班次重算。
       if (!trips.isEmpty()) {
@@ -936,13 +943,16 @@ public final class VehicleDutyPlanner {
       return trips.get(trips.size() - 1);
     }
 
-    /** 这条交路最多几班：取它跑过的各 route 所在组的上限中最大的（跨组接班不被小组的上限卡住）。 */
+    /** 这条交路最多几班：取它跑过的各 route 所在组的上限中最大的（跨组接班不被小组的上限卡住）。还没跑过班次（解编生出的子交路）时为 0，由要接的那一班自己的组定。 */
     private int tripLimit(Limits limits) {
-      int limit = 0;
-      for (PlannedTrip trip : trips) {
-        limit = Math.max(limit, limits.maxTripsFor(trip.routeId()));
+      if (tripLimit < 0) {
+        int limit = 0;
+        for (PlannedTrip trip : trips) {
+          limit = Math.max(limit, limits.maxTripsFor(trip.routeId()));
+        }
+        tripLimit = limit;
       }
-      return limit > 0 ? limit : limits.maxTripsPerDuty();
+      return tripLimit;
     }
 
     private int tripCount() {

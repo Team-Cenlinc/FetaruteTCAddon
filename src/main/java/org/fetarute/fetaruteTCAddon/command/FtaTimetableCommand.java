@@ -505,9 +505,13 @@ public final class FtaTimetableCommand {
       spawnGroups.addAll(LineSpawnMetadata.parseGroups(member.line().line().metadata()));
     }
     MaxTripsChoice maxTrips = resolveMaxTrips(flags.maxTripsPerDuty(), spawnGroups);
-    String maxTripsSource = maxTrips.description();
-    List<String> buildWarnings = new ArrayList<>();
     Map<UUID, Integer> maxTripsByRoute = maxTripsByRoute(flags.maxTripsPerDuty(), members);
+    // 组上配了上限、却没有一条 route 认得这些组（route 没写 spawn_group）：实际全按默认排，来源照实写。
+    String maxTripsSource =
+        flags.maxTripsPerDuty() == null && maxTripsByRoute.isEmpty()
+            ? "默认"
+            : maxTrips.description();
+    List<String> buildWarnings = new ArrayList<>();
     maxTripsOverrideWarning(flags.maxTripsPerDuty(), spawnGroups).ifPresent(buildWarnings::add);
     // --separation 不随表保存，而 publish 重检写死按默认值复算（见 scopeCheck）。两个数不一样时，
     // 同一张表在 build 与 publish 会被两把尺子量——设计里写明了两次分类必须一致，所以至少要说出来。
@@ -3042,11 +3046,7 @@ public final class FtaTimetableCommand {
    * @param trips 生效的单交路最多班次
    * @param description 来源说明，进报告
    */
-  record MaxTripsChoice(int trips, String description, Optional<String> group) {
-    MaxTripsChoice {
-      group = group == null ? Optional.empty() : group;
-    }
-  }
+  record MaxTripsChoice(int trips, String description) {}
 
   /** 交路上限的上界：与 {@code --max-trips} 的取值范围共用一个数，组配置不能绕过它。 */
   static final int MAX_TRIPS_CEILING = 64;
@@ -3060,28 +3060,22 @@ public final class FtaTimetableCommand {
    */
   static MaxTripsChoice resolveMaxTrips(Integer flag, List<SpawnGroup> groups) {
     if (flag != null) {
-      return new MaxTripsChoice(clampMaxTrips(flag), "--max-trips", Optional.empty());
+      return new MaxTripsChoice(clampMaxTrips(flag), "--max-trips");
     }
     List<String> configured = new ArrayList<>();
-    String first = null;
     for (SpawnGroup group : groups == null ? List.<SpawnGroup>of() : groups) {
       Optional<Integer> trips = group.maxOperationTrips();
       if (trips.isPresent() && trips.get() > 0) {
         int capped = clampMaxTrips(trips.get());
         configured.add(group.name() + " " + capped + (capped == trips.get() ? "" : "（已收到上限）"));
-        if (first == null) {
-          first = group.name();
-        }
       }
     }
     int fallback = VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS;
     if (configured.isEmpty()) {
-      return new MaxTripsChoice(fallback, "默认", Optional.empty());
+      return new MaxTripsChoice(fallback, "默认");
     }
     return new MaxTripsChoice(
-        fallback,
-        "按组生效：" + String.join("、", configured) + "；其余组默认 " + fallback,
-        Optional.ofNullable(first));
+        fallback, "按组生效：" + String.join("、", configured) + "；其余组默认 " + fallback);
   }
 
   /**
@@ -3123,15 +3117,15 @@ public final class FtaTimetableCommand {
   }
 
   /**
-   * {@code --max-trips} 覆盖得比某些组的 {@code maxOperationTrips} 大时的提醒。
+   * 编表上限与运行时回收对不上时的提醒。
    *
    * <p>运行时是<b>按组</b>卡的：{@code SimpleTicketAssigner} 把该班所属组的 {@code maxOperationTrips} 写进车的 {@code
-   * FTA_OP_MAX}，{@code ReclaimManager} 一到数就回收。编表按组生效时两边一致；只有整次构建用 flag 统一覆盖、而且覆盖值大过某组的配置，
-   * 那个组排出来的交路才会比车实际跑得完的长，后面几班到点没车——症状是「班次被大量取消」，离病因很远。
+   * FTA_OP_MAX}，{@code ReclaimManager} 一到数就回收。对不上的有两种：整次构建用 flag 统一覆盖、覆盖值大过某组的配置；或者不带 flag、
+   * 各组配得不一样——跨组接班的交路按跑过各组中最大的上限排，配得小的组上的车可能先被收走。两种的症状都是后面几班到点没车 （「班次被大量取消」），离病因很远。
    */
   static Optional<String> maxTripsOverrideWarning(Integer flag, List<SpawnGroup> groups) {
     if (flag == null) {
-      return Optional.empty();
+      return crossGroupWarning(groups);
     }
     int override = clampMaxTrips(flag);
     List<String> smaller = new ArrayList<>();
@@ -3151,6 +3145,39 @@ public final class FtaTimetableCommand {
             + String.join("、", smaller)
             + " 的 maxOperationTrips：运行时这些组的车跑到组上限就会被回收，后面的班次到点没车（症状是班次被大量取消）。"
             + "要长期这样排，把组上的 maxOperationTrips 一起改大。");
+  }
+
+  /** 不带 flag、各组配得不一样时的提醒：跨组接班的交路按最大的排，配得小的组运行时先回收。 */
+  private static Optional<String> crossGroupWarning(List<SpawnGroup> groups) {
+    int max = 0;
+    int min = Integer.MAX_VALUE;
+    String smallest = "";
+    for (SpawnGroup group : groups == null ? List.<SpawnGroup>of() : groups) {
+      Optional<Integer> configured = group.maxOperationTrips();
+      if (configured.isEmpty() || configured.get() <= 0) {
+        continue;
+      }
+      max = Math.max(max, configured.get());
+      if (configured.get() < min) {
+        min = configured.get();
+        smallest = group.name();
+      }
+    }
+    if (max <= 0 || min >= max) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        "交路组 "
+            + smallest
+            + " 的 maxOperationTrips 是 "
+            + min
+            + "，小于别的组的 "
+            + max
+            + "：跨组接班的交路按跑过各组中最大的上限排，运行时 "
+            + smallest
+            + " 上的车跑到第 "
+            + min
+            + " 班就可能被回收，后面的班次到点没车（症状是班次被大量取消）。要避免就把这些组配成一样。");
   }
 
   /** route metadata 的交路组名；没配返回空，编表时按起点站台组推导。 */

@@ -3240,7 +3240,6 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
   }
 
-  /** 已发布时刻表的只读索引。 */
   /** 一份快照里已发布的表及其版本（更新时刻）：重载前后相同就是表没换。 */
   private static Map<UUID, Instant> versionsOf(Snapshot snapshot) {
     Map<UUID, Instant> versions = new HashMap<>();
@@ -3250,6 +3249,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return versions;
   }
 
+  /** 已发布时刻表的只读索引。 */
   record Snapshot(
       List<Timetable> timetables, Map<UUID, Timetable> byId, Map<UUID, List<Timetable>> byRoute) {
 
