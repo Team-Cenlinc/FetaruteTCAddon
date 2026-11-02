@@ -43,8 +43,12 @@ final class ReservationScheduler {
   /** 让车均摊打的折：两班名义间隔每这么多秒，跟着的延后少一秒（360 秒间隔下比让车那班少 10 秒）。 */
   static final int SMOOTH_RECOVERY_SECONDS = 36;
 
-  /** 让车均摊的范围：同一条 route 相邻两班名义间隔的几分之一（4 即四分之一间隔）；更大的延后不往后传，平移也不超过它。 */
-  static final int SMOOTH_DRIFT_DIVISOR = 4;
+  /**
+   * 让车均摊的范围：同一条 route 相邻两班名义间隔的几分之一（3 即三分之一间隔）；更大的延后不往后传，平移也不超过它。
+   *
+   * <p>两条间隔相同的线在同一段抢道、再隔一班撞一次快车时，让车可达一百多秒（360 秒间隔下约 106 秒），四分之一间隔摊不到。
+   */
+  static final int SMOOTH_DRIFT_DIVISOR = 3;
 
   /** 端点停留在下一班发车之前的暂定终点：足够远，相当于"一直占着"。 */
   private static final int OPEN = Integer.MAX_VALUE / 4;
@@ -338,7 +342,7 @@ final class ReservationScheduler {
         }
         // 让车均摊：同一条 route 上一班让车整趟延后了，这一班从"名义 + 打了折的延后"起找，而不是弹回名义时刻。
         // 冲突隔一班出现一次时，被让的那班晚 D、下一班准点，班距就是一长一短（360 变 290/430）；跟着延后一截，两边各差几秒。
-        // 只在四分之一间隔以内均摊（见 SMOOTH_DRIFT_DIVISOR）：更大的让车是一次扰动，摊出去只会扰动更多班；找到的发车也不超过
+        // 只在三分之一间隔以内均摊（见 SMOOTH_DRIFT_DIVISOR）：更大的让车是一次扰动，摊出去只会扰动更多班；找到的发车也不超过
         // 这个上限。打的折按两班名义间隔算（见 SMOOTH_RECOVERY_SECONDS）。均摊只用这辆车折返的余量：推迟到下一班就绪不了就不均摊，
         // 否则延后沿交路传到对向、对向又反过来顶这一向，整张表一圈圈往后漂。
         Lag previous = lagByRoute.get(trip.routeId());
