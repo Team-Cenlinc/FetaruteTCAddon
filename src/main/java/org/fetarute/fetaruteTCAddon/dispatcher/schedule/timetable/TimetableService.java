@@ -463,9 +463,13 @@ public final class TimetableService implements ScheduledDeparturePlan {
       Snapshot next = Snapshot.of(selection.active());
       Optional<Map<UUID, Map<Integer, String>>> plans =
           loadPlatformPlans(provider, next.timetables());
+      boolean changed = !versionsOf(next).equals(versionsOf(this.snapshot));
       this.snapshot = next;
       dutyRecoveryPending = dutyStore != null;
-      unboundRecoveryPending = true;
+      // 定时重载每分钟一次：表没换就不再补登缺车。提前跑完、被回收、换车中途的交路都会被当成缺车再派一辆，原车还在线上。
+      if (changed) {
+        unboundRecoveryPending = true;
+      }
       plans.ifPresent(
           loaded -> {
             if (!loaded.equals(this.platformPlans)) {
@@ -3237,6 +3241,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /** 已发布时刻表的只读索引。 */
+  /** 一份快照里已发布的表及其版本（更新时刻）：重载前后相同就是表没换。 */
+  private static Map<UUID, Instant> versionsOf(Snapshot snapshot) {
+    Map<UUID, Instant> versions = new HashMap<>();
+    for (Timetable timetable : snapshot.timetables()) {
+      versions.put(timetable.id(), timetable.updatedAt());
+    }
+    return versions;
+  }
+
   record Snapshot(
       List<Timetable> timetables, Map<UUID, Timetable> byId, Map<UUID, List<Timetable>> byRoute) {
 

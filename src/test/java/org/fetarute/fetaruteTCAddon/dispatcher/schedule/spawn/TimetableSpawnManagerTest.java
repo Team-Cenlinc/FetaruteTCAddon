@@ -1243,6 +1243,52 @@ class TimetableSpawnManagerTest {
     assertTrue(manager.pollDueTickets(provider, clock.get().plusSeconds(10)).isEmpty(), "空缺已填上");
   }
 
+  /**
+   * 中途顶班的车也跑带客出库线路，到站时不能按交路就近配上本交路早上那一班出库展示车次：那一班早过了，晚点算出来几十分钟， 当场按晚点上限换下、再派一辆，OFL
+   * 一段一下子多出好几辆车。出库展示车次只由开班出库票按意图精确绑定。
+   */
+  @Test
+  void aMidDutyReplacementIsNotMatchedToTheOpeningDisplayTrip() {
+    Timetable table = passengerCreateTimetable();
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(DAY.plusSeconds(8 * 3600 + 5));
+    List<String> logs = new ArrayList<>();
+    TimetableService service = new TimetableService(clock::get, logs::add);
+    service.applySettings(
+        new TimetableService.Settings(
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofHours(24)));
+    StorageProvider provider = mock(StorageProvider.class);
+    TimetableRepository repository = mock(TimetableRepository.class);
+    when(provider.timetables()).thenReturn(repository);
+    when(repository.listPublished()).thenReturn(List.of(table));
+    service.reload(provider);
+    SpawnManager delegate = mock(SpawnManager.class);
+    when(delegate.pollDueTickets(any(), any())).thenReturn(List.of());
+    when(delegate.snapshotPlan()).thenReturn(plan());
+    TimetableSpawnManager manager = new TimetableSpawnManager(delegate, service, logs::add);
+    service.scheduledDepartureAt(stop("train-A", 0, clock.get()));
+    clock.set(DAY.plusSeconds(8 * 3600 + 5 * 60));
+    service.release("train-A", "train-removed");
+    clock.set(DAY.plusSeconds(8 * 3600 + 7 * 60));
+    SpawnTicket replacement = manager.pollDueTickets(provider, clock.get()).get(0);
+    manager.onDispatched(replacement, "train-B");
+
+    clock.set(DAY.plusSeconds(8 * 3600 + 8 * 60));
+    service.scheduledDepartureAt(
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent(
+            "train-B", Optional.of(CREATE_ROUTE), "CRT", 1, 2, "OP:S:AAA:1", clock.get()));
+
+    assertTrue(
+        service.assignments().stream().noneMatch(a -> a.tripCode().equals("CRT-001")),
+        "顶班车不绑早上的出库展示车次: " + service.assignments());
+    assertEquals(
+        Optional.of(
+            new TimetableService.DutyKey(TIMETABLE, DUTY, java.time.LocalDate.of(2026, 3, 2))),
+        service.dutyBindingOf("train-B"),
+        "交路仍归顶班车");
+    assertEquals(0, service.vacantDutyCount(), "不因假晚点换下再派一辆");
+  }
+
   /** 叫车的按需票在按表运行的交路上照常放出（headway 票照旧拦下），也不向 delegate 报完成。 */
   @Test
   void onDemandTicketsPassThroughManagedRoutes() {

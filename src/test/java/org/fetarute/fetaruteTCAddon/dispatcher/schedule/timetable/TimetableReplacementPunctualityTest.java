@@ -169,6 +169,32 @@ class TimetableReplacementPunctualityTest {
   }
 
   /**
+   * 定时重载（每分钟一次）表没换时不再补登缺车：补登只在开服或换表后做一次。每轮都补会把提前跑完、被回收、换车中途的交路当成缺车， 原车还在线上又派一辆。
+   *
+   * <p>08:26 交路还没到计划收车（08:27:20），班次却都过了容差：补登一次、随即因班次全部过期撤销。表没换的重载之后再补登，不该再来一遍。
+   */
+  @Test
+  void aPeriodicReloadOfTheSameTablesDoesNotReRegisterUnboundDuties() {
+    Timetable table = timetable(TimetableStatus.PUBLISHED, 3);
+    apply(table);
+    clock.set(Instant.parse("2026-03-02T08:26:00Z"));
+    service.restoreDutyBindings(clock.get());
+    service.recoverUnboundDuties(Set.of(CREATE_ROUTE), clock.get());
+    service.replacementsDue(clock.get());
+    long first = logs.stream().filter(line -> line.contains("remaining-trips-expired")).count();
+
+    service.reload(providerWith(table));
+    service.recoverUnboundDuties(Set.of(CREATE_ROUTE), clock.get());
+    service.replacementsDue(clock.get());
+
+    assertTrue(first > 0, "开服后补登过一次: " + logs);
+    assertEquals(
+        first,
+        logs.stream().filter(line -> line.contains("remaining-trips-expired")).count(),
+        "表没换的重载不再补登: " + logs);
+  }
+
+  /**
    * 终点续班与运行时同一口径：第二班 08:10 的票一直在等 train-A（续班票等本交路的车），08:20 时晚了 600 秒、过了容差但没到晚点上限 900 秒，
    * 车到终点仍接着开第二班，站牌上的下一趟就是它；08:25 到了上限、车被换下，下一趟由替补接，这辆车没有下一趟。
    */
