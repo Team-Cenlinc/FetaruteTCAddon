@@ -150,16 +150,30 @@ class TimetableReplayProbeTest {
       }
     }
 
+    // 与编表命令同一口径：FTA_REPLAY_MAX_TRIPS 是整次覆盖；不给时各组按自己的 maxOperationTrips，没配的组用默认。
+    String maxTripsOverride = System.getenv("FTA_REPLAY_MAX_TRIPS");
     int maxTrips =
-        Integer.parseInt(
-            env(
-                "FTA_REPLAY_MAX_TRIPS",
-                String.valueOf(
-                    spawnGroups.stream()
-                        .map(SpawnGroup::maxOperationTrips)
-                        .flatMap(Optional::stream)
-                        .max(Integer::compare)
-                        .orElse(VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS))));
+        maxTripsOverride == null || maxTripsOverride.isBlank()
+            ? VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS
+            : Integer.parseInt(maxTripsOverride.trim());
+    Map<UUID, Integer> maxTripsByRoute = new HashMap<>();
+    if (maxTripsOverride == null || maxTripsOverride.isBlank()) {
+      for (Member member : members) {
+        Map<String, Integer> byGroup = new HashMap<>();
+        for (SpawnGroup group : LineSpawnMetadata.parseGroups(member.line().metadata())) {
+          group
+              .maxOperationTrips()
+              .filter(trips -> trips > 0)
+              .ifPresent(trips -> byGroup.put(group.name(), trips));
+        }
+        for (TimetableBuilder.RouteInput input : member.inputs()) {
+          input
+              .spawnGroup()
+              .map(byGroup::get)
+              .ifPresent(trips -> maxTripsByRoute.put(input.routeId(), trips));
+        }
+      }
+    }
     ConfigManager.TimetableSettings timetable = config.timetableSettings();
     int tolerance = timetable.assignToleranceSeconds();
     Map<UUID, Long> lengths = new HashMap<>();
@@ -198,7 +212,8 @@ class TimetableReplayProbeTest {
                 maxTrips,
                 Integer.parseInt(env("FTA_REPLAY_MAX_DUTY_MINUTES", "240")) * 60,
                 TurnaroundTable.none(),
-                maxIdleOf(config)),
+                maxIdleOf(config),
+                maxTripsByRoute),
             "",
             ZoneId.systemDefault(),
             Duration.ofSeconds(

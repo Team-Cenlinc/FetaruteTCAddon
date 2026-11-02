@@ -620,6 +620,46 @@ class VehicleDutyPlannerTest {
     assertEquals(declaredRoute, legs.returnLegAt(HUB, DEPOT).orElseThrow().routeId());
   }
 
+  /**
+   * 班次上限按组生效：一条 route 所在组配了上限，就按它卡；没配的 route 用全线的值，不借别的组的上限。
+   *
+   * <p>短交路线一个来回十几分钟，借了长交路线的 8 班，跑一个多小时就回库换车，换车走行满线跑，排表排不开；反过来长交路线也不能被小组卡短。
+   */
+  @Test
+  void tripLimitFollowsTheRouteGroup() {
+    UUID shortRoute = id("route-short");
+    UUID longRoute = id("route-long");
+    VehicleDutyPlanner.Limits limits =
+        new VehicleDutyPlanner.Limits(
+            6, 86_400, TurnaroundTable.fixed(60), 86_400, Map.of(shortRoute, 2));
+    List<VehicleDutyPlanner.PlannedTrip> trips = new ArrayList<>();
+    for (int i = 0; i < 6; i++) {
+      trips.add(
+          new VehicleDutyPlanner.PlannedTrip(
+              id("S" + i), shortRoute, "S" + i, HUB, HUB, i * 700, 600, false, false));
+    }
+    for (int i = 0; i < 6; i++) {
+      trips.add(
+          new VehicleDutyPlanner.PlannedTrip(
+              id("L" + i), longRoute, "L" + i, HUB, HUB, 20_000 + i * 700, 600, false, false));
+    }
+
+    VehicleDutyPlanner.Result result = VehicleDutyPlanner.plan(TIMETABLE, trips, hubLegs(), limits);
+
+    for (VehicleDuty duty : result.duties()) {
+      boolean onShort = duty.tripIds().contains(id("S0")) || duty.tripIds().contains(id("S2"));
+      if (duty.tripIds().stream().anyMatch(trip -> trip.equals(id("L0")))) {
+        assertEquals(6, duty.tripIds().size(), "没按组配置的 route 用全线上限，不被别组的 2 班卡住");
+      } else if (onShort) {
+        assertTrue(duty.tripIds().size() <= 2, "配了 2 班的组，交路不超过 2 班");
+        assertEquals(VehicleDuty.CloseReason.MAX_TRIPS, duty.closeReason());
+      }
+    }
+    assertEquals(2, limits.maxTripsFor(shortRoute));
+    assertEquals(6, limits.maxTripsFor(longRoute));
+    assertEquals(6, limits.maxTripsCeiling());
+  }
+
   /** HUB 既能出库也能回库。 */
   private static VehicleDutyPlanner.Legs hubLegs() {
     return VehicleDutyPlanner.Legs.simple(
