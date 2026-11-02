@@ -211,7 +211,7 @@ public final class DriveSidebarRows {
     return new Row(
         label,
         "drive.sidebar.value.signal."
-            + directive.aspect().name().toLowerCase(Locale.ROOT).replace('_', '-'),
+            + directive.displayAspect().name().toLowerCase(Locale.ROOT).replace('_', '-'),
         Map.of("limit_kmh", String.valueOf(Math.round(permitted * KMH_PER_BPS))));
   }
 

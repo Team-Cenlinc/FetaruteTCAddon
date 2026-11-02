@@ -186,6 +186,49 @@ class TrainLaunchManagerDriverGateTest {
   }
 
   @Test
+  @DisplayName("沿制动曲线刹向停车点：驾驶员看到减速，控车仍是停车（不许起步、按停车曲线防护）")
+  void brakingToAStopPointIsShownToTheDriverAsCaution() {
+    TrainProperties properties = properties("drv-braking");
+    RuntimeTrainHandle train = train(properties, 10.0);
+    RecordingControlAuthority authority = new RecordingControlAuthority().control(properties);
+    TrainLaunchManager manager = new TrainLaunchManager(new SpeedLimitRamp(), authority);
+
+    manager.applyControl(
+        train,
+        properties,
+        SignalAspect.STOP,
+        0.0,
+        config,
+        false,
+        OptionalLong.of(60L),
+        Optional.empty(),
+        runtimeSettings(),
+        StopControlMode.BRAKING_TO_PLANNED_STOP,
+        null);
+
+    DriverDirective directive = authority.lastDirective();
+    assertEquals(SignalAspect.STOP, directive.aspect());
+    assertTrue(directive.isStop());
+    assertFalse(directive.allowLaunch());
+    assertEquals(SignalAspect.CAUTION, directive.displayAspect());
+
+    manager.applyControl(
+        train,
+        properties,
+        SignalAspect.STOP,
+        0.0,
+        config,
+        false,
+        OptionalLong.of(60L),
+        Optional.empty(),
+        runtimeSettings(),
+        StopControlMode.HARD_STOP,
+        null);
+
+    assertEquals(SignalAspect.STOP, authority.lastDirective().displayAspect(), "硬停照样显示停车");
+  }
+
+  @Test
   @DisplayName("STOP 硬停：容许速度为 0，发车未接受，列车本身不被停住")
   void hardStopPublishesZeroPermitted() {
     TrainProperties properties = properties("drv-2");

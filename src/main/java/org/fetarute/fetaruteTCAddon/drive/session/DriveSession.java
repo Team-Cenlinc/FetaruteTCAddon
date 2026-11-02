@@ -688,7 +688,7 @@ public final class DriveSession implements DriveDoors.Cab {
     int aspectRank =
         directive == null
             ? -1
-            : switch (directive.aspect()) {
+            : switch (directive.displayAspect()) {
               case PROCEED -> 0;
               case PROCEED_WITH_CAUTION -> 1;
               case CAUTION -> 2;
@@ -1154,7 +1154,7 @@ public final class DriveSession implements DriveDoors.Cab {
     SignalAcknowledge confirm = link.signalAcknowledge();
     if (link.directive() != null) {
       confirm.observe(
-          link.directive().aspect(),
+          link.directive().displayAspect(),
           nowTick,
           !stopped,
           config.level() == SimulationLevel.SIMULATION);

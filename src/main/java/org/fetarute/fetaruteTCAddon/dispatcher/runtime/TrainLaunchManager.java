@@ -9,6 +9,7 @@ import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.BrakingSignalDisplay;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
@@ -465,7 +466,14 @@ public final class TrainLaunchManager {
             permittedBps,
             aspect != SignalAspect.STOP,
             distanceOpt == null ? OptionalLong.empty() : distanceOpt,
-            speedEnvelope));
+            speedEnvelope,
+            BrakingSignalDisplay.displayAspect(
+                aspect,
+                resolvedStopMode,
+                distanceOpt,
+                train == null ? 0.0 : train.currentSpeedBlocksPerTick() * TICKS_PER_SECOND,
+                config.decelBps2(),
+                runtimeSettings)));
     return new ControlApplicationResult(
         targetBps, curveLimit, permittedBps, source, allowLaunch && aspect != SignalAspect.STOP);
   }

@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -42,6 +43,9 @@ public final class RouteProgressRegistry {
    * {@link #arrivalNodeAt}）。只由带现场证据的到达写入，推进到别的索引或换交路时作废。
    */
   private final ConcurrentMap<String, ArrivalAnchor> arrivalAnchors = new ConcurrentHashMap<>();
+
+  /** 停车信号下正沿制动曲线刹向前方停车点、显示为减速的列车（见 {@link #displaySignal}）。 */
+  private final Set<String> brakingCaution = ConcurrentHashMap.newKeySet();
 
   /** 返回进度快照版本。每次 route index、lastPassedGraphNode 或 signal 提交都会递增。 */
   public long version() {
@@ -252,6 +256,7 @@ public final class RouteProgressRegistry {
     if (existing == null) {
       return false;
     }
+    brakingCaution.remove(oldKey);
     ArrivalAnchor anchor = arrivalAnchors.remove(oldKey);
     if (anchor != null) {
       arrivalAnchors.put(newKey, anchor);
@@ -285,6 +290,7 @@ public final class RouteProgressRegistry {
     if (key == null || aspect == null) {
       return false;
     }
+    brakingCaution.remove(key);
     RouteProgressEntry updated =
         entries.computeIfPresent(
             key,
@@ -337,12 +343,49 @@ public final class RouteProgressRegistry {
     return false;
   }
 
+  /**
+   * 记下列车此刻是否在停车信号下沿制动曲线刹向前方停车点（判据见 {@code BrakingSignalDisplay}）。
+   *
+   * <p>每次发布信号都会清掉，由控车按本拍判据重新记下；信号换了而控车没跟上时宁可显示停车。
+   */
+  public void markBrakingCaution(String trainName, boolean braking) {
+    String key = keyOf(trainName);
+    if (key == null) {
+      return;
+    }
+    if (braking) {
+      brakingCaution.add(key);
+    } else {
+      brakingCaution.remove(key);
+    }
+  }
+
+  /**
+   * 给人看的信号：停车信号下正沿制动曲线刹向前方停车点时显示为 {@link SignalAspect#CAUTION}，其余同 {@link
+   * RouteProgressEntry#lastSignal()}。控车只认 {@code lastSignal}。
+   */
+  public Optional<SignalAspect> displaySignal(String trainName) {
+    String key = keyOf(trainName);
+    if (key == null) {
+      return Optional.empty();
+    }
+    RouteProgressEntry entry = entries.get(key);
+    if (entry == null) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        entry.lastSignal() == SignalAspect.STOP && brakingCaution.contains(key)
+            ? SignalAspect.CAUTION
+            : entry.lastSignal());
+  }
+
   public void remove(String trainName) {
     String key = keyOf(trainName);
     if (key == null) {
       return;
     }
     arrivalAnchors.remove(key);
+    brakingCaution.remove(key);
     if (entries.remove(key) != null) {
       version.incrementAndGet();
     }
