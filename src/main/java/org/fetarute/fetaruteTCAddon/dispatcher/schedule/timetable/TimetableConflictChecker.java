@@ -732,8 +732,22 @@ public final class TimetableConflictChecker {
         nodePosition[k + 1] = nodePosition[k] + edges.get(k).lengthBlocks();
       }
       segmentStart = nodePosition[nodePosition.length - 1];
+      // 运行时选台的停靠：站台到第一组道岔之间是哪条股道的路，要到站才定。路径按占位的首股道算出来，照登记会让所有车
+      // 都挤在首股道和它那段单线上，凭空撞车；这一截只由站台组一层按容量管。第一组道岔起各股道汇合，照常登记。
+      List<NodeId> path = segment.nodes();
+      int head =
+          chosenAtRuntime(platformAt(profile, segment.fromStop()), footprints)
+              ? firstSwitcher(path, nodeTypes)
+              : 0;
+      int tailFrom =
+          chosenAtRuntime(platformAt(profile, segment.toStop()), footprints)
+              ? lastSwitcher(path, nodeTypes, edges.size())
+              : edges.size();
       // 边：互斥。
       for (int k = 0; k < edges.size(); k++) {
+        if (k < head || k >= tailFrom) {
+          continue;
+        }
         slots.add(
             new Slot(
                 edgeKey(edges.get(k)),
@@ -747,6 +761,9 @@ public final class TimetableConflictChecker {
       // 一辆在单股道车站待命的车必须能挡住从它身上碾过去的对向车。
       List<NodeId> nodes = segment.nodes();
       for (int k = 1; k + 1 < nodes.size(); k++) {
+        if (k < head || k > tailFrom) {
+          continue;
+        }
         NodeId node = nodes.get(k);
         NodeType type = nodeTypes.get(node);
         int at = segment.nodeOffsets().get(k);
@@ -770,6 +787,9 @@ public final class TimetableConflictChecker {
         int direction = 0;
         SingleLineSectionInfo current = null;
         for (int k = 0; k < edges.size(); k++) {
+          if (k < head || k >= tailFrom) {
+            continue;
+          }
           Optional<SingleLineSectionInfo> info = sections.sectionInfoForEdge(edges.get(k).id());
           String key = info.map(SingleLineSectionInfo::key).orElse(null);
           if (key != null && key.equals(currentKey)) {
@@ -808,6 +828,38 @@ public final class TimetableConflictChecker {
     }
     index.blocking().of(profile, index).ifPresent(times -> addBlockingSlots(slots, profile, times));
     return new Footprint(slots);
+  }
+
+  private static Platform platformAt(RouteProfile profile, int stop) {
+    List<Platform> platforms = profile.platforms();
+    return stop >= 0 && stop < platforms.size() ? platforms.get(stop) : null;
+  }
+
+  /** 到站才选股道、而且可选的不止一条：进出站那截路由运行时定。只有一条可选时与固定股道无异，照常登记。 */
+  private static boolean chosenAtRuntime(Platform platform, Footprints footprints) {
+    return platform != null
+        && platform.dynamic()
+        && footprints.eligibility(platform).map(value -> value.nodes().size() >= 2).orElse(false);
+  }
+
+  /** 路径上第一组道岔的位置；没有道岔时为 0（整段照常登记）。 */
+  private static int firstSwitcher(List<NodeId> path, Map<NodeId, NodeType> nodeTypes) {
+    for (int k = 1; k < path.size(); k++) {
+      if (nodeTypes.get(path.get(k)) == NodeType.SWITCHER) {
+        return k;
+      }
+    }
+    return 0;
+  }
+
+  /** 路径上最后一组道岔的位置；没有道岔时为边数（整段照常登记）。 */
+  private static int lastSwitcher(List<NodeId> path, Map<NodeId, NodeType> nodeTypes, int edges) {
+    for (int k = path.size() - 2; k >= 1; k--) {
+      if (nodeTypes.get(path.get(k)) == NodeType.SWITCHER) {
+        return k;
+      }
+    }
+    return edges;
   }
 
   /**
