@@ -12120,6 +12120,79 @@ class RuntimeDispatchServiceTest {
         debugMessages.toString());
   }
 
+  /** 咽喉原子段一路咽喉到完整计划终点、终点是折返咽喉：以折返咽喉为出口放行，不判拓扑不可解。 */
+  @Test
+  void throatSectionEndingAtTurnbackThroatExitsAtTheThroat() {
+    List<String> debugMessages = new ArrayList<>();
+    NodeId station = NodeId.of("OP:S:PPK:1");
+    NodeId throat = NodeId.of("OP:S:PPK:1:001");
+    NodeId turnback = NodeId.of("OP:D:PPK:6:001");
+    String conflictKey = "single:test:ppk-depot-turnback";
+    OccupancyResource conflict = OccupancyResource.forConflict(conflictKey);
+    RailEdge entryEdge =
+        new RailEdge(
+            EdgeId.undirected(station, throat), station, throat, 10, -1.0, true, Optional.empty());
+    RailEdge turnbackEdge =
+        new RailEdge(
+            EdgeId.undirected(throat, turnback),
+            throat,
+            turnback,
+            10,
+            -1.0,
+            true,
+            Optional.empty());
+    ThroatConflictGraph graph =
+        new ThroatConflictGraph(
+            Map.of(
+                station,
+                    new RailNodeTest(
+                        station,
+                        NodeType.STATION,
+                        Optional.of(WaypointMetadata.station("OP", "PPK", 1))),
+                throat,
+                    new RailNodeTest(
+                        throat,
+                        NodeType.WAYPOINT,
+                        Optional.of(WaypointMetadata.stationThroat("OP", "PPK", 1, "001"))),
+                turnback,
+                    new RailNodeTest(
+                        turnback,
+                        NodeType.WAYPOINT,
+                        Optional.of(WaypointMetadata.depotThroat("OP", "PPK", 6, "001")))),
+            List.of(entryEdge, turnbackEdge),
+            Map.of(entryEdge.id(), conflictKey, turnbackEdge.id(), conflictKey));
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    RuntimeDispatchService service =
+        createMinimalService(manager, debugMessages, SmartDispatcherMode.ENFORCE);
+
+    service.smartDepotAdmissionAllowsSpawn(
+        "SURC-MT-LO-5237",
+        graph,
+        singleConflictPathContext(
+            "SURC-MT-LO-5237",
+            conflict,
+            CorridorDirection.A_TO_B,
+            List.of(station, throat, turnback),
+            List.of(entryEdge, turnbackEdge),
+            List.of(
+                conflict,
+                OccupancyResource.forNode(throat),
+                OccupancyResource.forEdge(entryEdge.id()),
+                OccupancyResource.forNode(turnback),
+                OccupancyResource.forEdge(turnbackEdge.id()))));
+
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(
+                message ->
+                    message.contains("SMART_THROAT_SECTION_ATOMIC")
+                        && message.contains("clear=true")
+                        && message.contains("throatExitSafePoint=OP:D:PPK:6:001")),
+        debugMessages.toString());
+  }
+
   @Test
   void smartLongSingleObserveOnlyDoesNotBlockButTraces() {
     List<String> debugMessages = new ArrayList<>();

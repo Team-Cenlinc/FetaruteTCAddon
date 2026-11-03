@@ -130,6 +130,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupanc
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.StartupOccupancyReconstructionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SwitcherMovementTopology;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TurnbackThroatExit;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.VerifiedSwitcherDrainClaims;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -22443,7 +22444,9 @@ public final class RuntimeDispatchService {
    *
    * <p>route 中的声明节点只是 DYNAMIC 语法占位，不是已经选定的物理站台。请求最多到达首个已 materialize 的 DYNAMIC 目标；若首个 DYNAMIC 尚未
    * materialize，则只允许使用它之前的安全 route 前缀。紧邻目标尚未 materialize 时没有可写前缀，必须 fail-closed。这样普通 lookahead
-   * 与原子联锁扩展都无法把后续占位节点写成 {@link ResourceIntent#MOVEMENT_REQUIRED}。
+   * 与原子联锁扩展都无法把后续占位节点写成 {@link ResourceIntent#MOVEMENT_REQUIRED}。截短后的前缀终点若是 PASS 途经点，不能当折返咽喉停车， 故改用
+   * {@link OccupancyRequestBuilder#withoutPathEndThroatExit}；终点本身是停靠点（如咽喉 TERMINATE 后接 DSTY
+   * 回库）时照常以它为出口。
    *
    * @param provisionalDynamicIndex 候选选台期间尚未写入 effective override 的临时目标索引
    */
@@ -22473,7 +22476,9 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     DynamicAuthorityWindow window = windowOpt.get();
-    return builder.buildContextFromNodesWithDirectionContext(
+    OccupancyRequestBuilder windowBuilder =
+        window.endsAtStop() ? builder : builder.withoutPathEndThroatExit();
+    return windowBuilder.buildContextFromNodesWithDirectionContext(
         trainName,
         Optional.ofNullable(route.id()),
         window.movementNodes(),
@@ -22667,14 +22672,22 @@ public final class RuntimeDispatchService {
       return Optional.of(
           new DynamicAuthorityWindow(
               movementNodes.subList(0, movementEnd),
-              effectiveDirectionNodes.subList(0, directionEnd)));
+              effectiveDirectionNodes.subList(0, directionEnd),
+              routeDefinitions
+                  .findStop(route.id(), movementEnd - 1)
+                  .map(RouteStop::stops)
+                  .orElse(false)));
     }
-    return Optional.of(new DynamicAuthorityWindow(movementNodes, effectiveDirectionNodes));
+    return Optional.of(new DynamicAuthorityWindow(movementNodes, effectiveDirectionNodes, true));
   }
 
-  /** DYNAMIC 边界裁剪后的物理节点与方向语义节点。 */
+  /**
+   * DYNAMIC 边界裁剪后的物理节点与方向语义节点。
+   *
+   * @param endsAtStop 末节点是否为列车真的会停下的地方（未截短，或截短处是非 PASS 停靠点）
+   */
   private record DynamicAuthorityWindow(
-      List<NodeId> movementNodes, List<NodeId> directionContextNodes) {
+      List<NodeId> movementNodes, List<NodeId> directionContextNodes, boolean endsAtStop) {
     private DynamicAuthorityWindow {
       movementNodes = List.copyOf(movementNodes);
       directionContextNodes = List.copyOf(directionContextNodes);
@@ -24435,6 +24448,13 @@ public final class RuntimeDispatchService {
     return -1;
   }
 
+  /**
+   * 咽喉原子段的出口索引：首个车站/车库或区间清出点。
+   *
+   * <p>一路都是咽喉与道岔、走到完整计划终点时，终点若是折返咽喉则以它为出口，与请求构建的原子窗口同一条规则（{@link
+   * TurnbackThroatExit}）。本路径取自请求的完整计划；计划被 DYNAMIC 边界截短、构建器关掉了折返咽喉出口时，到终点的硬授权不会存在， 后面的 {@code
+   * throat-hard-authority-incomplete} 检查照旧拦下。
+   */
   private int throatExitPointIndex(List<NodeId> nodes, int firstInsideIndex, RailGraph graph) {
     if (nodes == null || firstInsideIndex < 0 || firstInsideIndex >= nodes.size()) {
       return -1;
@@ -24448,7 +24468,7 @@ public final class RuntimeDispatchService {
         return -1;
       }
     }
-    return -1;
+    return TurnbackThroatExit.pathEndExit(graph, nodes).orElse(-1);
   }
 
   private LinkedHashSet<OccupancyResource> throatSectionResources(
@@ -24530,11 +24550,7 @@ public final class RuntimeDispatchService {
       return true;
     }
     return resolveWaypointMetadata(graph, nodeId)
-        .map(
-            metadata ->
-                metadata.kind() == WaypointKind.STATION_THROAT
-                    || metadata.kind() == WaypointKind.DEPOT_THROAT
-                    || metadata.kind() == WaypointKind.SWITCHER)
+        .map(metadata -> metadata.kind().isThroat() || metadata.kind() == WaypointKind.SWITCHER)
         .orElse(false);
   }
 

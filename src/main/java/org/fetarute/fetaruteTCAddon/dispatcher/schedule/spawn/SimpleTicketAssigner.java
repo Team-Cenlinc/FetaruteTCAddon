@@ -25,6 +25,7 @@ import java.util.stream.Collectors;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -4189,6 +4190,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
             debugLogger);
+    // DYNAMIC 目标未选定时前缀被截短；截短处若只是 PASS 途经点，不能当折返咽喉停车
+    List<NodeId> preparedWaypoints = preparedWaypointsOpt.get();
+    if (preparedWaypoints.size() < spawnWaypoints.size()
+        && !routeDefinitions
+            .findStop(route.id(), preparedWaypoints.size() - 1)
+            .map(RouteStop::stops)
+            .orElse(false)) {
+      builder = builder.withoutPathEndThroatExit();
+    }
     Optional<DepotGateRequest> gateRequestOpt =
         buildDepotSpawnGateRequest(
             builder,

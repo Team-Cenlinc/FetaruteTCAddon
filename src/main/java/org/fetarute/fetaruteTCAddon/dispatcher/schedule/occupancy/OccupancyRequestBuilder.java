@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -67,6 +68,13 @@ public final class OccupancyRequestBuilder {
    * <p>关掉时每次申请都现算，结果与共用时逐项相同；只用于逐次比对时算出对照的那一份。
    */
   private final boolean planCacheEnabled;
+
+  /**
+   * 完整路径止于站咽喉/车库咽喉时，是否以该咽喉作为原子联锁窗口的出口（见 {@link #resolveAtomicInterlockingWindow}）。
+   *
+   * <p>只有路径终点确实是列车要停下的地方（交路终点或折返切分点）时才成立；调用方把路径截在中途（例如 DYNAMIC 目标未选定）时须关掉。
+   */
+  private final boolean pathEndThroatExit;
 
   /**
    * 查询列车在某个交路索引上实际到达的图节点，用于把身后保护钉在实际走过的股道上。
@@ -155,6 +163,7 @@ public final class OccupancyRequestBuilder {
         Long.MAX_VALUE,
         debugLogger,
         null,
+        true,
         true);
   }
 
@@ -171,8 +180,10 @@ public final class OccupancyRequestBuilder {
       long terminalDepotBerthBlocks,
       java.util.function.Consumer<String> debugLogger,
       RearGuardAnchor rearGuardAnchor,
-      boolean planCacheEnabled) {
+      boolean planCacheEnabled,
+      boolean pathEndThroatExit) {
     this.graph = Objects.requireNonNull(graph, "graph");
+    this.pathEndThroatExit = pathEndThroatExit;
     this.rearGuardAnchor = rearGuardAnchor;
     this.planCacheEnabled = planCacheEnabled;
     this.semanticDirectionResolver = new SemanticCorridorDirectionResolver(this.graph);
@@ -243,7 +254,8 @@ public final class OccupancyRequestBuilder {
         terminalDepotBerthBlocks,
         debugLogger,
         rearGuardAnchor,
-        planCacheEnabled);
+        planCacheEnabled,
+        pathEndThroatExit);
   }
 
   /**
@@ -279,7 +291,8 @@ public final class OccupancyRequestBuilder {
         berthBlocks,
         debugLogger,
         rearGuardAnchor,
-        planCacheEnabled);
+        planCacheEnabled,
+        pathEndThroatExit);
   }
 
   /**
@@ -309,7 +322,8 @@ public final class OccupancyRequestBuilder {
         terminalDepotBerthBlocks,
         debugLogger,
         anchor,
-        planCacheEnabled);
+        planCacheEnabled,
+        pathEndThroatExit);
   }
 
   /**
@@ -331,7 +345,37 @@ public final class OccupancyRequestBuilder {
         terminalDepotBerthBlocks,
         logger,
         rearGuardAnchor,
-        planCacheEnabled);
+        planCacheEnabled,
+        pathEndThroatExit);
+  }
+
+  /**
+   * 返回不把路径终点咽喉当作原子联锁出口的新构建器。
+   *
+   * <p>默认构建器假定完整路径的终点就是列车停下的地方（交路终点或折返切分点），终点为咽喉时可以停在那里；调用方把路径截在中途时，
+   * 终点咽喉只是途经点，停在那里会把车停进联锁区，须用本方法恢复"找不到清出点即 fail-closed"。
+   *
+   * @return 保留当前全部设置、仅关闭终点咽喉出口的新构建器
+   */
+  public OccupancyRequestBuilder withoutPathEndThroatExit() {
+    if (!pathEndThroatExit) {
+      return this;
+    }
+    return new OccupancyRequestBuilder(
+        graph,
+        effectiveLookaheadEdges,
+        0,
+        rearGuardEdges,
+        switcherZoneEdges,
+        minLookaheadDistanceBlocks,
+        maxLookaheadEdges,
+        minRearGuardDistanceBlocks,
+        minConflictExitDistanceBlocks,
+        terminalDepotBerthBlocks,
+        debugLogger,
+        rearGuardAnchor,
+        planCacheEnabled,
+        false);
   }
 
   /** 同一组设置、不与其他构建器共用展开计划的构建器：每次申请都现算。 */
@@ -352,7 +396,8 @@ public final class OccupancyRequestBuilder {
         terminalDepotBerthBlocks,
         debugLogger,
         rearGuardAnchor,
-        false);
+        false,
+        pathEndThroatExit);
   }
 
   /**
@@ -594,7 +639,10 @@ public final class OccupancyRequestBuilder {
     List<NodeId> expandedNodes = truncateLookahead(fullExpanded, fullEdges);
     ConflictExitAuthorityWindow conflictExitWindow =
         resolveConflictExitAuthorityWindow(
-            fullEdges, expandedNodes, fullExpanded.get(fullExpanded.size() - 1));
+            fullEdges,
+            expandedNodes,
+            fullExpanded.get(fullExpanded.size() - 1),
+            turnbackThroatExit(fullExpanded).isPresent());
     if (conflictExitWindow.applicable() && !conflictExitWindow.resolved()) {
       debugLogger.accept(
           "构建请求失败: 物理联锁缺少可见清出边 train="
@@ -947,6 +995,11 @@ public final class OccupancyRequestBuilder {
    * <p>两组道岔之间的直线段容不下整列车时，停在段内的车必然压着其中一组，这两组对这列车就是同一组联锁：清出点之后、累计不到 {@link
    * #minConflictExitDistanceBlocks} 就又碰上联锁节点，这个清出点作废，窗口继续穿过下一组道岔。典型如渡线紧接车库岔口：停在首个清出点的车
    * 车尾还压着渡线、车头对着逆向来车，两车顶牛。道岔后面接长直线时仍取首个清出点； 未配置泊位距离（0）时与只看首个清出点等价。
+   *
+   * <p>交路在站咽喉或车库咽喉折返时，完整路径进入联锁后一路都是咽喉与道岔，终点就是折返咽喉，既无车站/车库也无普通 waypoint。
+   * 列车本来就要停在这里再原路折回，所以走到路径终点时若仍没有有效清出点（包括夹缝清出点因泊位不足作废的情况），而终点是站咽喉/车库咽喉，就以终点为出口， 把整段进路一次持有到折返点（规则见
+   * {@link TurnbackThroatExit}）。只认路径终点，不认道岔自动节点；终点不是咽喉时缺清出点照旧 fail-closed。 调用方把路径截在中途时用 {@link
+   * #withoutPathEndThroatExit} 关掉。
    */
   private AtomicAuthorityWindow resolveAtomicInterlockingWindow(
       List<NodeId> fullPath, List<NodeId> hardWindow, AuthorizationPurpose purpose) {
@@ -992,9 +1045,22 @@ public final class OccupancyRequestBuilder {
         return clearanceWindow(fullPath, clearanceIndex);
       }
     }
-    return enteredInterlocking
-        ? clearanceWindow(fullPath, clearanceIndex)
-        : AtomicAuthorityWindow.notApplicable();
+    if (!enteredInterlocking) {
+      return AtomicAuthorityWindow.notApplicable();
+    }
+    OptionalInt turnbackExit = turnbackThroatExit(fullPath);
+    if (clearanceIndex < 0 && turnbackExit.isPresent()) {
+      int endIndex = turnbackExit.getAsInt();
+      return AtomicAuthorityWindow.resolved(entry, fullPath.get(endIndex), endIndex);
+    }
+    return clearanceWindow(fullPath, clearanceIndex);
+  }
+
+  /** 本构建器允许时，按 {@link TurnbackThroatExit} 取完整路径终点的折返咽喉。 */
+  private OptionalInt turnbackThroatExit(List<NodeId> fullPath) {
+    return pathEndThroatExit
+        ? TurnbackThroatExit.pathEndExit(graph, fullPath)
+        : OptionalInt.empty();
   }
 
   /** 以 {@code clearanceIndex} 处的清出点结束原子窗口；没有清出点时 fail-closed。 */
@@ -1023,13 +1089,18 @@ public final class OccupancyRequestBuilder {
    * throat/switcher 原子窗口负责，避免在这里把相邻边重复解释为第二套出口规则。
    *
    * <p>完整路径没有可见清出边时 builder 直接返回空请求并 fail-closed；不能把原始短窗口继续交给不理解物理联锁的调用方。若 route
-   * 终止在联锁区内，应补充可证明车体完全清出的图边界，而不是把 destination 当作出清证据。唯一例外是路径终点为车库：联锁区之后的库线容得下整列车即算清出（见 {@link
-   * #withTerminalDepotBerthBlocks}）。
+   * 终止在联锁区内，应补充可证明车体完全清出的图边界，而不是把 destination 当作出清证据。例外有二：路径终点为车库时，联锁区之后的库线容得下整列车即算清出（见 {@link
+   * #withTerminalDepotBerthBlocks}）；路径终点为折返咽喉时（见 {@link
+   * TurnbackThroatExit}），列车就停在那里原路折回，出口取到终点，不再要求泊位。
    *
    * @param pathEnd 完整路径的最后一个节点
+   * @param turnbackThroatEnd 完整路径终点是否为可作出口的折返咽喉
    */
   private ConflictExitAuthorityWindow resolveConflictExitAuthorityWindow(
-      List<RailEdge> fullEdges, List<NodeId> hardWindow, NodeId pathEnd) {
+      List<RailEdge> fullEdges,
+      List<NodeId> hardWindow,
+      NodeId pathEnd,
+      boolean turnbackThroatEnd) {
     if (fullEdges == null || fullEdges.isEmpty() || hardWindow == null || hardWindow.size() < 2) {
       return ConflictExitAuthorityWindow.notApplicable();
     }
@@ -1047,7 +1118,8 @@ public final class OccupancyRequestBuilder {
       List<String> candidates =
           conflictKeys.stream().filter(key -> !resolvedKeys.contains(key)).toList();
       for (String conflictKey : candidates) {
-        int exitEdgeCount = conflictExitEdgeCount(fullEdges, conflictKey, pathEnd);
+        int exitEdgeCount =
+            conflictExitEdgeCount(fullEdges, conflictKey, pathEnd, turnbackThroatEnd);
         if (exitEdgeCount < 0) {
           return ConflictExitAuthorityWindow.unresolved(conflictKeys);
         }
@@ -1092,7 +1164,8 @@ public final class OccupancyRequestBuilder {
         && !key.startsWith("interlocking:incomplete:");
   }
 
-  private int conflictExitEdgeCount(List<RailEdge> edges, String conflictKey, NodeId pathEnd) {
+  private int conflictExitEdgeCount(
+      List<RailEdge> edges, String conflictKey, NodeId pathEnd, boolean turnbackThroatEnd) {
     boolean entered = false;
     long clearanceDistanceBlocks = 0L;
     for (int index = 0; index < edges.size(); index++) {
@@ -1118,6 +1191,9 @@ public final class OccupancyRequestBuilder {
     if (entered && clearanceDistanceBlocks >= terminalDepotBerthBlocks && isDepotNode(pathEnd)) {
       return edges.size();
     }
+    if (entered && turnbackThroatEnd) {
+      return edges.size();
+    }
     return -1;
   }
 
@@ -1139,11 +1215,7 @@ public final class OccupancyRequestBuilder {
               }
               return node.waypointMetadata()
                   .map(WaypointMetadata::kind)
-                  .filter(
-                      kind ->
-                          kind == WaypointKind.STATION_THROAT
-                              || kind == WaypointKind.DEPOT_THROAT
-                              || kind == WaypointKind.SWITCHER)
+                  .filter(kind -> kind.isThroat() || kind == WaypointKind.SWITCHER)
                   .isPresent();
             })
         .orElse(false);
