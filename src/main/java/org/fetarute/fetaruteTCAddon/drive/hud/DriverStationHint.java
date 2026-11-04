@@ -39,6 +39,8 @@ public final class DriverStationHint {
     DOORS_CLOSING("doors-closing", false, true),
     /** 车门已关，等出站许可。 */
     WAIT_DEPARTURE("wait-departure", false, true),
+    /** 车门已关、出站已放行，等站长的发车信号。 */
+    WAIT_STATION_MASTER("wait-station-master", false, true),
     /** 已有出站许可，可以起步。 */
     DEPART("depart", true, true),
     /** 车上有车掌：开门、关门由车掌做，驾驶员不用动手。 */
@@ -133,7 +135,14 @@ public final class DriverStationHint {
                 : new Hint(
                     link.doorsClosing() ? Kind.DOORS_CLOSING : Kind.CLOSE_DOORS, "", station));
         case WAIT_DEPARTURE -> Optional.of(
-            new Hint(link.guardAboard() ? Kind.GUARD_SIGNAL : Kind.WAIT_DEPARTURE, "", station));
+            new Hint(
+                link.guardAboard()
+                    ? Kind.GUARD_SIGNAL
+                    : current.awaitingStationMaster()
+                        ? Kind.WAIT_STATION_MASTER
+                        : Kind.WAIT_DEPARTURE,
+                "",
+                station));
         case DEPART -> Optional.of(new Hint(Kind.DEPART, "", station));
         default -> Optional.empty();
       };

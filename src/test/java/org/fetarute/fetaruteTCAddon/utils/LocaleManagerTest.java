@@ -2,23 +2,31 @@ package org.fetarute.fetaruteTCAddon.utils;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.Set;
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
+import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 public final class LocaleManagerTest {
+
+  private static final Set<String> BOOLEAN_KEYS = Set.of("true", "false");
 
   @Test
   void enumTextShouldResolveLocalizedValues(@TempDir Path tempDir) throws Exception {
@@ -235,5 +243,65 @@ public final class LocaleManagerTest {
     YamlConfiguration saved =
         YamlConfiguration.loadConfiguration(langDir.resolve("xx_XX.yml").toFile());
     assertFalse(saved.contains("drive.task.claim.breaker-open"));
+  }
+
+  /** YAML 1.1 把不带引号的 on、off、yes、no 当布尔值，键会变成 true 或 false，按原名永远查不到。 */
+  @ParameterizedTest
+  @ValueSource(strings = {"zh_CN", "en_US"})
+  void builtInKeysAreNeverParsedAsBooleans(String locale) throws Exception {
+    YamlConfiguration lang = builtIn(locale);
+
+    assertEquals(
+        List.of(),
+        lang.getKeys(true).stream()
+            .filter(key -> List.of(key.split("\\.")).stream().anyMatch(BOOLEAN_KEYS::contains))
+            .toList());
+    assertTrue(lang.contains("stationmaster.menu.off"));
+    assertTrue(lang.contains("stationmaster.menu.hint.off"));
+  }
+
+  @Test
+  void stationMasterSidebarValuesStayNarrow() throws Exception {
+    for (String locale : List.of("zh_CN", "en_US")) {
+      var values = builtIn(locale).getConfigurationSection("stationmaster.sidebar.value");
+      assertNotNull(values);
+      for (String key : values.getKeys(false)) {
+        String plain = String.valueOf(values.getString(key)).replaceAll("<[^>]*>", "");
+        assertTrue(plain.length() <= 12, locale + " " + key + " 太宽：" + plain);
+      }
+    }
+  }
+
+  @Test
+  void bothLocalesHaveTheSameStationMasterKeys() throws Exception {
+    YamlConfiguration zh = builtIn("zh_CN");
+    YamlConfiguration en = builtIn("en_US");
+
+    assertEquals(stationMasterKeys(zh), stationMasterKeys(en));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"zh_CN", "en_US"})
+  void boardNamesEveryCallerRole(String locale) throws Exception {
+    YamlConfiguration lang = builtIn(locale);
+
+    for (CallerRole role : CallerRole.values()) {
+      String key = role.name().toLowerCase(Locale.ROOT).replace('_', '-');
+      assertTrue(lang.contains("pids.board.signalbox.caller." + key), key);
+    }
+  }
+
+  private static Set<String> stationMasterKeys(YamlConfiguration lang) {
+    Set<String> keys = new java.util.TreeSet<>(lang.getKeys(true));
+    keys.removeIf(key -> !key.startsWith("stationmaster."));
+    return keys;
+  }
+
+  private static YamlConfiguration builtIn(String locale) throws Exception {
+    try (InputStream in =
+        LocaleManagerTest.class.getClassLoader().getResourceAsStream("lang/" + locale + ".yml")) {
+      return YamlConfiguration.loadConfiguration(
+          new InputStreamReader(Objects.requireNonNull(in), StandardCharsets.UTF_8));
+    }
   }
 }

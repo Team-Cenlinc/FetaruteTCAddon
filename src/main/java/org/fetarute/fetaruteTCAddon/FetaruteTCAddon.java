@@ -45,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaSpawnCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpeedCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStationCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStationGroupCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaStationMasterCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStorageCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTimetableCommand;
@@ -146,6 +147,8 @@ import org.fetarute.fetaruteTCAddon.integration.traincarts.TransferFunctionInput
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.signaller.SignallerModule;
 import org.fetarute.fetaruteTCAddon.signaller.SignallerService;
+import org.fetarute.fetaruteTCAddon.stationmaster.StationMasterModule;
+import org.fetarute.fetaruteTCAddon.stationmaster.StationMasterService;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
@@ -249,6 +252,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private PidsLayoutRegistry pidsLayoutRegistry;
   private volatile PidsService pidsService;
   private SignallerModule signallerModule;
+  private StationMasterModule stationMasterModule;
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
   private DriveSessionManager driveSessionManager;
   private LicenseService licenseService;
@@ -323,6 +327,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
 
     initSignaller();
+    initStationMaster();
 
     registerCommands();
     getServer()
@@ -350,6 +355,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       }
       signallerModule = null;
     }
+    stopStationMaster();
     if (etaService != null) {
       etaService.close();
     }
@@ -536,6 +542,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initPidsService();
     // 重载一律回到自动：值守的信号员下岗结算，人工控制不跨重载
     initSignaller();
+    initStationMaster();
     scheduleRuntimeOccupancyReconstruction(1L);
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
@@ -775,6 +782,81 @@ public final class FetaruteTCAddon extends JavaPlugin {
       dispatch.signallerGates().setGate(null);
       dispatch.signallerGates().setZoneMembership(null);
       dispatch.stationStops().setSignallerHold(null);
+    }
+  }
+
+  /** 站长服务；插件未完成初始化或站长初始化失败时为空。 */
+  public Optional<StationMasterService> getStationMasterService() {
+    return Optional.ofNullable(stationMasterModule).map(StationMasterModule::service);
+  }
+
+  /** 站长：值守车站、发车信号、站台扣车与催关。只在内存里，重启与重载即下岗。站长是附加功能，初始化失败只停用它。 */
+  private void initStationMaster() {
+    stopStationMaster();
+    StationMasterModule module = null;
+    try {
+      module = new StationMasterModule(this);
+      module.start();
+      stationMasterModule = module;
+      wireStationMaster();
+    } catch (RuntimeException | LinkageError ex) {
+      getLogger().severe("站长初始化失败，已禁用: " + ex);
+      stationMasterModule = module;
+      stopStationMaster();
+    }
+  }
+
+  /** 站长下岗并撤掉接到别处的线；出错不拖住调用方。 */
+  private void stopStationMaster() {
+    StationMasterModule module = stationMasterModule;
+    if (module == null) {
+      return;
+    }
+    try {
+      module.stop();
+      DriveSessionManager drive = driveSessionManager;
+      if (drive != null) {
+        drive.crewDuty().unregister(CrewDuty.Role.STATION_MASTER);
+        drive.setStationMasterHotbar(null);
+        drive.setPlatformHold(null);
+      }
+      RuntimeDispatchService dispatch = runtimeDispatchService;
+      if (dispatch != null) {
+        dispatch.stationStops().setStationMaster(null);
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      getLogger().severe("站长停用失败: " + ex);
+    }
+    stationMasterModule = null;
+  }
+
+  /** 返回站长模块；未启用或插件未完成初始化时为空。 */
+  public Optional<StationMasterModule> getStationMasterModule() {
+    return Optional.ofNullable(stationMasterModule);
+  }
+
+  /** 把站长接到在岗登记与调度（站台的发车信号、出站门控的扣车）。 */
+  private void wireStationMaster() {
+    StationMasterModule module = stationMasterModule;
+    if (module == null) {
+      return;
+    }
+    StationMasterService service = module.service();
+    DriveSessionManager drive = driveSessionManager;
+    if (drive != null) {
+      CrewDuty crew = drive.crewDuty();
+      crew.register(CrewDuty.Role.STATION_MASTER, service::onDuty);
+      service.setCrewBusy(player -> crew.busyOtherThan(player, CrewDuty.Role.STATION_MASTER));
+      drive.setStationMasterHotbar(module.hotbar());
+      drive.setPlatformHold(service::emergencyHeld);
+      service.setSettlement(drive.stationMasterSettlement());
+    }
+    LicenseService licenses = licenseService;
+    service.setExaminer(licenses == null ? null : licenses.stationMasterExaminer());
+    service.setSignallerLink(getSignallerService().orElse(null));
+    RuntimeDispatchService dispatch = runtimeDispatchService;
+    if (dispatch != null) {
+      dispatch.stationStops().setStationMaster(service);
     }
   }
 
@@ -1050,6 +1132,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaStationGroupCommand(this).register(commandManager);
     new FtaSignalCommand(this).register(commandManager);
     new FtaSignallerCommand(this).register(commandManager);
+    new FtaStationMasterCommand(this).register(commandManager);
     new FtaPidsCommand(this, FtaPidsCommand.Scope.CONSOLE).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
     new FtaEtaCommand(this).register(commandManager);

@@ -21,14 +21,14 @@ import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 实体操作许可证：一本成书，把插件里的记录印出来——持证人、证号，驾驶、车掌、信号员三个岗位各自取得了什么、哪天取得。只是凭证，权限按记录给；丢了再印一本即可。
+ * 实体操作许可证：一本成书，把插件里的记录印出来——持证人、证号，各岗位是否取得、哪天取得，驾驶另写取得到第几级。只是凭证，权限按记录给；丢了再印一本即可。
  *
  * <p>证号由玩家 UUID 得出，固定不变，不另外存储。书上记下持证人与版式版本：换发时认得出背包里哪几本是这名玩家的证，旧版式（改名为操作许可证之前印的驾驶证）上线时原地换成新版。
  */
 public final class LicenseCardItem {
 
   /** 现在的版式版本：旧版驾驶证没有这一项，算 1。 */
-  public static final int CURRENT_VERSION = 2;
+  public static final int CURRENT_VERSION = 4;
 
   /** 成书一页最多 14 行。 */
   static final int PAGE_LINES = 14;
@@ -74,7 +74,7 @@ public final class LicenseCardItem {
   }
 
   /**
-   * 证上的各栏：按岗位先后（驾驶、车掌、信号员）。每个岗位只印持有的最高一项（按配置先后，驾驶即最高一级）。
+   * 证上的各栏：按岗位先后（驾驶、车掌、信号员、站长）。每个岗位只印持有的最高一项（按配置先后，驾驶即最高一级）。
    * 一个岗位什么都没取得、也没开放考试时整栏不印；配置里已没有的资格不印（也不再给权限）。
    *
    * @param config 资格配置
@@ -110,7 +110,7 @@ public final class LicenseCardItem {
     return sections;
   }
 
-  /** 证面第一页的各行：标题、持证人、证号、分隔线，然后各岗位一栏（栏名一行，取得的资格或“未取得”一行）。 */
+  /** 证面第一页的各行：标题、持证人、证号、分隔线，然后各岗位一栏：栏名一行，取得日期或“未取得”一行；驾驶分级，日期前多一行写取得到第几级。 */
   static List<Line> firstPage(String playerName, String serial, List<Section> sections) {
     List<Line> lines = new ArrayList<>();
     lines.add(new Line("drive.license.card.heading", Map.of()));
@@ -126,10 +126,11 @@ public final class LicenseCardItem {
         lines.add(new Line("drive.license.card.none", Map.of()));
       }
       for (Entry entry : section.entries()) {
+        if (section.post() == LicenseClass.Post.DRIVER) {
+          lines.add(new Line("drive.license.card.entry-name", Map.of("name", entry.name())));
+        }
         lines.add(
-            new Line(
-                "drive.license.card.entry",
-                Map.of("name", entry.name(), "date", DATE.format(entry.grantedAt()))));
+            new Line("drive.license.card.held", Map.of("date", DATE.format(entry.grantedAt()))));
       }
     }
     return lines;

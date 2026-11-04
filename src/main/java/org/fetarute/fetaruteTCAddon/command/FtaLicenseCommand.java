@@ -122,6 +122,13 @@ public final class FtaLicenseCommand {
     manager.command(
         manager
             .commandBuilder("fta")
+            .literal("handbook")
+            .literal("station-master")
+            .permission(player)
+            .handler(ctx -> handleStationMasterHandbook(ctx.sender())));
+    manager.command(
+        manager
+            .commandBuilder("fta")
             .literal("license")
             .literal("abandon")
             .permission(player)
@@ -256,7 +263,13 @@ public final class FtaLicenseCommand {
       Optional<LicenseService.Exam> examining) {
     String prefix =
         license.graded() ? "drive.license.info.level-" : "drive.license.info.endorsement.";
-    boolean signaller = license.exam() == LicenseClass.Exam.SIGNALLER;
+    // 信号员、站长不跟车：练习与报名的说法另写
+    String onSite =
+        switch (license.exam()) {
+          case SIGNALLER -> "drive.license.info.signaller.";
+          case STATION_MASTER -> "drive.license.info.station-master.";
+          default -> null;
+        };
     LicenseRecord record = held.get(license.id());
     if (record != null) {
       return prefix + ("exam".equals(record.grantedBy()) ? "held-exam" : "held-admin");
@@ -276,10 +289,10 @@ public final class FtaLicenseCommand {
       return prefix + "open-tutorial";
     }
     if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
-      return signaller ? "drive.license.info.signaller.need-practice" : prefix + "need-practice";
+      return onSite != null ? onSite + "need-practice" : prefix + "need-practice";
     }
-    if (signaller) {
-      return "drive.license.info.signaller.open";
+    if (onSite != null) {
+      return onSite + "open";
     }
     return prefix + (license.graded() ? "open-road-test" : "open");
   }
@@ -345,6 +358,17 @@ public final class FtaLicenseCommand {
     }
     licenses.signallerHandbook().give(player, plugin.getLocaleManager(), false);
     sender.sendMessage(plugin.getLocaleManager().component("drive.handbook.signaller.given"));
+  }
+
+  /** 领一本《FTCA 站长手册》。 */
+  private void handleStationMasterHandbook(CommandSender sender) {
+    Player player = requirePlayer(sender);
+    LicenseService licenses = requireService(sender);
+    if (player == null || licenses == null) {
+      return;
+    }
+    licenses.stationMasterHandbook().give(player, plugin.getLocaleManager(), false);
+    sender.sendMessage(plugin.getLocaleManager().component("drive.handbook.station-master.given"));
   }
 
   private void handleAbandon(CommandSender sender) {

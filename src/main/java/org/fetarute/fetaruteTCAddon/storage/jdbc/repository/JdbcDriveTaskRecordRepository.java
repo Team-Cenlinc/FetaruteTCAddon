@@ -131,7 +131,7 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
         "SELECT player_uuid, MAX(player_name) AS player_name, COUNT(*) AS tasks,"
             + " SUM(points) AS total FROM "
             + table(TABLE)
-            + " WHERE state = ? AND mode NOT IN (?, ?)"
+            + " WHERE state = ? AND mode NOT IN (?, ?, ?)"
             + (since == null ? "" : " AND finished_at >= ?")
             + " GROUP BY player_uuid ORDER BY total DESC, tasks DESC LIMIT "
             + Math.max(1, limit);
@@ -140,8 +140,9 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
       statement.setString(1, COMPLETED);
       statement.setString(2, DriveTaskRecord.MODE_GUARD);
       statement.setString(3, DriveTaskRecord.MODE_SIGNALLER);
+      statement.setString(4, DriveTaskRecord.MODE_STATION_MASTER);
       if (since != null) {
-        setInstant(statement, 4, since);
+        setInstant(statement, 5, since);
       }
       List<DriveLeaderboardRow> rows = new ArrayList<>();
       try (ResultSet rs = statement.executeQuery()) {
@@ -181,11 +182,15 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
   /** 评级从好到差；汇总时按下标取最小。 */
   private static final String GRADES = "SABCD";
 
-  /** 驾驶员的汇总不算车掌值乘与信号员班次。 */
+  /** 驾驶员的汇总不算车掌值乘、信号员与站长班次。 */
   @Override
   public PlayerTotals totalsByPlayer(UUID playerId) {
     return totals(
-        playerId, "mode NOT IN (?, ?)", DriveTaskRecord.MODE_GUARD, DriveTaskRecord.MODE_SIGNALLER);
+        playerId,
+        "mode NOT IN (?, ?, ?)",
+        DriveTaskRecord.MODE_GUARD,
+        DriveTaskRecord.MODE_SIGNALLER,
+        DriveTaskRecord.MODE_STATION_MASTER);
   }
 
   @Override

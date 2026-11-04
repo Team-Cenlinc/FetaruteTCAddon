@@ -35,6 +35,8 @@ public final class GuardTasks {
     DRIVING,
     /** 正在值守信号楼：先下岗再领。 */
     SIGNALLER_ON_DUTY,
+    /** 正在当站长：先下岗再领。 */
+    STATION_MASTER_ON_DUTY,
     /** 已有未结束的车掌任务。 */
     ALREADY_HAS_TASK,
     /** 这一班的车掌已被别人领走。 */

@@ -223,7 +223,7 @@ public interface GuardApi {
    * @param forcedClose 关门超时，由站台代关
    * @param forcedSignal 发车铃超时，由站台代发发车信号
    * @param wrongDoor 开过不该开的一侧车门
-   * @param closedEarly 停站时间未到就关门
+   * @param closedEarly 恒为 false：车掌在提前关门的窗口之前关不了门，这一项不再出现；下一次不兼容的 API 版本移除
    * @param closingWatch 关门监视是否合格；没采到样时为空
    * @param departureWatch 出站监视是否合格；没采到样时为空
    * @param incidents 本站异常报告次数

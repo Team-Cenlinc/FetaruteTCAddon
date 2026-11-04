@@ -8,6 +8,7 @@ import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.events.SignChangeActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -17,6 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -42,6 +44,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DoorCars;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StationMasterGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarkIndex;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarks;
@@ -135,6 +138,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
   private static final int DOOR_OPEN_RETRY_INTERVAL_TICKS = 5;
   private static final long DOOR_CLOSE_EARLY_TICKS = 100L;
+
+  /** 车掌、驾驶员关门后到列车起步还要做的事（回座、出发确认、发车铃、起步）预留多久（tick）。提前关门的窗口按计划发车往前留出关门动画与这段时间。 */
+  private static final long CREW_DEPARTURE_WORK_TICKS = 100L;
 
   /** 晚点压缩停站时，关门动画开始前车门至少全开多久（tick）。 */
   private static final long DOOR_MIN_OPEN_TICKS = 60L;
@@ -1132,6 +1138,32 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
+   * 车掌、驾驶员最早可在开门后第几 tick 关门：开门满停站下限，且计划发车之前只留出这列车的关门动画与发车作业的时间，免得关了门在站台干等。
+   *
+   * <p>晚点的车卡在下限上，与自动运行的停站压缩一致；准点的车可提前几秒开始关，让列车正好在计划发车时起步。不会晚于停站结束——那之后照常关门。
+   *
+   * @param floorTicks 停站下限（tick）
+   * @param ticksToPlannedDeparture 开门时离计划发车还有多少 tick（已过为负）
+   * @param dwellTicks 停站结束于开门后第几 tick
+   * @param closeTicks 这列车关门动画的时长（tick）
+   */
+  static long earliestCrewCloseTick(
+      long floorTicks, long ticksToPlannedDeparture, long dwellTicks, long closeTicks) {
+    long lead = closeTicks + CREW_DEPARTURE_WORK_TICKS;
+    return Math.min(dwellTicks, Math.max(floorTicks, ticksToPlannedDeparture - lead));
+  }
+
+  /** 站长（调度服务未就绪或没有站长时为 {@link StationMasterGate#NONE}）。 */
+  private StationMasterGate stationMaster() {
+    return plugin == null
+        ? StationMasterGate.NONE
+        : plugin
+            .getRuntimeDispatchService()
+            .map(dispatch -> dispatch.stationStops().stationMaster())
+            .orElse(StationMasterGate.NONE);
+  }
+
+  /**
    * 压缩停站不能短于车门走完一个开关过程：关门动画开始之前车门至少全开 {@link #DOOR_MIN_OPEN_TICKS}。
    *
    * <p>关门动画在停站结束前开始（legacy 动画按其实测时长，其余按 {@link #DOOR_CLOSE_EARLY_TICKS}）； 晚点压缩到 10 秒时，长的 legacy
@@ -1678,6 +1710,22 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       private boolean gaveUpOpen = false;
       private boolean gaveUpLogged = false;
       private boolean opened = false;
+
+      /** 已算过乘务员提前关门的窗口（见 {@link #crewCloseTick}）。 */
+      private boolean crewWindowResolved = false;
+
+      /** 开门时离计划发车还有多少 tick；列车没绑车次时为空。 */
+      private OptionalLong ticksToPlannedAtOpen = OptionalLong.empty();
+
+      /** 停站下限（tick），与晚点压缩同一口径。 */
+      private long floorTicks = 0L;
+
+      /** 向站长登记这一站时车门归不归乘务员；还没登记时为空。车门中途交给驾驶员时重新登记。 */
+      private Optional<Boolean> reportedCrewDoors = Optional.empty();
+
+      /** 乘务员关好车门后等出站的 tick 数：每 20 tick 问一次出站门控。 */
+      private long departureWaitTicks = 0L;
+
       private boolean closeStarted = false;
       private boolean closeAnimationTriggered = false;
       private boolean closeSoundPlayed = false;
@@ -1902,6 +1950,71 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       }
 
       /**
+       * 乘务员最早可在开门后第几 tick 关门（见 {@link
+       * #earliestCrewCloseTick}）；列车没绑车次时就是停站结束。第一次用到时按此刻离计划发车多久推回开门时刻。
+       */
+      private long crewCloseTick() {
+        if (!crewWindowResolved) {
+          crewWindowResolved = true;
+          plugin
+              .getRuntimeDispatchService()
+              .map(dispatch -> dispatch.stationStops())
+              .ifPresent(
+                  stops -> {
+                    floorTicks = stops.minimumDwellSeconds(doorFloorSeconds(session)) * 20L;
+                    stops
+                        .untilPlannedDeparture(group, definition)
+                        .ifPresent(
+                            until ->
+                                ticksToPlannedAtOpen =
+                                    OptionalLong.of(until.toMillis() / 50L + ticksSinceOpen));
+                  });
+        }
+        return ticksToPlannedAtOpen.isPresent()
+            ? earliestCrewCloseTick(
+                floorTicks, ticksToPlannedAtOpen.getAsLong(), dwell(), closeAnimationTicks())
+            : dwell();
+      }
+
+      /** 这列车关门要多久（tick）：旧式门动画按实测时长（整列与挂上来的车厢取长），其余按 {@link #DOOR_CLOSE_EARLY_TICKS}。 */
+      private long closeAnimationTicks() {
+        AutoStationDoorController.DoorSession doors =
+            cachedSession != null ? cachedSession : session;
+        long longest =
+            doors != null && doors.usesLegacyDoorAnimation()
+                ? doors.estimatedCloseDurationTicks()
+                : -1L;
+        for (AutoStationDoorController.DoorSession extra : joinedSessions) {
+          if (extra.usesLegacyDoorAnimation()) {
+            longest = Math.max(longest, extra.estimatedCloseDurationTicks());
+          }
+        }
+        return longest > 0L ? longest : DOOR_CLOSE_EARLY_TICKS;
+      }
+
+      /** 车门开了就向站长登记这一站；车门中途交给驾驶员或车掌时重新登记。 */
+      private void reportStopToStationMaster() {
+        if (!opened || reportedCrewDoors.filter(doors -> doors == driverDoors).isPresent()) {
+          return;
+        }
+        reportedCrewDoors = Optional.of(driverDoors);
+        Optional<Duration> closeOpensIn =
+            driverDoors
+                ? Optional.of(
+                    Duration.ofMillis(Math.max(0L, crewCloseTick() - ticksSinceOpen) * 50L))
+                : Optional.empty();
+        stationMaster().stopOpened(trainName, definition.nodeId(), closeOpensIn, driverDoors);
+      }
+
+      @Override
+      public synchronized void cancel() {
+        if (reportedCrewDoors.isPresent()) {
+          stationMaster().stopEnded(trainName, definition.nodeId());
+        }
+        super.cancel();
+      }
+
+      /**
        * 驾驶员控车的停站：等驾驶员开站台侧的门，停站从开门起算；时间到等驾驶员关门，再按出站门控放行；列车起步时才记发车。
        *
        * @return 本拍已处理，不再走自动开关门
@@ -1969,16 +2082,26 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           }
         }
         ticksSinceOpen++;
-        stationStop.setDwellRemainingTicks(dwell() - ticksSinceOpen);
-        if (ticksSinceOpen < dwell()) {
+        long closeAt = crewCloseTick();
+        // 乘务员在提前关门的窗口里关好了门：停站就此结束，不再等倒数走完
+        boolean closedInWindow =
+            ticksSinceOpen >= closeAt && stationStop.doorsRequired() && !stationStop.anyDoorOpen();
+        stationStop.setDwellRemainingTicks(closedInWindow ? 0L : dwell() - ticksSinceOpen);
+        stationStop.setCloseAllowedInTicks(closeAt - ticksSinceOpen);
+        stationMaster().doorsClosed(trainName, definition.nodeId(), !stationStop.anyDoorOpen());
+        if (ticksSinceOpen < dwell() && !closedInWindow) {
+          // 关门后又开门时回到停站，提示不能还停在等发车
+          stationStop.setPhase(DriverStationStop.Phase.DWELL);
+          stationStop.setAwaitingStationMaster(false);
           return true;
         }
         if (stationStop.anyDoorOpen()) {
           stationStop.setPhase(DriverStationStop.Phase.CLOSE_DOORS);
+          stationStop.setAwaitingStationMaster(false);
           return true;
         }
         stationStop.setPhase(DriverStationStop.Phase.WAIT_DEPARTURE);
-        if ((ticksSinceOpen - dwell()) % 20 != 0) {
+        if (departureWaitTicks++ % 20 != 0) {
           return true;
         }
         if (stopSessionSuperseded(trainName, routeId, group.getProperties())) {
@@ -1998,11 +2121,18 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 .getRuntimeDispatchService()
                 .map(dispatch -> dispatch.checkDeparture(group, definition))
                 .orElse(true);
+        if (!canDepart) {
+          stationMaster().departureBlocked(trainName, definition.nodeId());
+        }
+        // 站长值守的股道还要等站长的发车信号：车掌看到的出站一直没开，等信号来了再确认、按发车铃
+        boolean signalled =
+            canDepart && !stationMaster().holdsDeparture(trainName, definition.nodeId());
+        stationStop.setAwaitingStationMaster(canDepart && !signalled);
         TrainProperties current = group.getProperties();
         ControlAuthority authority = plugin.getControlAuthority();
         CrewDeparture step =
             crewDeparture(
-                canDepart,
+                signalled,
                 guardOperatesDoors(current),
                 exitOpen -> authority.holdForGuard(current, exitOpen),
                 driverControlled(current),
@@ -2134,6 +2264,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               .getRuntimeDispatchService()
               .ifPresent(dispatch -> dispatch.renewDepartureGate(trainName, stopSessionId));
         }
+        reportStopToStationMaster();
         if (driverTick()) {
           return;
         }
@@ -2264,11 +2395,18 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               return;
             }
 
+            stationMaster().doorsClosed(trainName, definition.nodeId(), true);
             boolean canDepart = true;
             if (plugin.getRuntimeDispatchService().isPresent()) {
               // 检查出站门控（闭塞/占用）
               canDepart =
                   plugin.getRuntimeDispatchService().get().checkDeparture(group, definition);
+            }
+            // 站长值守的股道：车门关好、出站放行后再等站长的发车信号（站长迟迟不发由站长一侧代发）
+            if (!canDepart) {
+              stationMaster().departureBlocked(trainName, definition.nodeId());
+            } else if (stationMaster().holdsDeparture(trainName, definition.nodeId())) {
+              canDepart = false;
             }
             // ATO 下车上的驾驶员要先确认发车（等太久自动放行）；扣着等换端的车由驾驶侧放行，不在这里等确认。
             if (canDepart

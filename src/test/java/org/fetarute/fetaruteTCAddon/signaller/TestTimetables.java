@@ -16,14 +16,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 
 /** 估工作量用的最小时刻表：一条交路、若干班次，时区 UTC。 */
-final class TestTimetables {
+public final class TestTimetables {
 
   private static final UUID ROUTE = UUID.fromString("00000000-0000-0000-0000-0000000000e1");
 
   private TestTimetables() {}
 
   /** 一个停靠点。 */
-  static TimetableStop stop(
+  public static TimetableStop stop(
       int sequence,
       String station,
       String node,
@@ -40,7 +40,7 @@ final class TestTimetables {
    * @param stops 交路上的停靠点
    * @param departures 各班次的起点发车时刻（当日秒数）
    */
-  static Timetable timetable(List<TimetableStop> stops, int... departures) {
+  public static Timetable timetable(List<TimetableStop> stops, int... departures) {
     UUID id = UUID.fromString("00000000-0000-0000-0000-0000000000f1");
     TimetableRoutePlan plan =
         new TimetableRoutePlan(

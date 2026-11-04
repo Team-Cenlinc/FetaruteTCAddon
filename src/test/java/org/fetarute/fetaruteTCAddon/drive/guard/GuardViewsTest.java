@@ -100,8 +100,7 @@ class GuardViewsTest {
   @DisplayName("作业与成绩：各项照搬，里程换算成公里")
   void workAndScore() {
     GuardScore.Stop stop =
-        new GuardScore.Stop(
-            "环湖", false, true, false, true, false, Optional.of(true), Optional.empty(), 2);
+        new GuardScore.Stop("环湖", false, true, false, true, Optional.of(true), Optional.empty(), 2);
     GuardApi.StopWork work = GuardViews.work(stop);
     assertTrue(work.forcedClose());
     assertTrue(work.wrongDoor());

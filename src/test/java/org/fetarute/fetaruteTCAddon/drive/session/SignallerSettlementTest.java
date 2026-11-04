@@ -26,7 +26,7 @@ class SignallerSettlementTest {
   private static final Instant START = Instant.parse("2026-10-20T08:00:00Z");
 
   /** 记下结算做过的事。 */
-  private static final class FakeHost implements SignallerSettlement.Host {
+  private static final class FakeHost implements SettlementHost {
     DriveRewardConfig rewards = DriveRewardConfig.defaults();
     final List<DriveRewards.Reward> paid = new ArrayList<>();
     final List<DriveTaskRecord> records = new ArrayList<>();
@@ -147,7 +147,8 @@ class SignallerSettlementTest {
   @DisplayName("奖励关闭或经手的车全是超时代排：照常写记录与告诉成绩，不发奖励")
   void noRewardWhenDisabledOrAllAutoRouted() {
     FakeHost off = new FakeHost();
-    off.rewards = new DriveRewardConfig(false, 10, 2, 20, 5, 0.5, Map.of(), "", "FRD", 3, 0.5, 1.0);
+    off.rewards =
+        new DriveRewardConfig(false, 10, 2, 20, 5, 0.5, Map.of(), "", "FRD", 3, 0.5, 1.0, 0.5);
     settlement(off).settle(shift(10, 0, 0));
     assertEquals(1, off.records.size());
     assertTrue(off.paid.isEmpty());

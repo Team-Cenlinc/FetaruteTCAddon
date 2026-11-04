@@ -1,16 +1,16 @@
-package org.fetarute.fetaruteTCAddon.drive.guard;
+package org.fetarute.fetaruteTCAddon.drive.driver;
 
 import com.bergerkiller.bukkit.tc.actions.GroupAction;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 
 /**
- * 车掌拉下紧急停车时自动运行（含 ATO）的车的紧急制动：从拉下时的车速起，按紧急制动减速度逐 tick 减速，停稳后结束；之后由车掌的紧急停车扣着，
+ * 车掌拉下紧急停车、或站长按下站台紧急停车时，自动运行（含 ATO）的车的紧急制动：从拉下时的车速起，按紧急制动减速度逐 tick 减速，停稳后结束；之后由拉下的人扣着，
  * 调度不替它起步。与手动驾驶的控车动作一样，速度只在进入新的一 tick 时推进，同一 tick 的各小步施加同一前进力。
  *
  * <p>车速只降不升：每 tick 先取实际车速与上一 tick 算出的车速中较小的一个再减速。扣车期间列车按驾驶员控制处理，调度的硬停车只把车速归零、不清动作队列，
  * 不这样做下一步就会把车推回原来的速度。
  */
-final class GuardEmergencyBrakeAction extends GroupAction {
+public final class EmergencyBrakeAction extends GroupAction {
 
   private static final double TICKS_PER_SECOND = 20.0;
 
@@ -21,7 +21,7 @@ final class GuardEmergencyBrakeAction extends GroupAction {
   /**
    * @param decelBps2 紧急制动减速度（格/秒²）
    */
-  GuardEmergencyBrakeAction(double decelBps2) {
+  public EmergencyBrakeAction(double decelBps2) {
     this.decelBps2 = Math.max(0.01, decelBps2);
   }
 

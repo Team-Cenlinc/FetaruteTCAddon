@@ -7,7 +7,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -385,46 +384,7 @@ final class SignallerExams implements SignallerExaminer {
     Map<String, String> values = new LinkedHashMap<>(result.values());
     values.putAll(licenses.passValues(license, values.getOrDefault("points", "")));
     values.putAll(progress(license, run));
-    switch (result.verdict()) {
-      case PASSED -> {
-        String name =
-            player != null
-                ? player.getName()
-                : Optional.ofNullable(Bukkit.getOfflinePlayer(id).getName()).orElse("");
-        licenses.grant(id, name, license, "exam");
-      }
-      case FAILED -> {
-        licenses.cooldown(id, license.id());
-        values.put("minutes", String.valueOf(licenses.config().retryCooldownMinutes()));
-      }
-      case VOID -> {}
-    }
-    if (player != null) {
-      LocaleManager locale = plugin.getLocaleManager();
-      TagResolver.Builder resolver =
-          TagResolver.builder()
-              .resolver(
-                  Placeholder.component(
-                      "reason",
-                      locale.component(
-                          "drive.license.exam.signaller.reason." + result.reason(), values)));
-      values.forEach((key, value) -> resolver.resolver(Placeholder.unparsed(key, value)));
-      player.sendMessage(
-          locale.component(
-              "drive.license.exam.signaller." + result.verdict().name().toLowerCase(Locale.ROOT),
-              resolver.build()));
-      switch (result.verdict()) {
-        case PASSED -> {
-          licenses.tell(player, "drive.license.granted-desc", values);
-          licenses.suggestNext(player);
-        }
-        case FAILED -> {
-          licenses.tell(player, "drive.license.exam.signaller.tip." + result.reason(), values);
-          licenses.tell(player, "drive.license.exam.retry", values);
-        }
-        case VOID -> licenses.tell(player, "drive.license.exam.retry-now", values);
-      }
-    }
+    licenses.settleExam(id, player, license, result, "drive.license.exam.signaller", true, values);
     if (!run.onDuty) {
       licenses.closeExam(id);
       return;

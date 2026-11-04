@@ -29,6 +29,9 @@ public final class DriverHandbook {
   /** 信号员手册页数。 */
   public static final int SIGNALLER_PAGES = 9;
 
+  /** 站长手册页数。 */
+  public static final int STATION_MASTER_PAGES = 6;
+
   private final NamespacedKey markKey;
   private final String prefix;
   private final int pages;
@@ -52,6 +55,12 @@ public final class DriverHandbook {
   public static DriverHandbook signaller(Plugin plugin) {
     return new DriverHandbook(
         plugin, "signaller_handbook", "drive.handbook.signaller", SIGNALLER_PAGES);
+  }
+
+  /** 《FTCA 站长手册》：上岗与分股道、接车与监视、发车信号与提前关门、扣车与清客、紧急停车与呼叫、成绩与考试。 */
+  public static DriverHandbook stationMaster(Plugin plugin) {
+    return new DriverHandbook(
+        plugin, "station_master_handbook", "drive.handbook.station-master", STATION_MASTER_PAGES);
   }
 
   /**

@@ -165,8 +165,9 @@ public final class DriveApiImpl implements DriveApi {
         () -> {
           List<TaskRecord> records = new ArrayList<>();
           for (DriveTaskRecord record : loadRecords(playerId, limit)) {
-            // 信号员按班次记，没有车次与任务终态，不进驾驶记录的公开口径
-            if (!DriveTaskRecord.MODE_SIGNALLER.equals(record.mode())) {
+            // 信号员、站长按班次记，没有车次与任务终态，不进驾驶记录的公开口径
+            if (!DriveTaskRecord.MODE_SIGNALLER.equals(record.mode())
+                && !DriveTaskRecord.MODE_STATION_MASTER.equals(record.mode())) {
               records.add(toRecord(record));
             }
           }

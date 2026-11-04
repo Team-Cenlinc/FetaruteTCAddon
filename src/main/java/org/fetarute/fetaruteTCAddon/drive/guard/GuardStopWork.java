@@ -83,7 +83,6 @@ public final class GuardStopWork {
   private boolean lastQueryOpen;
 
   private boolean wrongDoor;
-  private boolean closedEarly;
   private boolean doorsReleased;
   private int closingSamples;
   private int closingWatched;
@@ -277,22 +276,6 @@ public final class GuardStopWork {
   /** 本站开过不该开的一侧。 */
   public boolean wrongDoor() {
     return wrongDoor;
-  }
-
-  /**
-   * 车掌关门：停站时间还没到（站台还在停站计时）就关了算提前关门。
-   *
-   * @param phase 关门时站台推进到的阶段
-   */
-  public void noteClosed(Phase phase) {
-    if (phase == Phase.DWELL) {
-      closedEarly = true;
-    }
-  }
-
-  /** 本站停站时间未到就关了门。 */
-  public boolean closedEarly() {
-    return closedEarly;
   }
 
   /** 这一站算做过作业：车门放行过（停站进到开门以后），或有超时由站台代做；越站、开门前就结束的不算。 */

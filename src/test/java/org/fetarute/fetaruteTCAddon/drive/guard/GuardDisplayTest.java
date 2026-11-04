@@ -26,7 +26,8 @@ class GuardDisplayTest {
         200L,
         exitOpen,
         confirmed,
-        released);
+        released,
+        false);
   }
 
   private static GuardDisplay.Snapshot snapshot(GuardDisplay.StopState stop, boolean seated) {
@@ -88,8 +89,28 @@ class GuardDisplayTest {
             200L,
             false,
             false,
+            false,
             false);
     assertEquals("drive.guard.sidebar.value.step-closing", step(closing, true));
+  }
+
+  @Test
+  void waitingForTheStationMasterIsNotShownAsAClosedExit() {
+    GuardDisplay.StopState waiting =
+        new GuardDisplay.StopState(
+            "PPK",
+            Phase.WAIT_DEPARTURE,
+            DriverDoorSide.LEFT,
+            false,
+            false,
+            false,
+            200L,
+            false,
+            false,
+            false,
+            true);
+
+    assertEquals("drive.guard.sidebar.value.step-wait-master", step(waiting, true));
   }
 
   /** 等发车那一步：先回座，再等出站开放、确认，最后按铃。 */
@@ -170,19 +191,18 @@ class GuardDisplayTest {
     GuardScore clean = new GuardScore();
     clean.add(
         new GuardScore.Stop(
-            "A", false, false, false, false, false, Optional.of(true), Optional.empty(), 0));
+            "A", false, false, false, false, Optional.of(true), Optional.empty(), 0));
     assertEquals(
         List.of(new GuardDisplay.Line("drive.guard.sheet.clean", Map.of("count", "1"))),
         GuardDisplay.sheet(clean));
     GuardScore rough = new GuardScore();
     rough.add(
         new GuardScore.Stop(
-            "B", true, false, true, false, true, Optional.of(false), Optional.of(true), 2));
+            "B", true, false, true, false, Optional.of(false), Optional.of(true), 2));
     assertEquals(
         List.of(
             "drive.guard.sheet.forced-open",
             "drive.guard.sheet.forced-signal",
-            "drive.guard.sheet.closed-early",
             "drive.guard.sheet.closing-watch",
             "drive.guard.sheet.incidents"),
         GuardDisplay.sheet(rough).stream().map(GuardDisplay.Line::key).toList());

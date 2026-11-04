@@ -46,6 +46,7 @@ public final class DriverControlRegistry implements ControlAuthority {
   private Handler handler = NO_HANDLER;
   private long atoConfirmTicks = 300L;
   private java.util.function.Predicate<String> awaitingDriver = trainName -> false;
+  private volatile java.util.function.Predicate<String> platformHold = trainName -> false;
 
   public void setHandler(Handler handler) {
     this.handler = handler == null ? NO_HANDLER : handler;
@@ -216,6 +217,10 @@ public final class DriverControlRegistry implements ControlAuthority {
     if (guard != null && guard.holdsTrain()) {
       return true;
     }
+    // 站长按下站台紧急停车扣着的车：停住后同样不替它起步，直到站长解除或到时限。
+    if (properties != null && platformHeld(properties.getTrainName())) {
+      return true;
+    }
     if (link != null) {
       return link.controlsPhysically() || link.cabHold();
     }
@@ -235,7 +240,8 @@ public final class DriverControlRegistry implements ControlAuthority {
   public boolean isDriverControlledName(String trainName) {
     DriverLink link = byCurrentName(trainName);
     return (link != null && (link.controlsPhysically() || link.cabHold()))
-        || guardOfName(trainName).map(GuardLink::holdsTrain).orElse(false);
+        || guardOfName(trainName).map(GuardLink::holdsTrain).orElse(false)
+        || platformHeld(trainName);
   }
 
   @Override
@@ -274,6 +280,19 @@ public final class DriverControlRegistry implements ControlAuthority {
   public boolean holdDeparture(TrainProperties properties) {
     DriverLink link = resolve(properties);
     return link != null && link.holdDeparture(atoConfirmTicks);
+  }
+
+  /** 哪些列车被站台紧急停车扣着（按车名）；{@code null} 恢复为没有。判定出错时不扣。 */
+  public void setPlatformHold(java.util.function.Predicate<String> held) {
+    this.platformHold = held == null ? trainName -> false : held;
+  }
+
+  private boolean platformHeld(String trainName) {
+    try {
+      return trainName != null && platformHold.test(trainName);
+    } catch (RuntimeException ex) {
+      return false;
+    }
   }
 
   /** 哪些列车正停着等驾驶员接班（按车名）。 */

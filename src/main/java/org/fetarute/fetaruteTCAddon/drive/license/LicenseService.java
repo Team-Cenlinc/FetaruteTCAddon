@@ -60,6 +60,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.drive.tutorial.DriveTutorials;
 import org.fetarute.fetaruteTCAddon.signaller.SignallerExaminer;
+import org.fetarute.fetaruteTCAddon.stationmaster.StationMasterExaminer;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -168,6 +169,8 @@ public final class LicenseService implements Listener, GuardExaminer {
   private final DriverHandbook signallerHandbook;
   private final TrainingCoach coach;
   private final SignallerExams signallerExams;
+  private final DriverHandbook stationMasterHandbook;
+  private final StationMasterExams stationMasterExams;
   private BukkitTask expiryTask;
   private BukkitTask monitorTask;
 
@@ -181,6 +184,8 @@ public final class LicenseService implements Listener, GuardExaminer {
     this.signallerHandbook = DriverHandbook.signaller(plugin);
     this.coach = new TrainingCoach(plugin::getLocaleManager, () -> this.config, drive);
     this.signallerExams = new SignallerExams(plugin, this);
+    this.stationMasterHandbook = DriverHandbook.stationMaster(plugin);
+    this.stationMasterExams = new StationMasterExams(plugin, this);
     this.config = config == null ? LicenseConfig.defaults() : config;
   }
 
@@ -249,6 +254,16 @@ public final class LicenseService implements Listener, GuardExaminer {
   /** 信号员考法的考官：接到信号员服务上。 */
   public SignallerExaminer signallerExaminer() {
     return signallerExams;
+  }
+
+  /** 《FTCA 站长手册》。 */
+  public DriverHandbook stationMasterHandbook() {
+    return stationMasterHandbook;
+  }
+
+  /** 站长考官：站长服务把考试与练习的这一班报给它。 */
+  public StationMasterExaminer stationMasterExaminer() {
+    return stationMasterExams;
   }
 
   // ---- 查询 ----
@@ -371,6 +386,7 @@ public final class LicenseService implements Listener, GuardExaminer {
           switch (license.exam()) {
             case GUARD -> "drive.license.exam.need-training-guard";
             case SIGNALLER -> "drive.license.exam.need-training-signaller";
+            case STATION_MASTER -> "drive.license.exam.need-training-station-master";
             default -> "drive.license.exam.need-training";
           },
           Map.of(
@@ -388,7 +404,21 @@ public final class LicenseService implements Listener, GuardExaminer {
       case ROAD_TEST -> startRoadTest(player, license, stationArg, now);
       case GUARD -> startGuardExam(player, license, stationArg, now);
       case SIGNALLER -> startSignaller(player, license, false, now);
+      case STATION_MASTER -> startStationMaster(player, license, false, now);
     };
+  }
+
+  /** 站长考试或练习：不能在担任别的角色（在岗登记里有就挡），其余交给 {@link StationMasterExams}。 */
+  private Reply startStationMaster(
+      Player player, LicenseClass license, boolean practice, Instant now) {
+    DriveSessionManager manager = drive.get();
+    if (manager != null) {
+      Reply busy = crewBusy(manager, player.getUniqueId());
+      if (busy != null) {
+        return busy;
+      }
+    }
+    return stationMasterExams.start(player, license, practice, now);
   }
 
   /** 信号员考试或练习：不能在担任别的角色（在岗登记里有就挡），其余交给 {@link SignallerExams}。 */
@@ -441,6 +471,9 @@ public final class LicenseService implements Listener, GuardExaminer {
     }
     if (license.exam() == LicenseClass.Exam.SIGNALLER) {
       return startSignaller(player, license, true, Instant.now());
+    }
+    if (license.exam() == LicenseClass.Exam.STATION_MASTER) {
+      return startStationMaster(player, license, true, Instant.now());
     }
     DriveSessionManager manager = drive.get();
     if (manager == null) {
@@ -620,6 +653,7 @@ public final class LicenseService implements Listener, GuardExaminer {
           ? "drive.license.exam.guard-on-duty"
           : "drive.license.exam.has-guard-task";
       case SIGNALLER -> "drive.license.exam.signaller-on-duty";
+      case STATION_MASTER -> "drive.license.exam.station-master-on-duty";
     };
   }
 
@@ -1107,6 +1141,64 @@ public final class LicenseService implements Listener, GuardExaminer {
     tell(player, next, values);
   }
 
+  /**
+   * 不跟车岗位（信号员、站长）的考试判定落地：及格发证，不及格进入冷却，不计成绩的可以马上重考；玩家在线时按岗位的消息前缀报结果（理由取 {@code
+   * <prefix>.reason.<reason>}）并给后续提示。
+   *
+   * @param prefix 岗位的考试消息前缀，如 {@code drive.license.exam.station-master}
+   * @param failureTips 不及格时另发 {@code <prefix>.tip.<reason>}
+   * @param values 消息的占位符（会补上冷却分钟数）
+   */
+  void settleExam(
+      UUID id,
+      Player player,
+      LicenseClass license,
+      ExamEvaluation.Result result,
+      String prefix,
+      boolean failureTips,
+      Map<String, String> values) {
+    switch (result.verdict()) {
+      case PASSED -> {
+        String name =
+            player != null
+                ? player.getName()
+                : Optional.ofNullable(Bukkit.getOfflinePlayer(id).getName()).orElse("");
+        grant(id, name, license, "exam");
+      }
+      case FAILED -> {
+        cooldown(id, license.id());
+        values.put("minutes", String.valueOf(config.retryCooldownMinutes()));
+      }
+      case VOID -> {}
+    }
+    if (player == null) {
+      return;
+    }
+    LocaleManager locale = plugin.getLocaleManager();
+    TagResolver.Builder resolver =
+        TagResolver.builder()
+            .resolver(
+                Placeholder.component(
+                    "reason", locale.component(prefix + ".reason." + result.reason(), values)));
+    values.forEach((key, value) -> resolver.resolver(Placeholder.unparsed(key, value)));
+    player.sendMessage(
+        locale.component(
+            prefix + "." + result.verdict().name().toLowerCase(Locale.ROOT), resolver.build()));
+    switch (result.verdict()) {
+      case PASSED -> {
+        tell(player, "drive.license.granted-desc", values);
+        suggestNext(player);
+      }
+      case FAILED -> {
+        if (failureTips) {
+          tell(player, prefix + ".tip." + result.reason(), values);
+        }
+        tell(player, "drive.license.exam.retry", values);
+      }
+      case VOID -> tell(player, "drive.license.exam.retry-now", values);
+    }
+  }
+
   /** 车掌考试判定：及格发证，不及格进入冷却，不计成绩的可以马上重考。 */
   private void finishGuardExam(
       UUID id, Player player, Exam exam, LicenseClass license, ExamEvaluation.Result result) {
@@ -1172,6 +1264,9 @@ public final class LicenseService implements Listener, GuardExaminer {
           case SIGNALLER -> running.training()
               ? "drive.license.practice.signaller.in-progress"
               : "drive.license.exam.in-progress-signaller";
+          case STATION_MASTER -> running.training()
+              ? "drive.license.practice.station-master.in-progress"
+              : "drive.license.exam.in-progress-station-master";
         };
     return new Reply(key, Map.of("name", nameOf(running.classId())));
   }
@@ -1459,6 +1554,7 @@ public final class LicenseService implements Listener, GuardExaminer {
   /** 路考中的列车：触发防护紧急制动、转为 ATO 时当场提醒（每项一次）。 */
   private void monitorExams() {
     signallerExams.tick(Instant.now());
+    stationMasterExams.tick();
     DriveSessionManager manager = drive.get();
     if (manager == null) {
       return;
@@ -1616,12 +1712,16 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (running == null) {
       return Reply.of("drive.license.abandon.none");
     }
-    if (running.kind() != LicenseClass.Exam.SIGNALLER) {
+    if (running.kind() != LicenseClass.Exam.SIGNALLER
+        && running.kind() != LicenseClass.Exam.STATION_MASTER) {
       return inProgress(running);
     }
     Map<String, String> values = Map.of("name", nameOf(running.classId()));
     if (signallerExams.onExamDuty(id)) {
       return new Reply("drive.license.abandon.signaller-on-duty", values);
+    }
+    if (stationMasterExams.onExamDuty(id)) {
+      return new Reply("drive.license.abandon.station-master-on-duty", values);
     }
     closeExam(id);
     return new Reply(
@@ -1632,6 +1732,7 @@ public final class LicenseService implements Listener, GuardExaminer {
   /** 结束一次考试的记录（不动权限，调用方随后 {@link #apply}）。 */
   private Optional<TrainingCoach.DrillOutcome> endExam(UUID playerId) {
     signallerExams.forget(playerId);
+    stationMasterExams.forget(playerId);
     exams.remove(playerId);
     examStopsDone.remove(playerId);
     guardExamStops.remove(playerId);
@@ -1749,6 +1850,9 @@ public final class LicenseService implements Listener, GuardExaminer {
         // 正在值守：考试按作废了结这一班，练习练到下岗为止。
         continue;
       }
+      if (exam.kind() == LicenseClass.Exam.STATION_MASTER && stationMasterExams.expire(id)) {
+        continue;
+      }
       endExam(id);
       Player player = Bukkit.getPlayer(id);
       if (player != null) {
@@ -1761,7 +1865,9 @@ public final class LicenseService implements Listener, GuardExaminer {
                         ? "drive.license.exam.expired"
                         : exam.kind() == LicenseClass.Exam.SIGNALLER
                             ? "drive.license.practice.signaller.expired"
-                            : "drive.license.practice.expired",
+                            : exam.kind() == LicenseClass.Exam.STATION_MASTER
+                                ? "drive.license.practice.station-master.expired"
+                                : "drive.license.practice.expired",
                     Map.of("name", nameOf(exam.classId()))));
       }
     }

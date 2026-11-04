@@ -59,12 +59,14 @@ public final class DriverStationStop {
 
   private StopWindow window = StopWindow.DEFAULTS;
   private DoorCars doorCars = DoorCars.ALL;
+  private boolean awaitingStationMaster;
   private Phase phase = Phase.APPROACH;
   private double offsetBlocks = Double.NaN;
   private double stoppedOffsetBlocks = Double.NaN;
   private boolean stopped;
   private boolean resultReported;
   private long dwellRemainingTicks;
+  private long closeAllowedInTicks;
   private boolean correctDoorsOpen;
   private boolean anyDoorOpen;
   private boolean wrongDoorOpened;
@@ -194,6 +196,16 @@ public final class DriverStationStop {
     phase = Phase.ENDED;
   }
 
+  /** 更新是否只差站长的发车信号（站台问出站门控时写入，见 {@link #awaitingStationMaster()}）。 */
+  public void setAwaitingStationMaster(boolean awaiting) {
+    this.awaitingStationMaster = awaiting;
+  }
+
+  /** 出站已放行，只差站长的发车信号：给车掌、驾驶员看的提示要写等站长，不写等出站信号。 */
+  public boolean awaitingStationMaster() {
+    return awaitingStationMaster;
+  }
+
   /** 这一站交给了车掌：车门由车掌开关，开错侧门、站台兜底代开都是车掌的事，不记给驾驶员。 */
   public void markDoorsByGuard() {
     doorsByGuard = true;
@@ -262,6 +274,20 @@ public final class DriverStationStop {
 
   public void setDwellRemainingTicks(long ticks) {
     this.dwellRemainingTicks = Math.max(0L, ticks);
+  }
+
+  /** 还要多少 tick 才能关门（提前关门窗口的起点）；已能关时为 0。站台在停站中每 tick 更新，没更新过时为 0（不拦）。 */
+  public long closeAllowedInTicks() {
+    return closeAllowedInTicks;
+  }
+
+  /** 此刻能不能关站台侧的门：开门已满停站下限，且离计划发车只剩关门与发车作业的时间（见 AutoStation 的提前关门窗口）。 */
+  public boolean closeAllowed() {
+    return closeAllowedInTicks <= 0L;
+  }
+
+  public void setCloseAllowedInTicks(long ticks) {
+    this.closeAllowedInTicks = Math.max(0L, ticks);
   }
 
   /**

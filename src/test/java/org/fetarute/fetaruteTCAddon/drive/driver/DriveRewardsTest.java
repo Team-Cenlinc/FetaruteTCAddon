@@ -136,7 +136,7 @@ class DriveRewardsTest {
   @DisplayName("信号员：每列车按人工停站单价乘比例，再乘评级系数；没有 ATO 折扣与同车加成")
   void signallerPerTrainThenGraded() {
     DriveRewards.Reward reward =
-        DriveRewards.signaller(DriveRewardConfig.defaults(), 1.0, 6, ScoreRules.Grade.A);
+        DriveRewards.perTrain(DriveRewardConfig.defaults(), 1.0, 6, ScoreRules.Grade.A);
 
     // 经验 1.2 × 6 列 × 2 = 14.4；钱币 1.2 × 6 × 5 = 36
     assertEquals(14, reward.experience());
@@ -144,7 +144,7 @@ class DriveRewardsTest {
     assertFalse(reward.crewBonus());
 
     DriveRewards.Reward half =
-        DriveRewards.signaller(DriveRewardConfig.defaults(), 0.5, 6, ScoreRules.Grade.B);
+        DriveRewards.perTrain(DriveRewardConfig.defaults(), 0.5, 6, ScoreRules.Grade.B);
     // 1.0 × 6 × 0.5 × 2 = 6；钱币 1.0 × 6 × 0.5 × 5 = 15
     assertEquals(6, half.experience());
     assertEquals(15.0, half.money(), 1e-9);
@@ -156,15 +156,15 @@ class DriveRewardsTest {
     DriveRewardConfig off =
         new DriveRewardConfig(
             false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}", "FRD", 3, 0.5);
-    assertTrue(DriveRewards.signaller(off, 1.0, 10, ScoreRules.Grade.S).empty());
+    assertTrue(DriveRewards.perTrain(off, 1.0, 10, ScoreRules.Grade.S).empty());
     assertTrue(
-        DriveRewards.signaller(DriveRewardConfig.defaults(), 1.0, 0, ScoreRules.Grade.S).empty());
+        DriveRewards.perTrain(DriveRewardConfig.defaults(), 1.0, 0, ScoreRules.Grade.S).empty());
     assertTrue(
-        DriveRewards.signaller(DriveRewardConfig.defaults(), 1.0, -3, ScoreRules.Grade.S).empty());
+        DriveRewards.perTrain(DriveRewardConfig.defaults(), 1.0, -3, ScoreRules.Grade.S).empty());
     assertTrue(
-        DriveRewards.signaller(DriveRewardConfig.defaults(), 0.0, 10, ScoreRules.Grade.S).empty());
+        DriveRewards.perTrain(DriveRewardConfig.defaults(), 0.0, 10, ScoreRules.Grade.S).empty());
     assertTrue(
-        DriveRewards.signaller(DriveRewardConfig.defaults(), Double.NaN, 10, ScoreRules.Grade.S)
+        DriveRewards.perTrain(DriveRewardConfig.defaults(), Double.NaN, 10, ScoreRules.Grade.S)
             .empty());
   }
 

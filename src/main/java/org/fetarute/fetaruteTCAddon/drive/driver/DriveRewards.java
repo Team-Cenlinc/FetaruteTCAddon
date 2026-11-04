@@ -128,12 +128,13 @@ public final class DriveRewards {
   }
 
   /**
-   * 信号员一个班次的奖励：每列车按驾驶员人工停站的单价乘 {@code trainRatio}（经验与钱币各一份），再乘评级系数。按班次结算，不按值守时长计；ATO 折扣与同车加成都不适用。
+   * 不跟车的岗位（信号员、站长）一个班次的奖励：每列车按驾驶员人工停站的单价乘 {@code trainRatio}（经验与钱币各一份），再乘评级系数。按班次结算，不按值守时长计；ATO
+   * 折扣与同车加成都不适用。
    *
-   * @param trainRatio 每列车的单价是驾驶员人工停站单价的几倍
-   * @param trains 计奖励的车数：经手的车里去掉超时代排的（调用方算好）
+   * @param trainRatio 每列车的单价是驾驶员人工停站单价的几倍（各岗位在奖励配置里各有一项）
+   * @param trains 计奖励的车数：经手的车里去掉系统代办的（调用方按岗位算好）
    */
-  public static Reward signaller(
+  public static Reward perTrain(
       DriveRewardConfig config, double trainRatio, double trains, ScoreRules.Grade grade) {
     if (config == null || !config.enabled()) {
       return Reward.NONE;
