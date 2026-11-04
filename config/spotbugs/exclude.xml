@@ -13,6 +13,12 @@
         <Method name="coupling"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 操作许可证服务持有考试进度与站长、信号员考官，命令、监听与各岗位服务必须共用同一实例。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getLicenseService"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getRailGraphService"/>
@@ -623,6 +629,12 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment"/>
         <Method name="travel"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <!-- BKCommonLib MinecartGroup 迭代出 MinecartMember 的泛型转换误报 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.stationmaster.DispatcherStationMasterWorld"/>
+        <Method name="trainsNear"/>
         <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
     </Match>
     <Match>

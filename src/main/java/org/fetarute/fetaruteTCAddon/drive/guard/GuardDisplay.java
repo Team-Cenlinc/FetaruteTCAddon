@@ -89,6 +89,7 @@ public final class GuardDisplay {
    * @param exitOpen 站台上次问时出站是否放行
    * @param confirmed 已确认出发信号
    * @param released 车掌这边已放行（发了发车信号或超时代发）
+   * @param awaitingStationMaster 出站已放行，只差站长的发车信号
    */
   public record StopState(
       String station,
@@ -100,7 +101,8 @@ public final class GuardDisplay {
       long remainingTicks,
       boolean exitOpen,
       boolean confirmed,
-      boolean released) {
+      boolean released,
+      boolean awaitingStationMaster) {
 
     public StopState {
       Objects.requireNonNull(station, "station");
@@ -168,7 +170,13 @@ public final class GuardDisplay {
                       Map.of("station", stop.station())));
               rows.add(stepRow(snapshot, stop));
               if (stop.phase() == Phase.WAIT_DEPARTURE && !stop.released()) {
-                rows.add(row("exit", stop.exitOpen() ? "exit-open" : "exit-closed", Map.of()));
+                rows.add(
+                    row(
+                        "exit",
+                        stop.exitOpen()
+                            ? "exit-open"
+                            : stop.awaitingStationMaster() ? "exit-master" : "exit-closed",
+                        Map.of()));
               }
               rows.add(row("doors", doorsValue(stop), Map.of()));
             });
@@ -195,7 +203,10 @@ public final class GuardDisplay {
           : !snapshot.seated()
               ? row("step", "step-return", Map.of("seconds", seconds))
               : !stop.confirmed() && !stop.exitOpen()
-                  ? row("step", "step-wait-exit", Map.of())
+                  ? row(
+                      "step",
+                      stop.awaitingStationMaster() ? "step-wait-master" : "step-wait-exit",
+                      Map.of())
                   : !stop.confirmed()
                       ? row("step", "step-confirm", Map.of("seconds", seconds))
                       : row("step", "step-buzzer", Map.of("seconds", seconds));
@@ -232,9 +243,6 @@ public final class GuardDisplay {
       }
       if (stop.wrongDoor()) {
         lines.add(new Line(SHEET + "wrong-door", station));
-      }
-      if (stop.closedEarly()) {
-        lines.add(new Line(SHEET + "closed-early", station));
       }
       if (stop.closingWatch().filter(passed -> !passed).isPresent()) {
         lines.add(new Line(SHEET + "closing-watch", station));

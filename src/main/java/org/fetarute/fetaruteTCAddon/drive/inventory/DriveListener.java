@@ -4,6 +4,7 @@ import com.bergerkiller.bukkit.tc.events.seat.MemberBeforeSeatEnterEvent;
 import com.bergerkiller.bukkit.tc.events.seat.MemberBeforeSeatExitEvent;
 import com.destroystokyo.paper.event.player.PlayerRecipeBookClickEvent;
 import io.papermc.paper.event.player.PlayerPickItemEvent;
+import java.util.UUID;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Cancellable;
@@ -11,13 +12,16 @@ import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDismountEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.EntityShootBowEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.ProjectileLaunchEvent;
+import org.bukkit.event.hanging.HangingBreakByEntityEvent;
 import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
@@ -40,6 +44,7 @@ import org.bukkit.event.player.PlayerItemDamageEvent;
 import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
+import org.bukkit.event.vehicle.VehicleDamageEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardMenu;
@@ -153,9 +158,43 @@ public final class DriveListener implements Listener {
 
   @EventHandler(priority = EventPriority.HIGHEST)
   public void onInteract(PlayerInteractEvent event) {
-    if (guard(event.getPlayer(), event)) {
+    Player player = event.getPlayer();
+    UUID id = player.getUniqueId();
+    if (event.getAction() == Action.PHYSICAL && manager.isWalkingCrew(id)) {
+      // 在站台上走动的岗位：压力板、绊线照常，免得开不了门。
+      return;
+    }
+    if (event.getAction() == Action.RIGHT_CLICK_BLOCK
+        && manager.allowsBlockUse(id, player.getInventory().getHeldItemSlot())) {
+      // 空着手的一格：方块本身的交互（开门、按钮）不拦，领地保护拒绝的照样拒绝；手里的真实物品用不了。
+      event.setUseItemInHand(Event.Result.DENY);
+      return;
+    }
+    if (guard(player, event)) {
       event.setUseItemInHand(Event.Result.DENY);
       event.setUseInteractedBlock(Event.Result.DENY);
+    }
+  }
+
+  /** 服务器上手里还是真实物品：拦下攻击，免得站长拿着剑打人。 */
+  @EventHandler(priority = EventPriority.HIGHEST)
+  public void onAttack(EntityDamageByEntityEvent event) {
+    if (event.getDamager() instanceof Player player) {
+      guard(player, event);
+    }
+  }
+
+  @EventHandler(priority = EventPriority.HIGHEST)
+  public void onVehicleDamage(VehicleDamageEvent event) {
+    if (event.getAttacker() instanceof Player player) {
+      guard(player, event);
+    }
+  }
+
+  @EventHandler(priority = EventPriority.HIGHEST)
+  public void onHangingBreak(HangingBreakByEntityEvent event) {
+    if (event.getRemover() instanceof Player player) {
+      guard(player, event);
     }
   }
 
@@ -250,8 +289,10 @@ public final class DriveListener implements Listener {
 
   @EventHandler(priority = EventPriority.HIGHEST)
   public void onInventoryOpen(InventoryOpenEvent event) {
-    if (DriveMenu.isMenu(event.getInventory()) || GuardMenu.isMenu(event.getInventory())) {
-      // 停车后菜单与车掌菜单是我们自己打开的虚拟界面，放行；其它界面一律不许打开。
+    if (DriveMenu.isMenu(event.getInventory())
+        || GuardMenu.isMenu(event.getInventory())
+        || event.getInventory().getHolder() instanceof CrewMenuHolder) {
+      // 停车后菜单与岗位菜单是我们自己打开的虚拟界面，放行；其它界面一律不许打开。
       return;
     }
     if (event.getPlayer() instanceof Player player) {
@@ -273,6 +314,8 @@ public final class DriveListener implements Listener {
       manager.onMenuClick(player, event.getSlot());
     } else if (GuardMenu.isMenu(top) && buttonClick) {
       manager.guards().ifPresent(guards -> guards.onMenuClick(player, top, event.getSlot()));
+    } else if (top.getHolder() instanceof CrewMenuHolder menu && buttonClick) {
+      menu.onMenuClick(player, event.getSlot());
     }
   }
 
@@ -283,6 +326,10 @@ public final class DriveListener implements Listener {
     }
     if (GuardMenu.isMenu(event.getInventory()) && event.getPlayer() instanceof Player player) {
       manager.guards().ifPresent(guards -> guards.onMenuClosed(player));
+    }
+    if (event.getInventory().getHolder() instanceof CrewMenuHolder menu
+        && event.getPlayer() instanceof Player player) {
+      menu.onMenuClosed(player);
     }
   }
 

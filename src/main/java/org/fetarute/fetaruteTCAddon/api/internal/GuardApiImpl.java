@@ -116,7 +116,7 @@ public final class GuardApiImpl implements GuardApi {
     return switch (outcome) {
       case CLAIMED -> AssignResult.ASSIGNED;
       case DISABLED -> AssignResult.DISABLED;
-      case ON_DUTY, SIGNALLER_ON_DUTY -> AssignResult.ON_DUTY;
+      case ON_DUTY, SIGNALLER_ON_DUTY, STATION_MASTER_ON_DUTY -> AssignResult.ON_DUTY;
       case DRIVING -> AssignResult.DRIVING;
       case ALREADY_HAS_TASK -> AssignResult.ALREADY_HAS_TASK;
       case TAKEN -> AssignResult.TAKEN;

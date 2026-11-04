@@ -10,6 +10,7 @@ import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
 import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
 import org.fetarute.fetaruteTCAddon.signaller.SignallerService;
+import org.fetarute.fetaruteTCAddon.stationmaster.StationMasterService;
 
 /**
  * 操作许可证与考试（{@code drive.yml} 的 {@code license} 段）。
@@ -100,7 +101,21 @@ public record LicenseConfig(
                 false,
                 false,
                 1,
-                List.of(SignallerService.PERMISSION))),
+                List.of(SignallerService.PERMISSION)),
+            new LicenseClass(
+                "station-master",
+                "站长",
+                "在车站站台上值守：接发列车、发车信号、站台扣车、催关、清客与站台紧急停车",
+                true,
+                List.of(),
+                LicenseClass.Exam.STATION_MASTER,
+                5,
+                70,
+                false,
+                false,
+                false,
+                1,
+                List.of(StationMasterService.PERMISSION))),
         TrainingConfig.defaults());
   }
 
@@ -157,7 +172,7 @@ public record LicenseConfig(
           sink.accept(
               "drive.yml 的 license.classes."
                   + key
-                  + ".exam 只能是 tutorial、road-test、guard 或 signaller，已跳过这一项");
+                  + ".exam 只能是 tutorial、road-test、guard、signaller 或 station-master，已跳过这一项");
           continue;
         }
         classes.add(
@@ -168,7 +183,7 @@ public record LicenseConfig(
                 entry.getBoolean("enabled", true),
                 entry.getStringList("requires"),
                 exam,
-                exam == LicenseClass.Exam.SIGNALLER
+                exam == LicenseClass.Exam.SIGNALLER || exam == LicenseClass.Exam.STATION_MASTER
                     ? entry.getInt("exam-trains", 5)
                     : entry.getInt("exam-stops", 3),
                 entry.getInt("min-points", 70),

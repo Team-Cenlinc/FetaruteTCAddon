@@ -30,6 +30,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
@@ -85,6 +86,7 @@ import org.fetarute.fetaruteTCAddon.drive.crew.CallReason;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallResult;
 import org.fetarute.fetaruteTCAddon.drive.crew.CallerRole;
 import org.fetarute.fetaruteTCAddon.drive.crew.CrewDuty;
+import org.fetarute.fetaruteTCAddon.drive.crew.CrewSustain;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCallDialog;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCalls;
 import org.fetarute.fetaruteTCAddon.drive.crew.SignallerLink;
@@ -127,6 +129,7 @@ import org.fetarute.fetaruteTCAddon.drive.hud.DriveHud;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriverReport;
 import org.fetarute.fetaruteTCAddon.drive.hud.StopMarker;
+import org.fetarute.fetaruteTCAddon.drive.inventory.CrewHotbar;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DrivePacketListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
@@ -200,7 +203,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     /** 玩家正在当车掌，或领了还没结束的车掌任务。 */
     GUARD_ON_DUTY,
     /** 玩家正在值守信号楼。 */
-    SIGNALLER_ON_DUTY
+    SIGNALLER_ON_DUTY,
+    /** 玩家正在当站长。 */
+    STATION_MASTER_ON_DUTY
   }
 
   /** 领取驾驶任务、驾驶调度列车。 */
@@ -293,6 +298,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final Set<UUID> hornPressed = new HashSet<>();
 
   private final StationStopPoints stationStopPoints;
+
+  /** 当班体力的周期（tick）。 */
+  private static final int SUSTAIN_PERIOD_TICKS = 20;
+
   private final StopMarker stopMarker;
   private final DriveRewardPayer rewardPayer;
   private final Map<UUID, DriveDoors> doors = new HashMap<>();
@@ -362,7 +371,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final DriverControlRegistry driverRegistry = new DriverControlRegistry();
 
   /** 车掌值乘；没有接上时为空。 */
-  private org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager guards;
+  private volatile org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager guards;
+
+  private volatile CrewHotbar stationMasterHotbar;
 
   /** 在岗登记：驾驶员、车掌与信号员同一时间只当一个，开始当班或领任务前统一问它。 */
   private final CrewDuty crewDuty = new CrewDuty();
@@ -375,6 +386,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 信号员班次结算。 */
   private final SignallerSettlement signallerSettlement;
+
+  private final StationMasterSettlement stationMasterSettlement;
 
   private final DriverTaskManager tasks;
   private final DriveTutorials tutorials;
@@ -408,7 +421,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     this.tutorials = new DriveTutorials(plugin, plugin::getLocaleManager, sounds);
     this.levels = new DriveLevelPreference(plugin);
     this.signallerCalls = new SignallerCalls(message -> plugin.getLogger().warning(message));
-    this.signallerSettlement = new SignallerSettlement(new SignallerHost(), ZoneId.systemDefault());
+    CrewSettlementHost settlementHost = new CrewSettlementHost();
+    this.signallerSettlement = new SignallerSettlement(settlementHost, ZoneId.systemDefault());
+    this.stationMasterSettlement =
+        new StationMasterSettlement(settlementHost, ZoneId.systemDefault());
     applyDriverConfig(config);
     this.guards =
         new org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager(
@@ -451,9 +467,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return crew.busyOtherThan(playerId, CrewDuty.Role.DRIVER)
         .map(
             role ->
-                role == CrewDuty.Role.SIGNALLER
-                    ? StartOutcome.SIGNALLER_ON_DUTY
-                    : StartOutcome.GUARD_ON_DUTY)
+                switch (role) {
+                  case SIGNALLER -> StartOutcome.SIGNALLER_ON_DUTY;
+                  case STATION_MASTER -> StartOutcome.STATION_MASTER_ON_DUTY;
+                  default -> StartOutcome.GUARD_ON_DUTY;
+                })
         .orElse(null);
   }
 
@@ -462,9 +480,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return crew.busyOtherThan(playerId, CrewDuty.Role.DRIVER)
         .map(
             role ->
-                role == CrewDuty.Role.SIGNALLER
-                    ? "drive.task.claim.signaller-busy"
-                    : "drive.task.claim.guard-busy")
+                switch (role) {
+                  case SIGNALLER -> "drive.task.claim.signaller-busy";
+                  case STATION_MASTER -> "drive.task.claim.station-master-busy";
+                  default -> "drive.task.claim.guard-busy";
+                })
         .orElse(null);
   }
 
@@ -478,14 +498,21 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     this.signallerLink = link == null ? SignallerLink.NONE : link;
   }
 
+  /** 站长班次结算（成绩、奖励、记录），交给站长模块在下岗时调用。 */
+  @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "故意交出结算器本体：站长模块下岗时调用它，结算器无可变的对外状态。")
+  public org.fetarute.fetaruteTCAddon.drive.crew.StationMasterShift.Settlement
+      stationMasterSettlement() {
+    return stationMasterSettlement;
+  }
+
   /** 信号员班次结算（成绩、奖励、记录），交给信号员模块在下岗时调用。 */
   @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "故意交出结算器本体：信号员模块下岗时调用它，结算器无可变的对外状态。")
   public SignallerShift.Settlement signallerSettlement() {
     return signallerSettlement;
   }
 
-  /** 信号员班次结算用到的服务器操作。 */
-  private final class SignallerHost implements SignallerSettlement.Host {
+  /** 信号员、站长班次结算用到的服务器操作。 */
+  private final class CrewSettlementHost implements SettlementHost {
     @Override
     public org.fetarute.fetaruteTCAddon.drive.driver.DriveRewardConfig rewards() {
       return config.rewards();
@@ -771,26 +798,103 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /**
-   * 玩家正在驾驶、值乘车掌或值守信号楼：乘客的计分板要让位。
+   * 玩家正在驾驶、值乘车掌、当站长或值守信号楼：乘客的计分板要让位。
    *
    * <p>驾驶员与车掌只算正在当班的：领了任务还没开始时照常看乘客计分板（在岗登记里这两种也算在岗，所以不直接问登记）。信号员没有“已领未开始”，登记里的在岗就是在值守。
    */
   public boolean usesCrewSidebar(UUID playerId) {
-    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
     return active.containsKey(playerId)
-        || (crew != null && crew.isOnDuty(playerId))
+        || crewHotbarOf(playerId).isPresent()
         || crewDuty.busy(playerId).filter(role -> role == CrewDuty.Role.SIGNALLER).isPresent();
   }
 
-  /** 玩家的快捷栏被驾驶物品或车掌按钮占着：驾驶员与车掌的物品一样要保护。 */
+  /** 列车进站前就要知道的停车点（站长的站位也用它）。 */
+  @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "停车点带缓存，大家共用一份。")
+  public StationStopPoints stationStopPoints() {
+    return stationStopPoints;
+  }
+
+  /** 客户端时钟：判定按键时按它读时刻，网络抖动不影响。 */
+  @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "时钟在数据包监听里计数，大家读同一份。")
+  public org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock clientClock() {
+    return clientClock;
+  }
+
+  /** 每秒一次：当班的玩家喂饱、慢慢回血。 */
+  private void sustainCrew() {
+    CrewSustain sustain =
+        CrewSustain.from(plugin.getConfig().getConfigurationSection("crew.sustain"));
+    if (!sustain.enabled()) {
+      return;
+    }
+    for (Player player : Bukkit.getOnlinePlayers()) {
+      if (isOnShift(player.getUniqueId())) {
+        sustain.apply(player);
+      }
+    }
+  }
+
+  /** 玩家此刻正当班（驾驶、车掌、站长、信号员），不含领了任务还没开始的。 */
+  public boolean isOnShift(UUID playerId) {
+    return usesCrewSidebar(playerId);
+  }
+
+  /** 玩家的快捷栏被岗位按钮占着，而且不在驾驶：人可以在地上走动。 */
+  public boolean isWalkingCrew(UUID playerId) {
+    return !active.containsKey(playerId) && crewHotbarOf(playerId).isPresent();
+  }
+
+  /** 此刻选中的这一格没有岗位按钮：可以用手开门，但用不了手里的物品。 */
+  public boolean allowsBlockUse(UUID playerId, int heldSlot) {
+    return !active.containsKey(playerId)
+        && crewHotbarOf(playerId).filter(crew -> crew.allowsBlockUse(heldSlot)).isPresent();
+  }
+
+  /** 玩家的快捷栏被驾驶物品或岗位按钮（车掌、站长）占着：一样要保护。 */
   public boolean isProtected(UUID playerId) {
-    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
-    return active.containsKey(playerId) || (crew != null && crew.isOnDuty(playerId));
+    return active.containsKey(playerId) || crewHotbarOf(playerId).isPresent();
   }
 
   /** 接上车掌值乘。 */
   public void setGuards(org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager guards) {
     this.guards = guards;
+  }
+
+  /** 接上站台紧急停车的扣车（按车名）；{@code null} 撤掉。 */
+  public void setPlatformHold(java.util.function.Predicate<String> held) {
+    driverRegistry.setPlatformHold(held);
+  }
+
+  /**
+   * 站台紧急停车（站长按下）：人工驾驶的车把驾驶员的手柄拨到 EB，由驾驶员停稳后缓解，返回 false；自动运行（含 ATO）的车按紧急制动减速度刹停，返回 true，停住后由站长一侧扣着（见
+   * {@link #setPlatformHold}）。
+   *
+   * @param group 要停的列车
+   */
+  public boolean platformEmergency(MinecartGroup group) {
+    var drivers = driverSide();
+    if (drivers.emergencyByGuard(group.getProperties().getTrainName())) {
+      return false;
+    }
+    group.getActions().clear();
+    group
+        .getActions()
+        .addAction(
+            new org.fetarute.fetaruteTCAddon.drive.driver.EmergencyBrakeAction(
+                drivers.emergencyDecelBps2(group)));
+    return true;
+  }
+
+  /** 接上站长的快捷栏；{@code null} 撤掉。 */
+  public void setStationMasterHotbar(CrewHotbar hotbar) {
+    this.stationMasterHotbar = hotbar;
+  }
+
+  /** 玩家此刻当班、占着快捷栏的岗位（车掌、站长）；都不在岗时为空。网络线程也会调用。 */
+  private Optional<CrewHotbar> crewHotbarOf(UUID playerId) {
+    return Stream.<CrewHotbar>of(guards, stationMasterHotbar)
+        .filter(crew -> crew != null && crew.isOnDuty(playerId))
+        .findFirst();
   }
 
   /** 车掌值乘；没有接上时为空。 */
@@ -1232,8 +1336,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (session != null) {
       return session.rewriter();
     }
-    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
-    return crew == null ? null : crew.rewriterFor(playerId);
+    return crewHotbarOf(playerId).flatMap(crew -> crew.rewriterFor(playerId)).orElse(null);
   }
 
   @Override
@@ -1254,16 +1357,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (session != null) {
       return session.menuTopSize();
     }
-    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
-    return crew == null ? 0 : crew.menuTopSize(playerId);
+    return crewHotbarOf(playerId).map(crew -> crew.menuTopSize(playerId)).orElse(0);
   }
 
   @Override
   public void onInput(Player player, InputSignal signal) {
     UUID id = player.getUniqueId();
-    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
-    if (!active.containsKey(id) && crew != null && crew.isOnDuty(id)) {
-      crew.onInput(player, signal);
+    Optional<CrewHotbar> crew = active.containsKey(id) ? Optional.empty() : crewHotbarOf(id);
+    if (crew.isPresent()) {
+      crew.get().onInput(player, signal);
       return;
     }
     if (signal == InputSignal.RELEASE_USE) {
@@ -3381,6 +3483,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   private void tick() {
+    if (Bukkit.getCurrentTick() % SUSTAIN_PERIOD_TICKS == 0) {
+      try {
+        sustainCrew();
+      } catch (RuntimeException ex) {
+        plugin.getLogger().warning("当班体力处理失败: " + ex);
+      }
+    }
     tickCounter++;
     long now = Bukkit.getCurrentTick();
     DriveConfig current = config;

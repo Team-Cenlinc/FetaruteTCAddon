@@ -7,7 +7,9 @@ public enum CallerRole {
   /** 驾驶员（人工驾驶或 ATO）。 */
   DRIVER,
   /** 车掌。 */
-  GUARD;
+  GUARD,
+  /** 站长（在站台上，呼叫停在或开过所辖股道的列车所在的信号楼）。 */
+  STATION_MASTER;
 
   /** 语言键里的写法。 */
   public String key() {

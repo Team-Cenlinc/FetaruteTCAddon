@@ -1104,6 +1104,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.17.0 | 新增站长岗位，公开接口签名不变。`GuardApi` 车掌单站记录的 `closedEarly` 恒为 false（车掌在提前关门的窗口之前关不了门），下一次不兼容的 API 版本移除；站长按班次记录，与信号员一样不进 `DriveApi` 的驾驶记录 |
 | 1.16.0 | `TrainApi.TrainSnapshot` 增加 `beforeService`（出库途中：还没到当前交路的第一个载客站）；保留 1.11.0 起的十五参构造器（`beforeService` 为 false），按旧签名 `new` 的代码源码与二进制均兼容，使用记录模式解构的代码需补上新增分量 |
 | 1.15.0 | 新增 `FetaruteApi#signaller()` 与 `SignallerApi`（各信号楼的模式、值守者、在入口等信号员的车、许可数与扣着的车；可在任意线程调用）及信号员事件（`SignallerDutyStartEvent`、`SignallerDutyEndedEvent`，带 `getParentZoneCode()`：中心工位上的临时小区所属的大区）；`SignallerApi.SignalBoxView` 带 `parentZoneCode`，`boxes()` 也列出中心工位上的临时小区。`DriveApi#records` 不含信号员的班次（驾驶记录里 `mode` 为 `SIGNALLER` 的那些）；站牌行为不变 |
 | 1.14.0 | 新增 `FetaruteApi#guard()` 与 `GuardApi`（车掌任务、值乘、记录）及车掌事件（`GuardTaskClaimEvent`、`GuardDutyStartEvent`、`GuardStopWorkedEvent`、`GuardDepartureSignalEvent`、`GuardEmergencyStopEvent`、`GuardIncidentReportEvent`、`GuardTripScoredEvent`、`GuardTaskFinishedEvent`、`GuardDutyEndedEvent`）。`DriveApi#records` 照旧返回该玩家的全部记录，车掌的记录 `mode` 为 `GUARD`。新增 `FetaruteApi#call()` 与 `CallApi`（车站上能叫车的方向、叫车单）及叫车事件（`TrainCallPlacedEvent`、`TrainCallDispatchedEvent`、`TrainCallArrivedEvent`、`TrainCallEndedEvent`）。`TimetableApi.Duty` 加 `splitFromTripCode`（由解编开始的交路：从哪一班的列车上解下）与 `joinsTripCode`（以联挂结束的交路：并入哪一班的列车），旧构造器保留。`EtaApi.BoardRow` 加 `division`（运行中列车在本站或前方分行，或刚在本站拆开；新记录 `EtaApi.Division`、`EtaApi.DivisionPart`）与 `joining`（回程支线的车在前方联挂、`destination` 为联挂后主干的终点，或主干在本站联挂；新记录 `EtaApi.Joining`），保留 1.9.0 起的全参构造器（不分行、不联挂）。会分行的列车 `destination` 写开得更远的一段 |

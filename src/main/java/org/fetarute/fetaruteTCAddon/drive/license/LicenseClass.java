@@ -52,7 +52,9 @@ public record LicenseClass(
     /** 车掌：在调度列车上值乘，做满几站作业后按车掌成绩判定。 */
     GUARD,
     /** 信号员：在控制台上值守、转人工，亲手排满几列车的进路后按扣分判定。 */
-    SIGNALLER;
+    SIGNALLER,
+    /** 站长：在车站上岗，亲手给满几列车发车信号、处置一次模拟事件后按扣分判定。 */
+    STATION_MASTER;
 
     /** 按配置写法解析（旧写法 {@code dispatch} 照认）；认不出时为空。 */
     public static Exam parse(String raw) {
@@ -64,6 +66,7 @@ public record LicenseClass(
         case "road-test", "dispatch" -> ROAD_TEST;
         case "guard" -> GUARD;
         case "signaller" -> SIGNALLER;
+        case "station-master" -> STATION_MASTER;
         default -> null;
       };
     }
@@ -83,14 +86,16 @@ public record LicenseClass(
     drillSeconds = Math.max(0, drillSeconds);
   }
 
-  /** 岗位：操作许可证上并列的三项。 */
+  /** 岗位：操作许可证上并列的四项。 */
   public enum Post {
     /** 驾驶：分级，见习、正式……按配置先后排级数。 */
     DRIVER,
     /** 车掌。 */
     GUARD,
     /** 信号员。 */
-    SIGNALLER
+    SIGNALLER,
+    /** 站长。 */
+    STATION_MASTER
   }
 
   /** 这一项属于哪个岗位：按考法定，教程与路考是驾驶。 */
@@ -99,6 +104,7 @@ public record LicenseClass(
       case TUTORIAL, ROAD_TEST -> Post.DRIVER;
       case GUARD -> Post.GUARD;
       case SIGNALLER -> Post.SIGNALLER;
+      case STATION_MASTER -> Post.STATION_MASTER;
     };
   }
 

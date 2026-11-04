@@ -53,5 +53,6 @@ python3 scripts/resourcepack-items-to-cmd.py <材质包源目录>
 | 驾驶台菜单按钮 | 各色染料 | `fetarute:drive/panel/<按钮>`，键名见 `MenuLayout#modelKey`（`reverser_f[_sel]`、`door_l_on|off`、`key_on|off`、受电开关、`mode_ato|manual`、`end[_confirm]` 等；有故障时去掉 `_on`／`_off` 加 `_fault`） |
 | 驾驶台压力表、故障指示 | 彩色玻璃板 | 见 `GaugeView#modelKey`（`drive/panel/gauge_<表>_on|fault`，耐久条当指针）、`FaultPanelView#modelKey` |
 | 车掌快捷栏与菜单 | 各色染料 | 车门沿用 `drive/panel/door_l_*`、`door_r_*`；其余 `fetarute:drive/guard/<键>`（`door_close[_on]`、`report[_used]`、`confirm_stop|go|done`、`buzzer[_on]`、`emergency[_on]`、`seat`），结束值乘沿用 `drive/panel/end|end_confirm` |
+| 站长快捷栏与菜单 | 绿／黄绿（发车信号）、灰／橙（扣车）、黄（催关）、淡蓝（呼叫）色染料 | `fetarute:station/<键>`：`signal[_on]`、`hold[_on]`、`close`、`call`（`_on` 为亮起：当前这一列在等发车信号、扣着车）；紧急停车沿用 `drive/guard/emergency[_on]`，下岗沿用 `drive/panel/end|end_confirm`；`signal[_on]` 按显示位置分两个模型（`display_context`）：快捷栏里是按钮图标，拿在手上是手持信号（`signal[_on]_held`，别的玩家也看得到） |
 
-各物品对应的原版物品见 `WrenchItem`、`HotbarItems#materialOf`、`DriveMenuItems#materialOf`、`DriveGaugeItems`、`GuardHotbar#materialOf`、`GuardMenu#materialOf`；加了新的原版物品要同步脚本里的 `MATERIALS`。任务卡用原版书本，不写标记。
+各物品对应的原版物品见 `WrenchItem`、`HotbarItems#materialOf`、`DriveMenuItems#materialOf`、`DriveGaugeItems`、`GuardHotbar#materialOf`、`GuardMenu#materialOf`、`StationMasterHotbar#materialOf`、`StationMasterMenu`；加了新的原版物品要同步脚本里的 `MATERIALS`。任务卡用原版书本，不写标记。

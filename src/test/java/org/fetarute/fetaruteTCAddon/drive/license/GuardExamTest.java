@@ -25,13 +25,13 @@ class GuardExamTest {
 
   private static GuardScore.Stop clean(String station) {
     return new GuardScore.Stop(
-        station, false, false, false, false, false, Optional.of(true), Optional.of(true), 0);
+        station, false, false, false, false, Optional.of(true), Optional.of(true), 0);
   }
 
   private static GuardScore.Stop sloppy(String station) {
-    // 提前关门、两项监视不合格：一站扣 6 分。
+    // 两项监视不合格：一站扣 4 分。
     return new GuardScore.Stop(
-        station, false, false, false, false, true, Optional.of(false), Optional.of(false), 0);
+        station, false, false, false, false, Optional.of(false), Optional.of(false), 0);
   }
 
   @Test
@@ -42,7 +42,7 @@ class GuardExamTest {
     stops.add(sloppy("C"));
     ExamEvaluation.Result result = GuardExam.judge(GUARD, stops).orElseThrow();
     assertEquals(Verdict.PASSED, result.verdict());
-    assertEquals(Map.of("points", "94"), result.values());
+    assertEquals(Map.of("points", "96"), result.values());
   }
 
   @Test
@@ -52,15 +52,7 @@ class GuardExamTest {
     for (int i = 0; i < 3; i++) {
       stops.add(
           new GuardScore.Stop(
-              "S" + i,
-              false,
-              false,
-              false,
-              false,
-              true,
-              Optional.of(false),
-              Optional.of(false),
-              0));
+              "S" + i, false, false, false, false, Optional.of(false), Optional.of(false), 0));
     }
     LicenseClass strict =
         new LicenseClass(
@@ -80,7 +72,7 @@ class GuardExamTest {
     ExamEvaluation.Result result = GuardExam.judge(strict, stops).orElseThrow();
     assertEquals(Verdict.FAILED, result.verdict());
     assertEquals("points", result.reason());
-    assertEquals(Map.of("points", "82", "min", "90"), result.values());
+    assertEquals(Map.of("points", "88", "min", "90"), result.values());
     LicenseClass exact =
         new LicenseClass(
             "guard",
@@ -90,7 +82,7 @@ class GuardExamTest {
             List.of(),
             LicenseClass.Exam.GUARD,
             3,
-            82,
+            88,
             false,
             false,
             false,
@@ -103,8 +95,7 @@ class GuardExamTest {
   @DisplayName("哪一站超时当场不及格；开错车门看配置")
   void timeoutsAndWrongDoorsFailAtOnce() {
     GuardScore.Stop timedOut =
-        new GuardScore.Stop(
-            "B", false, true, false, false, false, Optional.empty(), Optional.empty(), 0);
+        new GuardScore.Stop("B", false, true, false, false, Optional.empty(), Optional.empty(), 0);
     ExamEvaluation.Result result =
         GuardExam.judge(GUARD, List.of(clean("A"), timedOut)).orElseThrow();
     assertEquals(Verdict.FAILED, result.verdict());
@@ -112,8 +103,7 @@ class GuardExamTest {
     assertEquals(Map.of("station", "B"), result.values());
 
     GuardScore.Stop wrong =
-        new GuardScore.Stop(
-            "C", false, false, false, true, false, Optional.empty(), Optional.empty(), 0);
+        new GuardScore.Stop("C", false, false, false, true, Optional.empty(), Optional.empty(), 0);
     assertEquals("wrong-door", GuardExam.judge(GUARD, List.of(wrong)).orElseThrow().reason());
     LicenseClass lenient =
         new LicenseClass(
@@ -149,20 +139,13 @@ class GuardExamTest {
     Map<String, String> review =
         GuardExam.review(
             new GuardScore.Stop(
-                "A", false, false, true, true, false, Optional.of(true), Optional.empty(), 1));
+                "A", false, false, true, true, Optional.of(true), Optional.empty(), 1));
     assertEquals("A", review.get("station"));
     assertEquals(GuardExam.MISSED, review.get("open"), "开错门");
     assertEquals(GuardExam.OK, review.get("close"));
     assertEquals(GuardExam.OK, review.get("closing"));
     assertEquals(GuardExam.MISSED, review.get("signal"));
     assertEquals(GuardExam.NOT_JUDGED, review.get("departure"));
-    assertEquals(
-        GuardExam.MISSED,
-        GuardExam.review(
-                new GuardScore.Stop(
-                    "B", false, false, false, false, true, Optional.empty(), Optional.empty(), 0))
-            .get("close"),
-        "停站时间未到就关门");
   }
 
   @Test
@@ -248,30 +231,14 @@ class GuardExamTest {
                 GUARD,
                 List.of(
                     new GuardScore.Stop(
-                        "A",
-                        true,
-                        false,
-                        false,
-                        false,
-                        false,
-                        Optional.empty(),
-                        Optional.empty(),
-                        0)))
+                        "A", true, false, false, false, Optional.empty(), Optional.empty(), 0)))
             .orElseThrow());
     results.add(
         GuardExam.judge(
                 GUARD,
                 List.of(
                     new GuardScore.Stop(
-                        "A",
-                        false,
-                        false,
-                        false,
-                        true,
-                        false,
-                        Optional.empty(),
-                        Optional.empty(),
-                        0)))
+                        "A", false, false, false, true, Optional.empty(), Optional.empty(), 0)))
             .orElseThrow());
     results.add(GuardExam.judge(GUARD, List.of(clean("A"), clean("B"), clean("C"))).orElseThrow());
     results.add(GuardExam.drillMissed("A"));

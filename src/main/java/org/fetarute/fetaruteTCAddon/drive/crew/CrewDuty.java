@@ -8,7 +8,7 @@ import java.util.UUID;
 import java.util.function.Predicate;
 
 /**
- * 在岗登记：一个玩家同一时间只担任一个角色（驾驶员、车掌、信号员）。
+ * 在岗登记：一个玩家同一时间只担任一个角色（驾驶员、车掌、信号员、站长）。
  *
  * <p>各角色登记一个“这个玩家是否正在担任我”的查询（含已领、尚未开始的任务），开始当班或领任务前统一问 {@link #busyOtherThan}，
  * 不再在角色之间两两互查。查询必须便宜、不抛异常，只在主线程调用。
@@ -19,7 +19,8 @@ public final class CrewDuty {
   public enum Role {
     DRIVER,
     GUARD,
-    SIGNALLER
+    SIGNALLER,
+    STATION_MASTER
   }
 
   private final Map<Role, Predicate<UUID>> roles = new EnumMap<>(Role.class);
@@ -42,7 +43,7 @@ public final class CrewDuty {
   }
 
   /**
-   * 玩家此刻担任的角色；按驾驶员、车掌、信号员的顺序取第一个。查询出错的角色当作不在岗。
+   * 玩家此刻担任的角色；按驾驶员、车掌、信号员、站长的顺序取第一个。查询出错的角色当作不在岗。
    *
    * @param player 玩家
    */

@@ -49,7 +49,7 @@ class CallRepliesTest {
     }
     for (CallerRole role : CallerRole.values()) {
       keys.add("signaller.call.caller." + role.key());
-      keys.add("pids.board.signalbox.caller." + role.key());
+      keys.add("pids.board.signalbox.caller." + role.key().replace('_', '-'));
     }
     for (SignallerMessenger.Cue cue : SignallerMessenger.Cue.values()) {
       keys.add(cue.key());

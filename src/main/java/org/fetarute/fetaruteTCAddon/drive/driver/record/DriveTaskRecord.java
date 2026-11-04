@@ -51,6 +51,9 @@ public record DriveTaskRecord(
    */
   public static final String MODE_SIGNALLER = "SIGNALLER";
 
+  /** 站长班次的记录：与信号员同一写法，交路代码一栏是站码（见 {@code StationMasterRecordCodec}）。 */
+  public static final String MODE_STATION_MASTER = "STATION_MASTER";
+
   public DriveTaskRecord {
     Objects.requireNonNull(id, "id");
     Objects.requireNonNull(playerId, "playerId");

@@ -167,7 +167,7 @@ class LicenseConfigTest {
     LicenseConfig parsed = LicenseConfig.from(bundled.getConfigurationSection("license"), m -> {});
     assertEquals(signaller, parsed.find("signaller").orElseThrow());
     assertEquals(
-        List.of("learner", "driver", "guard", "signaller"),
+        List.of("learner", "driver", "guard", "signaller", "station-master"),
         parsed.classes().stream().map(LicenseClass::id).toList());
     assertEquals(
         LicenseConfig.defaults().classes().stream().map(LicenseClass::name).toList(),

@@ -110,7 +110,7 @@ public final class GuardExam {
     Map<String, String> values = new LinkedHashMap<>();
     values.put("station", stop.station());
     values.put("open", mark(!stop.forcedOpen() && !stop.wrongDoor()));
-    values.put("close", mark(!stop.forcedClose() && !stop.closedEarly()));
+    values.put("close", mark(!stop.forcedClose()));
     values.put("closing", watch(stop.closingWatch()));
     values.put("signal", mark(!stop.forcedSignal()));
     values.put("departure", watch(stop.departureWatch()));

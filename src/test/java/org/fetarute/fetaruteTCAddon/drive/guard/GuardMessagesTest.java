@@ -106,7 +106,7 @@ class GuardMessagesTest {
           for (boolean seated : new boolean[] {false, true}) {
             GuardDisplay.StopState stop =
                 new GuardDisplay.StopState(
-                    "S", phase, side, flag, !flag, flag, 20L, flag, !flag, false);
+                    "S", phase, side, flag, !flag, flag, 20L, flag, !flag, false, !flag);
             GuardDisplay.Snapshot snapshot =
                 new GuardDisplay.Snapshot(
                     "T",
@@ -152,7 +152,7 @@ class GuardMessagesTest {
     GuardScore all = new GuardScore();
     all.add(
         new GuardScore.Stop(
-            "S", true, true, true, true, true, Optional.of(false), Optional.of(false), 1));
+            "S", true, true, true, true, Optional.of(false), Optional.of(false), 1));
     for (GuardDisplay.Line line : GuardDisplay.sheet(all)) {
       keys.add(line.key());
     }

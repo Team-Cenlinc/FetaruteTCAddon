@@ -2,15 +2,13 @@ package org.fetarute.fetaruteTCAddon.signaller;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRuns;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 
 /**
@@ -46,25 +44,16 @@ final class ZoneWorkload {
       double switchWeight) {
     int[] calls = new int[units.size()];
     Instant to = from.plus(window);
-    int total = 0;
-    for (Timetable timetable : timetables) {
-      LocalDate first = LocalDate.ofInstant(from, timetable.zoneId()).minusDays(1);
-      LocalDate last = LocalDate.ofInstant(to, timetable.zoneId());
-      for (TimetableTrip trip : timetable.trips()) {
-        Optional<TimetableRoutePlan> plan = timetable.tripPlan(trip);
-        if (plan.isEmpty()) {
-          continue;
-        }
-        for (LocalDate date = first; !date.isAfter(last); date = date.plusDays(1)) {
-          Instant start = trip.departureAt(date, timetable.zoneId());
-          total += count(units, operator, plan.get().stops(), start, from, to, calls);
-        }
-      }
-    }
+    int[] total = {0};
+    TimetableRuns.forEach(
+        timetables,
+        from,
+        to,
+        (stops, start) -> total[0] += count(units, operator, stops, start, from, to, calls));
     double[] out = new double[units.size()];
     for (int i = 0; i < units.size(); i++) {
       ZoneUnits.Unit unit = units.get(i);
-      int base = total > 0 ? calls[i] : unit.tracks();
+      int base = total[0] > 0 ? calls[i] : unit.tracks();
       out[i] = base + switchWeight * unit.switches();
     }
     return out;

@@ -11,7 +11,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
  *
  * <ul>
  *   <li>时限：开门超时由站台代开、关门超时由站台代关、发车铃超时代发，各 5 分；
- *   <li>车门：开错一侧 5 分；停站时间未到就关门 2 分；
+ *   <li>车门：开错一侧 5 分；提前关门有窗口把关（窗口之前关不了门），不扣分；
  *   <li>监视：关门时未在站台注视车门、出站时未朝站台监视，各 2 分（没采到样的不判）。
  * </ul>
  *
@@ -27,7 +27,6 @@ public final class GuardScore {
    * @param forcedClose 关门超时，站台代关
    * @param forcedSignal 发车铃超时，代发发车信号
    * @param wrongDoor 开过不该开的一侧
-   * @param closedEarly 停站时间未到就关了门
    * @param closingWatch 关门监视合格与否；没有采样时为空
    * @param departureWatch 出站监视合格与否；没有采样时为空
    * @param incidents 异常情况报告次数
@@ -38,7 +37,6 @@ public final class GuardScore {
       boolean forcedClose,
       boolean forcedSignal,
       boolean wrongDoor,
-      boolean closedEarly,
       Optional<Boolean> closingWatch,
       Optional<Boolean> departureWatch,
       int incidents) {
@@ -65,9 +63,6 @@ public final class GuardScore {
       if (wrongDoor) {
         penalty += WRONG_DOOR_PENALTY;
       }
-      if (closedEarly) {
-        penalty += EARLY_CLOSE_PENALTY;
-      }
       if (closingWatch.filter(passed -> !passed).isPresent()) {
         penalty += WATCH_PENALTY;
       }
@@ -85,7 +80,6 @@ public final class GuardScore {
           work.forcedClose(),
           work.forcedSignal(),
           work.wrongDoor(),
-          work.closedEarly(),
           work.closingWatchPassed(),
           work.departureWatchPassed(),
           work.incidents());
@@ -94,7 +88,6 @@ public final class GuardScore {
 
   static final int TIMEOUT_PENALTY = 5;
   static final int WRONG_DOOR_PENALTY = 5;
-  static final int EARLY_CLOSE_PENALTY = 2;
   static final int WATCH_PENALTY = 2;
 
   private final List<Stop> stops = new ArrayList<>();

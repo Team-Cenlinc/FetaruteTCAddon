@@ -39,6 +39,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardStations;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
+import org.fetarute.fetaruteTCAddon.stationmaster.StationMasterModule;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -792,8 +793,9 @@ public final class FtaDriveCommand {
           case "restart" -> drive.restartTutorial(player);
           case "stop" -> drive.tutorials().stop(player);
           case "reset" -> {
-            // 车掌提示与驾驶提示一起重置。
+            // 车掌、站长提示与驾驶提示一起重置。
             drive.guards().ifPresent(guards -> guards.resetTips(player));
+            StationMasterModule.resetTips(plugin, player);
             yield drive.tutorials().reset(player);
           }
           case "skip" -> drive.skipTutorialStep(player);
@@ -946,12 +948,16 @@ public final class FtaDriveCommand {
         });
   }
 
-  /** 记录的终态文字：信号员班次记的是下岗原因，其余是任务终态。 */
+  /** 记录的终态文字：信号员与站长班次记的是下岗原因，其余是任务终态。 */
   private static String recordState(LocaleManager locale, DriveTaskRecord record) {
     String state = record.state().toLowerCase(Locale.ROOT);
-    return DriveTaskRecord.MODE_SIGNALLER.equals(record.mode())
-        ? locale.text("drive.signaller.end." + state.replace('_', '-'))
-        : locale.text("drive.task.state." + state);
+    if (DriveTaskRecord.MODE_SIGNALLER.equals(record.mode())) {
+      return locale.text("drive.signaller.end." + state.replace('_', '-'));
+    }
+    if (DriveTaskRecord.MODE_STATION_MASTER.equals(record.mode())) {
+      return locale.text("drive.station-master.end." + state.replace('_', '-'));
+    }
+    return locale.text("drive.task.state." + state);
   }
 
   /** 排行：本周（近 7 天）或全部完成的任务按总分。 */

@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
  * @param awayAfterTimeouts ATO 下连续多少站超时未确认发车就判定驾驶员不在，不在的那段不计奖励；0 表示不判定
  * @param crewBonus 同车加成：驾驶员人工驾驶、车上同时有车掌在岗的那段（停站与里程），驾驶员与车掌的奖励都多发这个比例（0.5 即 +50%）；0 表示不加
  * @param signallerTrainRatio 信号员每经手一列车（超时代排的不计）的奖励是驾驶员人工停站单价的几倍
+ * @param stationMasterTrainRatio 站长每亲手发一次发车信号的奖励是驾驶员人工停站单价的几倍
  */
 public record DriveRewardConfig(
     boolean enabled,
@@ -37,7 +38,8 @@ public record DriveRewardConfig(
     String currencyName,
     int awayAfterTimeouts,
     double crewBonus,
-    double signallerTrainRatio) {
+    double signallerTrainRatio,
+    double stationMasterTrainRatio) {
 
   public DriveRewardConfig {
     experiencePerKm = Math.max(0.0, experiencePerKm);
@@ -55,9 +57,13 @@ public record DriveRewardConfig(
         Double.isFinite(signallerTrainRatio)
             ? Math.max(0.0, signallerTrainRatio)
             : DEFAULT_SIGNALLER_TRAIN_RATIO;
+    stationMasterTrainRatio =
+        Double.isFinite(stationMasterTrainRatio)
+            ? Math.max(0.0, stationMasterTrainRatio)
+            : DEFAULT_STATION_MASTER_TRAIN_RATIO;
   }
 
-  /** 不写信号员单价比例时按默认值（1 倍）。 */
+  /** 不写信号员、站长单价比例时按默认值（1 倍、0.5 倍）。 */
   public DriveRewardConfig(
       boolean enabled,
       double experiencePerKm,
@@ -82,7 +88,8 @@ public record DriveRewardConfig(
         currencyName,
         awayAfterTimeouts,
         crewBonus,
-        DEFAULT_SIGNALLER_TRAIN_RATIO);
+        DEFAULT_SIGNALLER_TRAIN_RATIO,
+        DEFAULT_STATION_MASTER_TRAIN_RATIO);
   }
 
   /** 默认的钱币名称。 */
@@ -90,6 +97,9 @@ public record DriveRewardConfig(
 
   /** 信号员每列车单价比例的默认值。 */
   static final double DEFAULT_SIGNALLER_TRAIN_RATIO = 1.0;
+
+  /** 站长每次发车信号单价比例的默认值：站长一次只办一列车在站台上的一段，比信号员排一条进路轻。 */
+  static final double DEFAULT_STATION_MASTER_TRAIN_RATIO = 0.5;
 
   /** 内置默认值。 */
   public static DriveRewardConfig defaults() {
@@ -111,7 +121,8 @@ public record DriveRewardConfig(
         DEFAULT_CURRENCY,
         3,
         0.5,
-        DEFAULT_SIGNALLER_TRAIN_RATIO);
+        DEFAULT_SIGNALLER_TRAIN_RATIO,
+        DEFAULT_STATION_MASTER_TRAIN_RATIO);
   }
 
   /** 这个评级乘的系数；没写的按 1。 */
@@ -162,7 +173,8 @@ public record DriveRewardConfig(
         section.getString("currency-name", d.currencyName),
         (int) Math.round(nonNegative(section, "away-after-timeouts", d.awayAfterTimeouts, sink)),
         nonNegative(section, "crew-bonus", d.crewBonus, sink),
-        nonNegative(section, "signaller-per-train-ratio", d.signallerTrainRatio, sink));
+        nonNegative(section, "signaller-per-train-ratio", d.signallerTrainRatio, sink),
+        nonNegative(section, "station-master-per-train-ratio", d.stationMasterTrainRatio, sink));
   }
 
   private static double nonNegative(

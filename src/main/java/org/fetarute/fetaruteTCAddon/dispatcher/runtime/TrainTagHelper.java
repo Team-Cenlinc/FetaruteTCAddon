@@ -8,6 +8,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * TrainProperties tag 读取与写入工具，避免重复解析逻辑。
@@ -64,6 +65,19 @@ public final class TrainTagHelper {
     try {
       return Optional.of(Integer.parseInt(valueOpt.get().trim()));
     } catch (NumberFormatException ex) {
+      return Optional.empty();
+    }
+  }
+
+  /** 读取 UUID tag，解析失败时返回 empty。 */
+  public static Optional<UUID> readUuidTag(TrainProperties properties, String key) {
+    Optional<String> valueOpt = readTagValue(properties, key);
+    if (valueOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(UUID.fromString(valueOpt.get().trim()));
+    } catch (IllegalArgumentException ex) {
       return Optional.empty();
     }
   }

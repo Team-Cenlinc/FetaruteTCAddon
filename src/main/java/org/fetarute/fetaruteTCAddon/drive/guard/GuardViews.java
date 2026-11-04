@@ -53,7 +53,7 @@ public final class GuardViews {
         stop.forcedClose(),
         stop.forcedSignal(),
         stop.wrongDoor(),
-        stop.closedEarly(),
+        false,
         stop.closingWatch(),
         stop.departureWatch(),
         stop.incidents());

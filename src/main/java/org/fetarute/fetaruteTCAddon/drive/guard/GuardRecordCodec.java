@@ -23,7 +23,6 @@ public final class GuardRecordCodec {
       item.addProperty("forcedClose", stop.forcedClose());
       item.addProperty("forcedSignal", stop.forcedSignal());
       item.addProperty("wrongDoor", stop.wrongDoor());
-      item.addProperty("closedEarly", stop.closedEarly());
       stop.closingWatch().ifPresent(passed -> item.addProperty("closingWatch", passed));
       stop.departureWatch().ifPresent(passed -> item.addProperty("departureWatch", passed));
       item.addProperty("incidents", stop.incidents());

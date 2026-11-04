@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StationMasterGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 
@@ -76,6 +77,9 @@ public final class StationStopCoordinator {
    * 截短；放行（返回空）在下一次出站门控检查即生效。
    */
   private volatile Function<String, Optional<Instant>> signallerHold = name -> Optional.empty();
+
+  /** 站长：站台扣车（扣车来源之一）与发车信号（站台在门关后问）。站长模块接上；没有站长时一律放行。 */
+  private volatile StationMasterGate stationMaster = StationMasterGate.NONE;
 
   /** 信号员改停股道：计划站台的一个来源，仅次于联挂搭档。调度服务构造时接上；单独构造时没有可改的停站。 */
   private volatile SignallerPlatforms signallerPlatforms = SignallerPlatforms.detached();
@@ -238,6 +242,20 @@ public final class StationStopCoordinator {
    */
   public void setSignallerHold(Function<String, Optional<Instant>> hold) {
     this.signallerHold = hold == null ? name -> Optional.empty() : hold;
+  }
+
+  /**
+   * 注册站长：站长扣车与按表扣车、联挂等候、信号员扣车合并取较晚者，同样对健康检查豁免；发车信号由站台经 {@link #stationMaster()} 问。
+   *
+   * @param gate 站长；{@code null} 恢复为没有站长
+   */
+  public void setStationMaster(StationMasterGate gate) {
+    this.stationMaster = gate == null ? StationMasterGate.NONE : gate;
+  }
+
+  /** 当前的站长（没有站长时为 {@link StationMasterGate#NONE}）。 */
+  public StationMasterGate stationMaster() {
+    return stationMaster;
   }
 
   /** 接上信号员改停股道（调度服务构造时）。 */
@@ -415,9 +433,11 @@ public final class StationStopCoordinator {
     Optional<Instant> heldUntil =
         later(
             later(
-                scheduledHoldTarget(trainName, route, routeUuid, currentIndex, nodeId, now),
-                couplingHoldTarget(trainName, now)),
-            signallerHoldTarget(trainName, now));
+                later(
+                    scheduledHoldTarget(trainName, route, routeUuid, currentIndex, nodeId, now),
+                    heldUntil("COUPLING", couplingHold, trainName, now)),
+                heldUntil("SIGNALLER", signallerHold, trainName, now)),
+            heldUntil("STATION_MASTER", stationMaster::holdTarget, trainName, now));
     String key = holdKey(trainName);
     if (key != null) {
       heldUntil.ifPresentOrElse(
@@ -461,25 +481,16 @@ public final class StationStopCoordinator {
     }
   }
 
-  /** 联挂等对方扣到几点；判定出错时不扣（按现状放行）。 */
-  private Optional<Instant> couplingHoldTarget(String trainName, Instant now) {
+  /** 联挂、信号员、站长这类外部扣车来源扣到几点；已到点或判定出错时不扣（按现状放行）。 */
+  private Optional<Instant> heldUntil(
+      String source, Function<String, Optional<Instant>> hold, String trainName, Instant now) {
     try {
-      return couplingHold.apply(trainName).filter(until -> now != null && now.isBefore(until));
-    } catch (RuntimeException ex) {
-      debugLogger.accept("COUPLING_HOLD_FAILED train=" + trainName + " error=" + ex);
-      return Optional.empty();
-    }
-  }
-
-  /** 信号员扣到几点；判定出错时不扣（按现状放行）。 */
-  private Optional<Instant> signallerHoldTarget(String trainName, Instant now) {
-    try {
-      Optional<Instant> until = signallerHold.apply(trainName);
+      Optional<Instant> until = hold.apply(trainName);
       return until != null && until.isPresent() && now != null && now.isBefore(until.get())
           ? until
           : Optional.empty();
     } catch (RuntimeException ex) {
-      debugLogger.accept("SIGNALLER_HOLD_FAILED train=" + trainName + " error=" + ex);
+      debugLogger.accept(source + "_HOLD_FAILED train=" + trainName + " error=" + ex);
       return Optional.empty();
     }
   }
@@ -666,19 +677,14 @@ public final class StationStopCoordinator {
       return plannedDwellSeconds;
     }
     Instant now = clock.get();
-    Optional<Instant> planned;
-    try {
-      planned = source.boundDepartureAt(event(trainName, route, routeUuid, index, nodeId, now));
-    } catch (RuntimeException ex) {
-      debugLogger.accept("SCHEDULED_DWELL_PLAN_FAILED train=" + trainName + " error=" + ex);
-      return plannedDwellSeconds;
-    }
-    if (planned == null || planned.isEmpty()) {
+    Optional<Instant> planned =
+        boundDeparture(source, trainName, route, routeUuid, index, nodeId, now);
+    if (planned.isEmpty()) {
       return plannedDwellSeconds;
     }
     Instant doorOpenAt = now.plusMillis(Math.max(0L, doorOpenDelayTicks) * 50L);
     long secondsToPlannedDeparture = Duration.between(doorOpenAt, planned.get()).getSeconds();
-    int floor = Math.max(current.minDwellSeconds(), Math.max(0, doorFloorSeconds));
+    int floor = minimumDwellSeconds(doorFloorSeconds);
     int dwell = compressedDwellSeconds(plannedDwellSeconds, floor, secondsToPlannedDeparture);
     if (dwell < plannedDwellSeconds) {
       debugLogger.accept(
@@ -698,6 +704,62 @@ public final class StationStopCoordinator {
               + Math.max(0L, plannedDwellSeconds - secondsToPlannedDeparture));
     }
     return dwell;
+  }
+
+  /**
+   * 此刻离本站的计划发车还有多久（已过为负）：列车绑定了车次、这一站在车次上时才有。站台据此算乘务员提前关门的窗口。
+   *
+   * @param group TrainCarts 列车组
+   * @param definition 停靠站点的节点定义
+   * @return 没开时刻表、列车没绑车次或这一站不在车次上时为空
+   */
+  public Optional<Duration> untilPlannedDeparture(
+      MinecartGroup group, SignNodeDefinition definition) {
+    ScheduledDeparturePlan source = this.plan;
+    if (source == null || definition == null) {
+      return Optional.empty();
+    }
+    Instant now = clock.get();
+    return resolveStop(group, definition)
+        .flatMap(
+            stop ->
+                boundDeparture(
+                    source,
+                    stop.trainName(),
+                    stop.route(),
+                    stop.routeUuid(),
+                    stop.index(),
+                    definition.nodeId(),
+                    now))
+        .map(planned -> Duration.between(now, planned));
+  }
+
+  /**
+   * 停站的下限：配置的最短停站（晚点追赶关着时为 0）与车门走完一个开关过程的时间取大。晚点压缩与车掌提前关门共用这一口径。
+   *
+   * @param doorFloorSeconds 本车车门走完一个开关过程至少要多少秒
+   */
+  public int minimumDwellSeconds(int doorFloorSeconds) {
+    return Math.max(recovery.minDwellSeconds(), Math.max(0, doorFloorSeconds));
+  }
+
+  /** 绑定车次在这一站的计划发车；查询出错时当作没有。 */
+  private Optional<Instant> boundDeparture(
+      ScheduledDeparturePlan source,
+      String trainName,
+      RouteDefinition route,
+      Optional<UUID> routeUuid,
+      int index,
+      NodeId nodeId,
+      Instant now) {
+    try {
+      Optional<Instant> planned =
+          source.boundDepartureAt(event(trainName, route, routeUuid, index, nodeId, now));
+      return planned == null ? Optional.empty() : planned;
+    } catch (RuntimeException ex) {
+      debugLogger.accept("SCHEDULED_DWELL_PLAN_FAILED train=" + trainName + " error=" + ex);
+      return Optional.empty();
+    }
   }
 
   /**

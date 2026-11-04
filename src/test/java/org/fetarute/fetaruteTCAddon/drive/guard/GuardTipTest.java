@@ -39,7 +39,7 @@ class GuardTipTest {
       boolean confirmed,
       boolean released) {
     return new GuardDisplay.StopState(
-        "PPK", phase, side, false, false, closing, 200L, exitOpen, confirmed, released);
+        "PPK", phase, side, false, false, closing, 200L, exitOpen, confirmed, released, false);
   }
 
   private static Optional<GuardTip> next(GuardDisplay.Snapshot snapshot, GuardTip... shown) {

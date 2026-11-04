@@ -47,6 +47,7 @@ import org.fetarute.fetaruteTCAddon.drive.crew.SignallerCalls;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriveRewards;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
+import org.fetarute.fetaruteTCAddon.drive.driver.EmergencyBrakeAction;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
@@ -58,6 +59,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
 import org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock;
+import org.fetarute.fetaruteTCAddon.drive.inventory.CrewHotbar;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.inventory.InputSignal;
 import org.fetarute.fetaruteTCAddon.drive.inventory.UseClicks;
@@ -82,7 +84,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  * DriverSide} 转达。主线程入口都在服务器主线程调用；{@link #rewriterFor}、{@link #menuTopSize} 与 {@link #onInput}
  * 运行在网络线程。
  */
-public final class GuardSessionManager {
+public final class GuardSessionManager implements CrewHotbar {
 
   /** 驾驶员那边：找这列车的驾驶员、给他提示。由驾驶会话管理器实现。 */
   public interface DriverSide {
@@ -227,6 +229,8 @@ public final class GuardSessionManager {
     DRIVING,
     /** 玩家正在值守信号楼。 */
     SIGNALLER_ON_DUTY,
+    /** 玩家正在当站长。 */
+    STATION_MASTER_ON_DUTY,
     BAD_GAME_MODE,
     NOT_SEATED,
     NOT_MANAGED,
@@ -386,19 +390,21 @@ public final class GuardSessionManager {
 
   // ---- 网络线程入口 ----
 
-  /** 车掌的快捷栏改写规则；不是车掌时为 {@code null}。 */
-  public HotbarRewriter<ItemStack> rewriterFor(UUID playerId) {
-    GuardSession session = sessions.get(playerId);
-    return session == null ? null : session.rewriter();
+  /** 车掌的快捷栏改写规则；不是车掌时为空。 */
+  @Override
+  public Optional<HotbarRewriter<ItemStack>> rewriterFor(UUID playerId) {
+    return Optional.ofNullable(sessions.get(playerId)).map(GuardSession::rewriter);
   }
 
   /** 车掌打开着的菜单上半部分的槽位数；没有打开时为 0。 */
+  @Override
   public int menuTopSize(UUID playerId) {
     GuardSession session = sessions.get(playerId);
     return session == null ? 0 : session.menuTopSize();
   }
 
   /** 车掌的按键（数据包层截获）。 */
+  @Override
   public void onInput(Player player, InputSignal signal) {
     UUID id = player.getUniqueId();
     switch (signal) {
@@ -453,9 +459,11 @@ public final class GuardSessionManager {
     }
     Optional<CrewDuty.Role> other = crew.busyOtherThan(id, CrewDuty.Role.GUARD);
     if (other.isPresent()) {
-      return other.get() == CrewDuty.Role.SIGNALLER
-          ? StartOutcome.SIGNALLER_ON_DUTY
-          : StartOutcome.DRIVING;
+      return switch (other.get()) {
+        case SIGNALLER -> StartOutcome.SIGNALLER_ON_DUTY;
+        case STATION_MASTER -> StartOutcome.STATION_MASTER_ON_DUTY;
+        default -> StartOutcome.DRIVING;
+      };
     }
     if (!gameModeAllowed(player.getGameMode(), current)) {
       return StartOutcome.BAD_GAME_MODE;
@@ -1363,8 +1371,18 @@ public final class GuardSessionManager {
       notice(session, "drive.guard.deny.no-door-open", Map.of());
       return;
     }
-    session.link().work().ifPresent(work -> work.noteClosed(stop.get().phase()));
-    closeAll(group, session, stop.get());
+    DriverStationStop current = stop.get();
+    // 提前关门的窗口之前关不了站台侧的门；开错了一侧时随时能关，好纠正
+    if (current.phase() == DriverStationStop.Phase.DWELL
+        && !current.closeAllowed()
+        && !current.wrongDoorOpened()) {
+      notice(
+          session,
+          "drive.guard.deny.close-too-early",
+          Map.of("seconds", String.valueOf((current.closeAllowedInTicks() + 19L) / 20L)));
+      return;
+    }
+    closeAll(group, session, current);
     maybeStartDrill(player, session, stop.get());
   }
 
@@ -1721,9 +1739,7 @@ public final class GuardSessionManager {
           .latchEmergency(Bukkit.getCurrentTick() + config.get().guard().emergencyHoldTicks());
       // 自动运行（含 ATO）的车：按紧急制动减速度刹停，不是当拍停住；停稳后由紧急停车扣着。
       group.getActions().clear();
-      group
-          .getActions()
-          .addAction(new GuardEmergencyBrakeAction(drivers.emergencyDecelBps2(group)));
+      group.getActions().addAction(new EmergencyBrakeAction(drivers.emergencyDecelBps2(group)));
     }
     sounds.play(player, DriveCue.EMERGENCY);
     alert(player, session, "drive.guard.emergency.pulled", Map.of());
@@ -2822,7 +2838,8 @@ public final class GuardSessionManager {
                                         : work.remainingTicks(current.phase()),
                                     work.exitOpen(),
                                     work.confirmed(),
-                                    work.released())));
+                                    work.released(),
+                                    current.awaitingStationMaster())));
     GuardCabChange change = session.cabChange();
     Optional<GuardDisplay.CabChangeState> cabChange =
         change.changing()
@@ -2921,9 +2938,11 @@ public final class GuardSessionManager {
     }
     Optional<CrewDuty.Role> other = crew.busyOtherThan(id, CrewDuty.Role.GUARD);
     if (other.isPresent()) {
-      return other.get() == CrewDuty.Role.SIGNALLER
-          ? GuardTasks.ClaimOutcome.SIGNALLER_ON_DUTY
-          : GuardTasks.ClaimOutcome.DRIVING;
+      return switch (other.get()) {
+        case SIGNALLER -> GuardTasks.ClaimOutcome.SIGNALLER_ON_DUTY;
+        case STATION_MASTER -> GuardTasks.ClaimOutcome.STATION_MASTER_ON_DUTY;
+        default -> GuardTasks.ClaimOutcome.DRIVING;
+      };
     }
     GuardTasks.ClaimOutcome outcome =
         tasks.register(id, player.getName(), spec, unavailable, Instant.now());
