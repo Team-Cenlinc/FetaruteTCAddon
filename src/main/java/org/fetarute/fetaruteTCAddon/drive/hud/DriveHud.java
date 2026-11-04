@@ -8,6 +8,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.Bukkit;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
@@ -181,7 +182,7 @@ public final class DriveHud {
     if (link != null
         && link.controlsPhysically()
         && link.directive() != null
-        && link.directive().isStop()) {
+        && link.directive().displayAspect() == SignalAspect.STOP) {
       return locale.component("drive.hud.driver.wait-signal");
     }
     if (cab.enabled() && cab.faults().doorBypassed()) {

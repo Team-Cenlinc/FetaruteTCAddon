@@ -403,6 +403,37 @@ class YardGeometryTest {
         "库门里的道岔连线不画");
   }
 
+  /** 梯形道岔各岔一条库线、最后一组也只岔一条的大车库：整串道岔都在库内，收进面板，道岔之间的连线要么不画、要么画在面板里，不拖在面板外。 */
+  @Test
+  void aLadderOfSingleTrackSwitchesCollapsesIntoThePanel() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.ladderDepot(5),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.depot("DEP"));
+
+    assertEquals(1, geometry.depots().size());
+    YardGeometry.Depot depot = geometry.depots().get(0);
+    assertTrue(depot.panel());
+    assertEquals(5, depot.tracks().size());
+    for (int k = 1; k < 5; k++) {
+      EdgeId rung = EdgeId.undirected(YardFixtures.depotSwitch(k), YardFixtures.depotSwitch(k + 1));
+      for (YardGeometry.Path drawn : geometry.paths()) {
+        if (!drawn.edge().equals(rung)) {
+          continue;
+        }
+        for (YardGeometry.Segment s : drawn.segments()) {
+          assertTrue(
+              Math.min(s.x0(), s.x1()) >= depot.left()
+                  && Math.max(s.x0(), s.x1()) <= depot.right()
+                  && Math.min(s.y0(), s.y1()) >= depot.top()
+                  && Math.max(s.y0(), s.y1()) <= depot.bottom(),
+              () -> "道岔之间的连线画在面板里: " + rung + " " + s + " " + depot);
+        }
+      }
+    }
+  }
+
   /** 两头都通库外的大车库也收成面板：库门在链中间也照样定位，最后一条库线只朝库内画成短条。 */
   @Test
   void depotsOpenAtBothEndsStillCollapse() {
@@ -765,6 +796,24 @@ class YardGeometryTest {
 
     assertEquals(crossing.y(), next.y(), () -> "交叉的两个节点同一行: " + where);
     assertEquals(one.y() + two.y(), crossing.y() * 2, () -> "交叉在两股道正中: " + where);
+  }
+
+  /** 剪式渡线中间是菱形平交：两条线只能直着穿过去，1 道经平交拐到下游道岔更近也不算 1 道的走向，平交照样画在两股道之间。 */
+  @Test
+  void aDiamondCrossingIsNotPartOfTheTrackThatTurnsThroughIt() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.diamondDetour(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"));
+    YardGeometry.Point one = geometry.nodeAt(P1).orElseThrow();
+    YardGeometry.Point two = geometry.nodeAt(P2).orElseThrow();
+    YardGeometry.Point diamond = geometry.nodeAt(YardFixtures.DIAMOND).orElseThrow();
+    String where = "1 道 " + one + " 2 道 " + two + " 平交 " + diamond;
+
+    assertTrue(
+        Math.min(one.y(), two.y()) < diamond.y() && diamond.y() < Math.max(one.y(), two.y()),
+        () -> "平交在两股道之间: " + where);
   }
 
   /** 只连着正线的侧线紧贴正线：不因下面有横跨全站的长侧线、旁边一层被别的侧线占着，就被往下压到别的侧线那一层。 */

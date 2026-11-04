@@ -58,15 +58,15 @@ class TimetableBlockingSlotsTest {
             .allMatch(conflict -> TimetableConflictChecker.isBlocking(conflict.resource())));
   }
 
-  /** 闭塞格之间不留 separation：恰好晚发闭塞时间 131 秒就排开，少一秒就撞，separation 不再往上加。 */
+  /** 闭塞格之间不留 separation：恰好晚发闭塞时间 132 秒就排开，少一秒就撞，separation 不再往上加。 */
   @Test
   void blockingSlotsTouchEndToEndWithoutSeparation() {
-    assertTrue(conflicts(blocking, 131).isEmpty());
-    assertFalse(conflicts(blocking, 130).isEmpty());
+    assertTrue(conflicts(blocking, 132).isEmpty());
+    assertFalse(conflicts(blocking, 131).isEmpty());
   }
 
   /**
-   * 慢车跟快车：按占用格要晚发 10 秒（A–B 快车 10 离开、慢车 0 进入），闭塞时间 41 秒。separation 放大到 60 时占用口径要 70 秒、比闭塞时间严， 晚发 50
+   * 慢车跟快车：按占用格要晚发 10 秒（A–B 快车 10 离开、慢车 0 进入），闭塞时间 42 秒。separation 放大到 60 时占用口径要 70 秒、比闭塞时间严， 晚发 50
    * 秒就只有占用格撞上：separation 仍是占用口径的余量，闭塞时间不会把它放松。
    */
   @Test

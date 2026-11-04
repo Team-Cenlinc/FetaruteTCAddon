@@ -768,6 +768,62 @@ class ReclaimManagerTest {
   }
 
   /**
+   * 折返票作废、原车不再归该交路时，派票层释放认领（{@code SimpleTicketAssigner#abandonDeadDispatchAttempt}）。
+   * 释放之前回收不碰这辆车，释放之后照常派回库票把它带走，不会因为交接做到一半就一直占着终点站台。
+   */
+  @Test
+  void performReclaimCheckTakesTheTrainOnceAnAbandonedHandoffIsReleased() {
+    Instant t0 = Instant.parse("2026-03-01T08:00:00Z");
+    UUID routeId = UUID.randomUUID();
+    UUID stationId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, stationId);
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-a",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        t0.minusSeconds(4000),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    layoverRegistry
+        .claimDispatch("train-a", "ticket-1", "train-a-next", t0.minusSeconds(300))
+        .orElseThrow();
+    ConfigManager configManager = mock(ConfigManager.class);
+    ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
+    when(configManager.current()).thenReturn(view);
+    when(view.reclaimSettings())
+        .thenReturn(new ConfigManager.ReclaimSettings(true, 3600, 100, 60, 600));
+    List<String> destroyed = new ArrayList<>();
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin,
+            layoverRegistry,
+            ticketAssigner,
+            configManager,
+            null,
+            () -> 0,
+            trainName -> false,
+            (trainName, reason) -> destroyed.add(trainName),
+            () -> t0);
+    manager.setReturnGate(trainName -> true);
+
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(destroyed.isEmpty(), "交接还挂着时既不派回库票也不销毁");
+
+    layoverRegistry.releaseDispatchAttempt("train-a", "ticket-1");
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner, times(1)).forceAssign(eq(provider), eq("train-a"), any());
+  }
+
+  /**
    * 挂起过久的折返交接只告警、不释放：认领之后交接可能已经改动了占用，只能由同一张票重试完成。
    *
    * <p>同一次认领只告警一次；释放后重新认领算新的一次，挂满阈值会再告警。

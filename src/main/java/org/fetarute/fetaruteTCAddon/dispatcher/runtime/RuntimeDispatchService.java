@@ -66,6 +66,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry.LayoverCandidate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.BrakingSignalDisplay;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnosticsCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.MovementAuthorityService;
@@ -129,6 +130,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupanc
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.StartupOccupancyReconstructionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SwitcherMovementTopology;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TurnbackThroatExit;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.VerifiedSwitcherDrainClaims;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -437,6 +439,33 @@ public final class RuntimeDispatchService {
    */
   private final java.util.concurrent.ConcurrentMap<String, String> aspectStagingSignatures =
       new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * 行车中被挡刹车的列车与当时的车速（见 {@link #holdCautionWhileRecovering}）。
+   *
+   * <p>硬窗口按瞬时车速算制动距离：刹车途中窗口缩回挡车资源之前，下一拍就放行、恢复牵引，提速后窗口又伸到同一个前车，绿红来回闪。
+   */
+  private final java.util.concurrent.ConcurrentMap<String, BrakingRecovery> brakingRecoveries =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * 被挡刹车时的车速。
+   *
+   * @param speedBps 被挡时的车速（格/秒），同一 route 上多次被挡取最大
+   * @param routeId 被挡时的 route；换了 route（折返、待命复用、改派）就作废
+   * @param cautioned 是否已因它把放行压成 {@code PROCEED_WITH_CAUTION}（只用于诊断日志去重）
+   */
+  private record BrakingRecovery(double speedBps, RouteId routeId, boolean cautioned) {
+    static BrakingRecovery merge(BrakingRecovery existing, BrakingRecovery latest) {
+      if (!Objects.equals(existing.routeId(), latest.routeId())) {
+        return latest;
+      }
+      return new BrakingRecovery(
+          Math.max(existing.speedBps(), latest.speedBps()),
+          latest.routeId(),
+          existing.cautioned() || latest.cautioned());
+    }
+  }
 
   /**
    * 发车门控最近一次拒绝时的阻塞者摘要（诊断专用，不参与任何判定）。
@@ -7080,13 +7109,20 @@ public final class RuntimeDispatchService {
                     .flatMap(RouteProgressRegistry.RouteProgressEntry::lastPassedGraphNode))
             .request(request)
             .decision(decision, request));
-    updateSignalOrWarn(trainName, SignalAspect.PROCEED, now, finalAuthorization);
+    // 被挡刹车后的恢复期里周期 tick 只给了注意信号：过节点的推进放行不把它抬回绿灯（见 holdCautionWhileRecovering）。
+    SignalAspect progressAspect =
+        brakingRecoveries.containsKey(normalizeTrainKey(trainName))
+                && currentPhysicalAspect(trainName, SignalAspect.PROCEED)
+                    == SignalAspect.PROCEED_WITH_CAUTION
+            ? SignalAspect.PROCEED_WITH_CAUTION
+            : SignalAspect.PROCEED;
+    updateSignalOrWarn(trainName, progressAspect, now, finalAuthorization);
     traceStructuredSignalFinalDecision(
-        trainName, finalAuthorization, SignalAspect.PROCEED, true, true, "progress-final");
+        trainName, finalAuthorization, progressAspect, true, true, "progress-final");
     applyControl(
         train,
         properties,
-        SignalAspect.PROCEED,
+        progressAspect,
         route,
         currentNode,
         nextNode,
@@ -9244,6 +9280,7 @@ public final class RuntimeDispatchService {
     dirtyEventSignals.remove(key);
     publishedPhysicalSignals.remove(key);
     applyingEventSignals.remove(key);
+    brakingRecoveries.remove(key);
     diagnosticsCache.remove(trainName);
     turnbackFootprintGuards.clear(trainName);
     startupPhysicalFootprintGuards.remove(key);
@@ -15042,7 +15079,8 @@ public final class RuntimeDispatchService {
             AuthorizationPurpose.RUNTIME_MOVE,
             train,
             trainConfigResolver.resolve(properties, configManager.current()).decelBps2(),
-            resolveConflictExitBerthDistanceBlocks(train, runtimeSettings));
+            resolveConflictExitBerthDistanceBlocks(train, runtimeSettings),
+            0.0);
     OccupancyRequestContext authorizationContext = hardAuthorityContext.orElse(context);
     OccupancyRequest authorizationRequest =
         prepareRuntimeAuthorizationRequest(
@@ -15616,6 +15654,28 @@ public final class RuntimeDispatchService {
     nextAspect =
         stageSignalAspectForAuthorityAndAdvisory(
             trainName, nextAspect, decision, advisoryDecision, advisoryPreview.risks());
+    nextAspect =
+        holdCautionWhileRecovering(
+            trainName,
+            train,
+            nextAspect,
+            graph,
+            runtimeSettings,
+            route,
+            effectiveNodes,
+            directionContextNodes,
+            currentIndex,
+            now,
+            priorityResolution.priority(),
+            motionConfig.decelBps2(),
+            resolveEdgeSpeedLimit(
+                train,
+                graph,
+                currentNodeOpt.get(),
+                nextNode.orElse(null),
+                configManager.current(),
+                speedCurve,
+                stationStopCoordinator.lineSpeedFactor(trainName)));
     if (runtimeSettings.speedCurveEnabled()) {
       if (stopAtNextWaypoint) {
         // STOP/TERM waypoint：不使用到下一节点距离，避免提前刹停在牌子前。
@@ -17811,6 +17871,8 @@ public final class RuntimeDispatchService {
     if (trainName == null || trainName.isBlank() || aspect == null) {
       return false;
     }
+    // 显示用的“刹车中减速”只对本拍控车有效：每次发布信号先清掉，沿已持有授权刹车的控车随后按本拍判据重新记下。
+    progressRegistry.markBrakingCaution(trainName, false);
     Instant observedAt = now == null ? clockNow() : now;
     if (aspect == SignalAspect.STOP) {
       ensureStopStateContext(trainName, observedAt);
@@ -18874,6 +18936,13 @@ public final class RuntimeDispatchService {
       OccupancyRequest request,
       AuthorityEnd authorityEnd,
       HeldAuthorityBraking.Decision braking) {
+    if (braking.moving() && train != null && route != null) {
+      brakingRecoveries.merge(
+          normalizeTrainKey(trainName),
+          new BrakingRecovery(
+              train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND, route.id(), false),
+          BrakingRecovery::merge);
+    }
     Instant stoppedAt = clockNow();
     String reason =
         waitReason == null || waitReason.isBlank() ? "BLOCKED_BY_OCCUPANCY" : waitReason;
@@ -19929,6 +19998,16 @@ public final class RuntimeDispatchService {
             configManager.current().runtimeSettings(),
             stopMode,
             controlEnvelope);
+    progressRegistry.markBrakingCaution(
+        trainName,
+        BrakingSignalDisplay.displayAspect(
+                aspect,
+                stopMode,
+                distanceOpt,
+                train == null ? 0.0 : train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
+                config.decelBps2(),
+                configManager.current().runtimeSettings())
+            != aspect);
 
     // 记录诊断数据
     recordDiagnostics(
@@ -20364,6 +20443,13 @@ public final class RuntimeDispatchService {
       NodeId nextNode,
       OccupancyDecision decision,
       HeldAuthorityBraking.Decision braking) {
+    if (braking.moving() && train != null && route != null) {
+      brakingRecoveries.merge(
+          normalizeTrainKey(trainName),
+          new BrakingRecovery(
+              train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND, route.id(), false),
+          BrakingRecovery::merge);
+    }
     Instant now = clockNow();
     updateBlockerSnapshot(trainName, decision, now);
     boolean releaseCandidate =
@@ -21783,6 +21869,8 @@ public final class RuntimeDispatchService {
       if (departureGatePresent) {
         moveDepartureGate(previousTrainName, currentTrainName);
       }
+      // 刹车恢复记录不随改名搬：丢了只是回到不压注意信号，留在旧名下却会被重用这个名字的车继承。
+      brakingRecoveries.remove(normalizeTrainKey(previousTrainName));
 
       boolean authorityMoved = true;
       if (occupancyManager instanceof AuthorityHandoffSupport handoffSupport) {
@@ -22356,7 +22444,9 @@ public final class RuntimeDispatchService {
    *
    * <p>route 中的声明节点只是 DYNAMIC 语法占位，不是已经选定的物理站台。请求最多到达首个已 materialize 的 DYNAMIC 目标；若首个 DYNAMIC 尚未
    * materialize，则只允许使用它之前的安全 route 前缀。紧邻目标尚未 materialize 时没有可写前缀，必须 fail-closed。这样普通 lookahead
-   * 与原子联锁扩展都无法把后续占位节点写成 {@link ResourceIntent#MOVEMENT_REQUIRED}。
+   * 与原子联锁扩展都无法把后续占位节点写成 {@link ResourceIntent#MOVEMENT_REQUIRED}。截短后的前缀终点若是 PASS 途经点，不能当折返咽喉停车， 故改用
+   * {@link OccupancyRequestBuilder#withoutPathEndThroatExit}；终点本身是停靠点（如咽喉 TERMINATE 后接 DSTY
+   * 回库）时照常以它为出口。
    *
    * @param provisionalDynamicIndex 候选选台期间尚未写入 effective override 的临时目标索引
    */
@@ -22386,7 +22476,9 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     DynamicAuthorityWindow window = windowOpt.get();
-    return builder.buildContextFromNodesWithDirectionContext(
+    OccupancyRequestBuilder windowBuilder =
+        window.endsAtStop() ? builder : builder.withoutPathEndThroatExit();
+    return windowBuilder.buildContextFromNodesWithDirectionContext(
         trainName,
         Optional.ofNullable(route.id()),
         window.movementNodes(),
@@ -22580,14 +22672,22 @@ public final class RuntimeDispatchService {
       return Optional.of(
           new DynamicAuthorityWindow(
               movementNodes.subList(0, movementEnd),
-              effectiveDirectionNodes.subList(0, directionEnd)));
+              effectiveDirectionNodes.subList(0, directionEnd),
+              routeDefinitions
+                  .findStop(route.id(), movementEnd - 1)
+                  .map(RouteStop::stops)
+                  .orElse(false)));
     }
-    return Optional.of(new DynamicAuthorityWindow(movementNodes, effectiveDirectionNodes));
+    return Optional.of(new DynamicAuthorityWindow(movementNodes, effectiveDirectionNodes, true));
   }
 
-  /** DYNAMIC 边界裁剪后的物理节点与方向语义节点。 */
+  /**
+   * DYNAMIC 边界裁剪后的物理节点与方向语义节点。
+   *
+   * @param endsAtStop 末节点是否为列车真的会停下的地方（未截短，或截短处是非 PASS 停靠点）
+   */
   private record DynamicAuthorityWindow(
-      List<NodeId> movementNodes, List<NodeId> directionContextNodes) {
+      List<NodeId> movementNodes, List<NodeId> directionContextNodes, boolean endsAtStop) {
     private DynamicAuthorityWindow {
       movementNodes = List.copyOf(movementNodes);
       directionContextNodes = List.copyOf(directionContextNodes);
@@ -22744,7 +22844,8 @@ public final class RuntimeDispatchService {
         purpose,
         train,
         decelBps2,
-        minConflictExitDistanceBlocks);
+        minConflictExitDistanceBlocks,
+        0.0);
   }
 
   /**
@@ -22758,6 +22859,8 @@ public final class RuntimeDispatchService {
    * <p>停着时同样保留余量，要求才前后一致：刹车途中车头前进、制动距离缩短，两者之和不变；停稳后仍是“车头 + 余量”。若停着只要一条边，被挡停下的车下一拍就会按一条边放行、
    * 起步后按“制动距离 + 余量”又被挡，反复出现挡车资源仍在却短暂放行的停车。健康恢复的预览与重发也走同一口径， 否则按单边窗口放行后下一拍又被信号 tick
    * 挡回。例外（停着时保持单边窗口）：停在道岔上的车（道岔出清要能先动），以及余量会盖满整份行车计划时 （离 route 终点或未选站台的 DYNAMIC 不到一个余量）。
+   *
+   * @param speedFloorBps 制动距离按不低于此车速计（格/秒）；只读预判“恢复到这个车速时窗口是否仍被挡”用，正常授权传 0
    */
   private Optional<OccupancyRequestContext> buildHardAuthorityContextWithDirectionContext(
       RailGraph graph,
@@ -22772,7 +22875,8 @@ public final class RuntimeDispatchService {
       AuthorizationPurpose purpose,
       RuntimeTrainHandle train,
       double decelBps2,
-      long minConflictExitDistanceBlocks) {
+      long minConflictExitDistanceBlocks,
+      double speedFloorBps) {
     if (graph == null || runtimeSettings == null || route == null) {
       return Optional.empty();
     }
@@ -22785,7 +22889,9 @@ public final class RuntimeDispatchService {
                 .filter(NodeType.SWITCHER::equals)
                 .isPresent();
     double speedBps =
-        train == null ? 0.0 : train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND;
+        Math.max(
+            train == null ? 0.0 : train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND,
+            Double.isFinite(speedFloorBps) ? speedFloorBps : 0.0);
     long minDistanceBlocks =
         hardAuthorityMinDistanceBlocks(runtimeSettings, speedBps, decelBps2, !standingOnSwitcher);
     if (minDistanceBlocks > 0L && currentIndex >= 0 && currentIndex + 1 < effectiveNodes.size()) {
@@ -24342,6 +24448,13 @@ public final class RuntimeDispatchService {
     return -1;
   }
 
+  /**
+   * 咽喉原子段的出口索引：首个车站/车库或区间清出点。
+   *
+   * <p>一路都是咽喉与道岔、走到完整计划终点时，终点若是折返咽喉则以它为出口，与请求构建的原子窗口同一条规则（{@link
+   * TurnbackThroatExit}）。本路径取自请求的完整计划；计划被 DYNAMIC 边界截短、构建器关掉了折返咽喉出口时，到终点的硬授权不会存在， 后面的 {@code
+   * throat-hard-authority-incomplete} 检查照旧拦下。
+   */
   private int throatExitPointIndex(List<NodeId> nodes, int firstInsideIndex, RailGraph graph) {
     if (nodes == null || firstInsideIndex < 0 || firstInsideIndex >= nodes.size()) {
       return -1;
@@ -24355,7 +24468,7 @@ public final class RuntimeDispatchService {
         return -1;
       }
     }
-    return -1;
+    return TurnbackThroatExit.pathEndExit(graph, nodes).orElse(-1);
   }
 
   private LinkedHashSet<OccupancyResource> throatSectionResources(
@@ -24437,11 +24550,7 @@ public final class RuntimeDispatchService {
       return true;
     }
     return resolveWaypointMetadata(graph, nodeId)
-        .map(
-            metadata ->
-                metadata.kind() == WaypointKind.STATION_THROAT
-                    || metadata.kind() == WaypointKind.DEPOT_THROAT
-                    || metadata.kind() == WaypointKind.SWITCHER)
+        .map(metadata -> metadata.kind().isThroat() || metadata.kind() == WaypointKind.SWITCHER)
         .orElse(false);
   }
 
@@ -27267,6 +27376,93 @@ public final class RuntimeDispatchService {
       case CAUTION -> 2;
       case STOP -> 3;
     };
+  }
+
+  /**
+   * 被挡刹车后放行时，恢复到被挡时的车速前先确认窗口不会再被挡：仍会被挡就只给 {@code PROCEED_WITH_CAUTION}（限到注意速度），不给绿灯。
+   *
+   * <p>本拍的硬窗口按此刻车速算，刹车途中车速降了，窗口就缩回前车之前，于是放行、恢复牵引；提速后窗口又伸到同一个前车，再次被挡。
+   * 这里按被挡时的车速另建一份硬窗口做只读预判（不取资源、不排队，不改本拍授权），被挡则压成注意信号，车跟着前车慢行；窗口清了才放绿灯并忘掉这次刹车。
+   * 只会把放行压严，不放宽任何判定；预判建不出窗口时照常放行。预判的请求与本拍授权一样带上冲突出清证据，二者对同一个道岔冲突的判法才一致。
+   *
+   * <p>要恢复到的车速取被挡时车速与本段线路限速的较小者：进了限速更低的区段，就按那里能开到的车速判，不会一直压在注意速度。
+   *
+   * @param decelBps2 车型减速度，与本拍硬窗口同一个
+   * @param lineLimitBps 本段线路限速（格/秒）；读不到时为负，不参与取小
+   * @return 本拍要发布的信号
+   */
+  private SignalAspect holdCautionWhileRecovering(
+      String trainName,
+      RuntimeTrainHandle train,
+      SignalAspect aspect,
+      RailGraph graph,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      RouteDefinition route,
+      List<NodeId> effectiveNodes,
+      List<NodeId> directionContextNodes,
+      int currentIndex,
+      Instant now,
+      int priority,
+      double decelBps2,
+      double lineLimitBps) {
+    String key = normalizeTrainKey(trainName);
+    BrakingRecovery recovery = brakingRecoveries.get(key);
+    if (recovery == null || aspect != SignalAspect.PROCEED) {
+      return aspect;
+    }
+    if (route == null || !Objects.equals(recovery.routeId(), route.id())) {
+      brakingRecoveries.remove(key, recovery);
+      return aspect;
+    }
+    double recoverySpeedBps =
+        lineLimitBps > 0.0 ? Math.min(recovery.speedBps(), lineLimitBps) : recovery.speedBps();
+    double speedBps =
+        train == null ? 0.0 : train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND;
+    // 已回到要恢复的车速：本拍窗口就是按这个车速算的，放行即说明清了。
+    if (speedBps >= recoverySpeedBps) {
+      brakingRecoveries.remove(key, recovery);
+      return aspect;
+    }
+    Optional<OccupancyRequestContext> preview =
+        buildHardAuthorityContextWithDirectionContext(
+            graph,
+            runtimeSettings,
+            trainName,
+            route,
+            effectiveNodes,
+            directionContextNodes,
+            currentIndex,
+            now,
+            priority,
+            AuthorizationPurpose.RUNTIME_MOVE,
+            train,
+            decelBps2,
+            resolveConflictExitBerthDistanceBlocks(train, runtimeSettings),
+            recoverySpeedBps);
+    OccupancyDecision decision =
+        preview.isEmpty()
+            ? null
+            : previewOccupancyDecisionReadOnly(
+                withRuntimeConflictClearingEvidence(preview.get().request(), preview.get(), graph),
+                null);
+    if (decision == null || decision.allowed()) {
+      brakingRecoveries.remove(key, recovery);
+      return aspect;
+    }
+    if (!recovery.cautioned()) {
+      brakingRecoveries.replace(
+          key, recovery, new BrakingRecovery(recovery.speedBps(), recovery.routeId(), true));
+      debugLogger.accept(
+          "BRAKING_RECOVERY_CAUTION train="
+              + trainName
+              + " recoverySpeedBps="
+              + String.format(Locale.ROOT, "%.1f", recoverySpeedBps)
+              + " speedBps="
+              + String.format(Locale.ROOT, "%.1f", speedBps)
+              + " blockers="
+              + summarizeBlockers(decision));
+    }
+    return SignalAspect.PROCEED_WITH_CAUTION;
   }
 
   private SignalAspect stageSignalAspectForAuthorityAndAdvisory(

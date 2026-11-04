@@ -362,8 +362,15 @@ public final class TrainHudContextResolver {
     boolean stop =
         dwelling
             || knownRouteIndex.map(index -> isAtStation(trainName, routeOpt, index)).orElse(false);
+    // 显示用信号：停车信号下沿制动曲线刹向前方停车点时显示减速（见 RouteProgressRegistry#displaySignal）。
     SignalAspect signalAspect =
-        progressEntry.map(RouteProgressRegistry.RouteProgressEntry::lastSignal).orElse(null);
+        progressEntry
+            .map(
+                entry ->
+                    routeProgressRegistry
+                        .flatMap(registry -> registry.displaySignal(entry.trainName()))
+                        .orElse(entry.lastSignal()))
+            .orElse(null);
     Optional<LayoverRegistry.LayoverCandidate> layover = resolveLayover(trainName);
     // 用 stop 匹配而不是节点字符串相等：DYNAMIC 终点的占位节点只是范围里的第一条股道，
     // 车停进别的股道时字符串永远不相等，终到提示就不会出现。

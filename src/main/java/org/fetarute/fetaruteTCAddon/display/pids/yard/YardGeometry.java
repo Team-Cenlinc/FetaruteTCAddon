@@ -748,6 +748,7 @@ public final class YardGeometry {
     private final Map<String, String> endOf;
     private final Map<String, IntervalMark> intervals;
     private final Map<Link, Double> lengths = new HashMap<>();
+    private final Map<String, Map<Link, Link>> crossings = new HashMap<>();
     private final Map<String, Junction> junctionOf = new HashMap<>();
     // 各个分叉按找到的先后（遍历分叉一律用它，不用 junctionOf 的值集合）
     private final List<Junction> junctions = new ArrayList<>();
@@ -971,7 +972,10 @@ public final class YardGeometry {
       return byCode;
     }
 
-    /** 车库内部：库线、紧挨库线的本库咽喉点，再反复加上有两条以上区间连进来的节点（分岔道岔）。站台股道、出口末端与别的车库的库线不算。 */
+    /**
+     * 车库内部：库线、紧挨库线的本库咽喉点，再反复加上有两条以上区间连进来的节点（分岔道岔），以及有区间连进来、往外只剩一条的无名节点（梯形道岔：一串道岔各岔一条库线进去，
+     * 每个只有一条连进来）。站台股道、出口末端与别的车库的库线不算；带名字的节点（车站、咽喉、区间点）只按前一条，出入库线因此不会被一路收进面板。
+     */
     private Set<String> depotInterior(String code, Set<String> tracks, Set<String> keys) {
       Set<String> platforms = new HashSet<>();
       area.tracks().forEach(track -> platforms.add(track.node().value()));
@@ -1002,7 +1006,9 @@ public final class YardGeometry {
               around.getOrDefault(key, List.of()).stream()
                   .filter(link -> inside.contains(link.other(key)))
                   .count();
-          if (into >= 2) {
+          long out = around.getOrDefault(key, List.of()).size() - into;
+          boolean unnamed = !endOf.containsKey(key) && !intervals.containsKey(key);
+          if (into >= 2 || (unnamed && into >= 1 && out <= 1)) {
             inside.add(key);
             grew = true;
           }
@@ -2702,7 +2708,8 @@ public final class YardGeometry {
     private record Reach(double distance, List<Link> links) {}
 
     /**
-     * 从 {@code start} 沿轨道按行车方向走（到一个节点后不折返：不沿与进来那条区间朝同一边离开的区间走），按距离从近到远记下走到的各节点的最短路。
+     * 从 {@code start} 沿轨道按行车方向走（到一个节点后不折返：不沿与进来那条区间朝同一边离开的区间走；走到平交只能直着穿过去，见 {@link #crossing}），
+     * 按距离从近到远记下走到的各节点的最短路。
      *
      * @param start 起点
      * @param arrived 进到起点的那条区间（起点各方向都能走时为 null）
@@ -2740,11 +2747,13 @@ public final class YardGeometry {
         if (!at.equals(origin) && !pass.test(at.key())) {
           continue;
         }
+        Map<Link, Link> across = at.via() == null ? Map.of() : crossing(at.key());
         for (Link link : around.getOrDefault(at.key(), List.of())) {
           String next = link.other(at.key());
           if (link == at.via()
               || !enter.test(next)
-              || (at.via() != null && turnsBack(at.key(), at.via(), link))) {
+              || (at.via() != null && turnsBack(at.key(), at.via(), link))
+              || (!across.isEmpty() && across.get(at.via()) != link)) {
             continue;
           }
           State state = new State(next, link);
@@ -2757,6 +2766,41 @@ public final class YardGeometry {
         }
       }
       return reached;
+    }
+
+    /**
+     * 平交：四条区间两两从轨道方块相对的两面接出去、各对朝两边离开，两条线在这里交叉（剪式渡线中间的菱形交叉）。返回每条区间对面的那条，从一条进来只能从对面那条出去，
+     * 不能在交叉处拐到另一条线上——按轨道长度绕经交叉点有时更近，但那不是线路的走向。不是平交时为空。
+     */
+    private Map<Link, Link> crossing(String key) {
+      return crossings.computeIfAbsent(
+          key,
+          ignored -> {
+            List<Link> mine = around.getOrDefault(key, List.of());
+            Spot spot = spots.get(key);
+            if (mine.size() != 4 || spot == null) {
+              return Map.of();
+            }
+            Map<Integer, Link> byFace = new HashMap<>();
+            for (Link link : mine) {
+              int face = face(spot, link);
+              if (face < 0 || byFace.put(face, link) != null) {
+                return Map.of();
+              }
+            }
+            Map<Link, Link> across = new HashMap<>();
+            for (Map.Entry<Integer, Link> entry : byFace.entrySet()) {
+              Link link = entry.getValue();
+              Link opposite = byFace.get(entry.getKey() ^ 1);
+              double[] a = direction(spot, link);
+              double[] b = direction(spot, opposite);
+              if (a[0] * b[0] + a[1] * b[1] >= 0.0) {
+                return Map.of();
+              }
+              across.put(link, opposite);
+            }
+            return Map.copyOf(across);
+          });
     }
 
     /** 从群里的 {@code from} 经 {@code first} 往外按行车方向走（不再进这一群、不在道岔处折返），沿轨道最近的车站、车库或出口。 */

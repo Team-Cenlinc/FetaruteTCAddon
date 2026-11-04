@@ -98,8 +98,9 @@ final class TripMatcher {
   /**
    * 为这辆车找一趟表定车次：同一 route、当前停靠点计划发车与"现在"最接近、尚未被别的车占用。
    *
-   * <p>已经绑在交路上的车只在<b>本交路</b>里找，且不看容差：交路已经说明了它该跑哪一班，晚点就晚点跑。 按时间去抢别的交路的车次会连锁错班——被抢那一班的车只好再往后抢，
-   * 每辆车都早到整整一班、在站台上等别人的时刻；交路归属与班次进度从此对不上，到终点连回库票都接不了。同一 route 在一个交路里相隔整整一圈，就近不会选错。
+   * <p>已经绑在交路上的车只在<b>本交路</b>里找，运营班次不看容差（出入库展示车次仍限容差内，见循环里的说明）：交路已经说明了它该跑哪一班，晚点就晚点跑。
+   * 按时间去抢别的交路的车次会连锁错班——被抢那一班的车只好再往后抢， 每辆车都早到整整一班、在站台上等别人的时刻；交路归属与班次进度从此对不上，到终点连回库票都接不了。同一 route
+   * 在一个交路里相隔整整一圈，就近不会选错。
    *
    * <p>没绑交路的车（重启后留在线上的车、自由运行的车）按时间就近匹配，限容差内，并跳过别的车已经绑定的交路： 那一班有它自己的车，孤儿车绑上去就是同一交路两辆车。
    *
@@ -141,6 +142,7 @@ final class TripMatcher {
         if (!trip.routeId().equals(routeId)) {
           continue;
         }
+        boolean legTrip = boundDuty.isPresent() && timetable.isLegTrip(trip);
         if (boundDuty.isEmpty()) {
           Optional<String> tripConsist = timetable.consistOf(trip);
           if (tripConsist.isPresent()
@@ -166,7 +168,9 @@ final class TripMatcher {
             nearestDeviation = deviation;
             nearestCode = trip.tripCode();
           }
-          if (boundDuty.isEmpty() && Math.abs(deviation) > tolerance) {
+          if ((boundDuty.isEmpty() || legTrip) && Math.abs(deviation) > tolerance) {
+            // 出入库展示车次对已绑交路的车也只认容差内的：中途顶班的车也跑这条出库线路，不看容差会配上本交路早上
+            // 那一班展示车次，晚点算出几千秒，当场被换下再派一辆。重启后仍在出入库段上的车照常在容差内配回它的展示车次。
             continue;
           }
           TripKey tripKey = new TripKey(timetable.id(), trip.id(), date);

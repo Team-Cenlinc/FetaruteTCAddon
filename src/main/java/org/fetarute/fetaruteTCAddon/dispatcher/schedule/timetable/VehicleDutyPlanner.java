@@ -511,11 +511,12 @@ public final class VehicleDutyPlanner {
         // 这辆车在端点已经等过头了：运行时的闲置回收早把它送回库，编表不能让它凭空等到下一个时隙。
         continue;
       }
-      if (duty.tripCount() + 1 > limits.maxTripsPerDuty()) {
+      int tripLimit = Math.max(duty.tripLimit(limits), limits.maxTripsFor(trip.routeId()));
+      if (duty.tripCount() + 1 > tripLimit) {
         continue;
       }
       boolean closable = access.closable(trip, duty.consist);
-      if (!closable && duty.tripCount() + 1 >= limits.maxTripsPerDuty()) {
+      if (!closable && duty.tripCount() + 1 >= tripLimit) {
         // 接完这一班就到班次上限，却停在一个回不了库的终点。
         continue;
       }
@@ -703,7 +704,7 @@ public final class VehicleDutyPlanner {
     if (end - start > limits.maxDutyDurationSeconds()) {
       return closable ? UnassignedReason.EXCEEDS_DUTY_LIMITS : UnassignedReason.NO_RETURN_ACCESS;
     }
-    if (!closable && limits.maxTripsPerDuty() < 2) {
+    if (!closable && limits.maxTripsFor(trip.routeId()) < 2) {
       return UnassignedReason.NO_RETURN_ACCESS;
     }
     return null;
@@ -764,7 +765,7 @@ public final class VehicleDutyPlanner {
     if (last.endsAtDepot()) {
       return VehicleDuty.CloseReason.ROUTE_ENDS_AT_DEPOT;
     }
-    if (duty.tripCount() >= limits.maxTripsPerDuty()) {
+    if (duty.tripCount() >= duty.tripLimit(limits)) {
       return VehicleDuty.CloseReason.MAX_TRIPS;
     }
     if (!access.closable(last, duty.consist)) {
@@ -858,6 +859,9 @@ public final class VehicleDutyPlanner {
     private VehicleDuty.CloseReason closeReason;
     private Optional<Leg> closingLeg = Optional.empty();
 
+    /** {@link #tripLimit} 的缓存：接班时随手更新，退班时作废（−1）。 */
+    private int tripLimit = -1;
+
     private OpenDuty(
         int sequence,
         String startDepot,
@@ -897,12 +901,16 @@ public final class VehicleDutyPlanner {
 
     private void accept(PlannedTrip trip, Limits limits) {
       trips.add(trip);
+      if (tripLimit >= 0) {
+        tripLimit = Math.max(tripLimit, limits.maxTripsFor(trip.routeId()));
+      }
       durations.add(trip.durationFor(consist));
       refresh(limits);
     }
 
     private PlannedTrip popLast() {
       PlannedTrip removed = trips.remove(trips.size() - 1);
+      tripLimit = -1;
       durations.remove(durations.size() - 1);
       // 退掉尾段后 lastTerminal/endSeconds 只在 toDuty 里再用，那里会按剩余班次重算。
       if (!trips.isEmpty()) {
@@ -933,6 +941,18 @@ public final class VehicleDutyPlanner {
 
     private PlannedTrip lastTrip() {
       return trips.get(trips.size() - 1);
+    }
+
+    /** 这条交路最多几班：取它跑过的各 route 所在组的上限中最大的（跨组接班不被小组的上限卡住）。还没跑过班次（解编生出的子交路）时为 0，由要接的那一班自己的组定。 */
+    private int tripLimit(Limits limits) {
+      if (tripLimit < 0) {
+        int limit = 0;
+        for (PlannedTrip trip : trips) {
+          limit = Math.max(limit, limits.maxTripsFor(trip.routeId()));
+        }
+        tripLimit = limit;
+      }
+      return tripLimit;
     }
 
     private int tripCount() {
@@ -1631,12 +1651,14 @@ public final class VehicleDutyPlanner {
    * @param maxDutyDurationSeconds 单个 duty 最长在线时间（秒），含出库与回库走行
    * @param turnaround 折返时间表，见 {@link TurnaroundTable}——它不是上限，是从 route 定义算出来的物理量
    * @param maxIdleSeconds 在端点等下一班的上限，超过就回库；与运行时 {@code reclaim.max-idle-seconds} 同一条规则
+   * @param maxTripsByRoute 按组生效的班次上限：route → 它所在交路组的上限；不在其中的 route 用 {@code maxTripsPerDuty}
    */
   public record Limits(
       int maxTripsPerDuty,
       int maxDutyDurationSeconds,
       TurnaroundTable turnaround,
-      int maxIdleSeconds) {
+      int maxIdleSeconds,
+      Map<UUID, Integer> maxTripsByRoute) {
 
     /** 默认上限：4 趟 / 2 小时在线 / 端点闲置 5 分钟。折返<b>没有</b>默认值——它来自各 route 终到站的 dwell。 */
     public static final int DEFAULT_MAX_TRIPS = 4;
@@ -1652,6 +1674,46 @@ public final class VehicleDutyPlanner {
           maxDutyDurationSeconds > 0 ? maxDutyDurationSeconds : DEFAULT_MAX_DURATION_SECONDS;
       turnaround = turnaround == null ? TurnaroundTable.none() : turnaround;
       maxIdleSeconds = maxIdleSeconds > 0 ? maxIdleSeconds : DEFAULT_MAX_IDLE_SECONDS;
+      Map<UUID, Integer> byRoute = new LinkedHashMap<>();
+      if (maxTripsByRoute != null) {
+        maxTripsByRoute.forEach(
+            (route, trips) -> {
+              if (route != null && trips != null && trips > 0) {
+                byRoute.put(route, trips);
+              }
+            });
+      }
+      maxTripsByRoute = Map.copyOf(byRoute);
+    }
+
+    /** 全线同一个班次上限。 */
+    public Limits(
+        int maxTripsPerDuty,
+        int maxDutyDurationSeconds,
+        TurnaroundTable turnaround,
+        int maxIdleSeconds) {
+      this(maxTripsPerDuty, maxDutyDurationSeconds, turnaround, maxIdleSeconds, Map.of());
+    }
+
+    /** 这条 route 所在组的班次上限；没有按组配置时用全线的。 */
+    public int maxTripsFor(UUID routeId) {
+      Integer trips = routeId == null ? null : maxTripsByRoute.get(routeId);
+      return trips == null ? maxTripsPerDuty : trips;
+    }
+
+    /** 各组上限中最大的一个（含全线的）：只用来回答"有没有交路能接两班以上"这类全局问题。 */
+    public int maxTripsCeiling() {
+      int ceiling = maxTripsPerDuty;
+      for (int trips : maxTripsByRoute.values()) {
+        ceiling = Math.max(ceiling, trips);
+      }
+      return ceiling;
+    }
+
+    /** 换一份折返表，其余原样带过去。 */
+    public Limits withTurnaround(TurnaroundTable table) {
+      return new Limits(
+          maxTripsPerDuty, maxDutyDurationSeconds, table, maxIdleSeconds, maxTripsByRoute);
     }
 
     /** 折返表 + 默认闲置上限。 */

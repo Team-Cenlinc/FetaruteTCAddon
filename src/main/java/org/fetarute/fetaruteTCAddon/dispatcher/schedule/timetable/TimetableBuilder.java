@@ -2429,7 +2429,7 @@ public final class TimetableBuilder {
         options.dutyLimits().maxIdleSeconds(),
         holdLimit,
         preferred,
-        options.dutyLimits().maxTripsPerDuty(),
+        options.dutyLimits().maxTripsCeiling(),
         neighborCells(input, footprints, options, PeriodicSolver.hyperperiodOf(flows)),
         // 沿用参考相位的制式不整体旋转：转了交界处就接不上上一段。
         preferred.isEmpty() ? options.horizonSeconds() : 0,

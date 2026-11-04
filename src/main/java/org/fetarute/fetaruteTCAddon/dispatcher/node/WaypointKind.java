@@ -18,5 +18,10 @@ public enum WaypointKind {
   /** 车库咽喉节点，形如 SURN:D:LVT:1:00。 */
   DEPOT_THROAT,
   /** 区间内的道岔或分支点，可扩展自定义后缀。 */
-  SWITCHER
+  SWITCHER;
+
+  /** 站咽喉或车库咽喉（五段牌子）；道岔不算。 */
+  public boolean isThroat() {
+    return this == STATION_THROAT || this == DEPOT_THROAT;
+  }
 }

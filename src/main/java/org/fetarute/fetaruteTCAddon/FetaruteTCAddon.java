@@ -2487,11 +2487,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
         timetableService == null ? null : timetableService::allowsReturn);
     // 同股道列车对：朝对方开的那一方不接票；按表运行时下面会与时刻表的过滤合成一个。
     simpleAssigner.setLayoverCandidateFilter(this::couplerAllowsLayoverDispatch);
+    simpleAssigner.setTicketOwnership(null);
     // 票据认识 duty：续班只接本交路的车、到期作废、派发后把车绑到交路上。
     if (spawnManager
         instanceof
         org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
         scheduled) {
+      // 已认领的折返事务：票作废、车又不再归这张票的交路时放弃事务，交给回收；驾乘与联挂的暂扣不算。
+      simpleAssigner.setTicketOwnership(scheduled::acceptsCandidate);
       // 车次已有人领、要在始发站或车库接班：派车前问驾驶会话，先留着车等驾驶员上车。
       simpleAssigner.setLayoverCandidateFilter(
           (ticket, trainName) ->

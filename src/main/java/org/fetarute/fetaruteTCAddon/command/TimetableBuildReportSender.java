@@ -111,7 +111,10 @@ final class TimetableBuildReportSender {
     }
     sender.sendMessage(
         FtaTimetableCommand.field(
-            "交路上限", options.dutyLimits().maxTripsPerDuty() + " 班/交路（" + maxTripsSource + "）"));
+            "交路上限",
+            options.dutyLimits().maxTripsByRoute().isEmpty()
+                ? options.dutyLimits().maxTripsPerDuty() + " 班/交路（" + maxTripsSource + "）"
+                : maxTripsSource));
     for (String note : result.phaseNotes()) {
       sender.sendMessage(Component.text("  相位: " + note, NamedTextColor.DARK_GRAY));
     }

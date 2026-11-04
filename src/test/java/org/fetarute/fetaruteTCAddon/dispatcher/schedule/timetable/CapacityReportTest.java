@@ -23,8 +23,9 @@ import org.junit.jupiter.api.Test;
 /**
  * 瓶颈：每个资源在最忙一小时里被闭塞时间占了多久。
  *
- * <p>链 A–B–C–D–E 每段 100 格、10 格/秒，慢车每站停 30 秒，车长 30 格（闭塞时间见 {@link BlockingTimesTest}）。B
- * 站台每班从发车就要用到（前沿起步即到 B）， 车头 10 秒到、40 秒开，车头到 E（130 秒）才放出：每次 131 秒，其中进入前 10、占用（含停站）30、出清 91。
+ * <p>链 A–B–C–D–E 每段 100 格、10 格/秒，慢车每站停 30 秒，车长 30 格（闭塞时间见 {@link BlockingTimesTest}）。B 站台每班从发车前一个
+ * tick 就要用到（前沿起步即伸进 A–B）， 车头 10 秒到、40 秒开，车头到 E（130 秒）才放出：每次 132 秒，其中进入前 11、占用（含停站）30、出清 91。A–B
+ * 那条边的终点就是 B，随 B 一起放出，同样每次 132 秒，与 B 站台并列最紧。
  */
 class CapacityReportTest {
 
@@ -47,19 +48,20 @@ class CapacityReportTest {
   private final TimetableConflictChecker.GraphIndex index =
       TimetableConflictChecker.GraphIndex.of(chain);
 
-  /** 每 300 秒一班：一小时 12 班，B 站台被占 12 × 131 秒，最紧；组成按每次平均。 */
+  /** 每 300 秒一班：一小时 12 班，B 站台被占 12 × 132 秒，并列最紧；组成按每次平均。 */
   @Test
   void theBusiestResourceComesFirstWithItsPerPassComposition() {
     List<CapacityReport.Bottleneck> top = measure(departures(0, 300, 24), RULES);
 
-    CapacityReport.Bottleneck b = top.get(0);
-    assertEquals("platform:" + B, b.key());
+    CapacityReport.Bottleneck b =
+        top.stream().filter(one -> one.key().equals("platform:" + B)).findFirst().orElseThrow();
+    assertEquals(top.get(0).utilization(), b.utilization(), 1.0E-9);
     assertEquals(12, b.passes());
-    assertEquals(12 * 131 / 3600.0D, b.utilization(), 1.0E-9);
-    assertEquals(10.0D, b.approachSeconds(), 1.0E-9);
+    assertEquals(12 * 132 / 3600.0D, b.utilization(), 1.0E-9);
+    assertEquals(11.0D, b.approachSeconds(), 1.0E-9);
     assertEquals(30.0D, b.occupySeconds(), 1.0E-9);
     assertEquals(91.0D, b.clearSeconds(), 1.0E-9);
-    assertEquals(131.0D, b.perPassSeconds(), 1.0E-9);
+    assertEquals(132.0D, b.perPassSeconds(), 1.0E-9);
     assertFalse(b.occupationOnly());
     for (int k = 1; k < top.size(); k++) {
       assertTrue(top.get(k - 1).utilization() >= top.get(k).utilization());
@@ -78,7 +80,7 @@ class CapacityReportTest {
     assertTrue(b.peakStartSeconds() < 300, () -> "最忙一小时从 " + b.peakStartSeconds() + " 起");
   }
 
-  /** 车长未知：放不出时刻，占用退回占用区间（B 站台只剩车头到发之间的 30 秒），并标出来。 */
+  /** 车长未知：放不出时刻，占用退回占用区间（B 站台只剩要用到车头开出的 41 秒），并标出来。 */
   @Test
   void anUnknownTrainLengthFallsBackToOccupation() {
     CapacityReport.Bottleneck b =
@@ -89,7 +91,7 @@ class CapacityReportTest {
 
     assertTrue(b.occupationOnly());
     assertEquals(0.0D, b.clearSeconds(), 1.0E-9);
-    assertEquals(40.0D, b.perPassSeconds(), 1.0E-9);
+    assertEquals(41.0D, b.perPassSeconds(), 1.0E-9);
   }
 
   /** 报告行写出每次占用的组成，最后一行点名最紧的资源与"降到第二紧要省多少"。 */
@@ -100,9 +102,12 @@ class CapacityReportTest {
     List<String> lines =
         TimetableBuildReportText.describeBottlenecks(new CapacityReport.Report(top, 0), 0);
 
-    assertTrue(lines.get(1).contains("站台 " + B), lines::toString);
-    assertTrue(lines.get(1).contains("进入前 10 + 占用（含停站） 30 + 出清 91"), lines::toString);
-    assertTrue(lines.get(lines.size() - 1).contains("最紧的是 站台 " + B), lines::toString);
+    assertTrue(
+        lines.stream()
+            .anyMatch(
+                line -> line.contains("站台 " + B) && line.contains("进入前 11 + 占用（含停站） 30 + 出清 91")),
+        lines::toString);
+    assertTrue(lines.get(lines.size() - 1).contains("最紧的是 "), lines::toString);
     assertTrue(lines.get(lines.size() - 1).contains("要降到第二紧"), lines::toString);
   }
 

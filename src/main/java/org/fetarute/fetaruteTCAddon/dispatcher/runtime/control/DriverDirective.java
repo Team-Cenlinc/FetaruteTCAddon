@@ -15,6 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * @param allowLaunch 是否允许静止列车起步（不是停车信号即允许）
  * @param distanceBlocks 到约束点（停车点、授权末端）的距离；没有时为空
  * @param envelope 随距离收紧的速度包络，从下发时的车头量起；没有时为 {@code null}
+ * @param displayAspect 给驾驶员看的信号（见 {@link BrakingSignalDisplay}）；控车与起步许可只认 {@code aspect}
  */
 public record DriverDirective(
     SignalAspect aspect,
@@ -23,12 +24,26 @@ public record DriverDirective(
     double permittedBps,
     boolean allowLaunch,
     OptionalLong distanceBlocks,
-    SpeedEnvelope envelope) {
+    SpeedEnvelope envelope,
+    SignalAspect displayAspect) {
 
   public DriverDirective {
     Objects.requireNonNull(aspect, "aspect");
     stopMode = stopMode == null ? StopControlMode.BRAKING_TO_PLANNED_STOP : stopMode;
     distanceBlocks = distanceBlocks == null ? OptionalLong.empty() : distanceBlocks;
+    displayAspect = displayAspect == null ? aspect : displayAspect;
+  }
+
+  /** 显示信号与控车信号相同。 */
+  public DriverDirective(
+      SignalAspect aspect,
+      StopControlMode stopMode,
+      double requestedBps,
+      double permittedBps,
+      boolean allowLaunch,
+      OptionalLong distanceBlocks,
+      SpeedEnvelope envelope) {
+    this(aspect, stopMode, requestedBps, permittedBps, allowLaunch, distanceBlocks, envelope, null);
   }
 
   /** 是否为停车信号。 */

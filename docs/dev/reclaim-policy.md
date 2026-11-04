@@ -105,6 +105,14 @@ SURC 没有越行线，WS-2 与 MT-3 全线停摆。续班票现在等本交路�
   debug 行 `RECLAIM_DISPATCH_ATTEMPT_STALE` 加一条不依赖 debug 开关的 WARN。同一次认领只报一次，释放后重新认领算新的一次；
   回收扫描间隔决定实际报出时刻在 120 秒到 120 秒 + `check-interval-seconds` 之间。认领时刻由调度层时钟传入。
   `RECLAIM_STRANDED_SKIP reason=dispatch-attempt-in-progress` 也带上 `attemptAgeSeconds`。
+- **票已作废、车不再归这张票：放弃交接**：同一张票重试之前要先过接车闸（车辆交路闸、回库闸、叫车过滤、票据过滤）。
+  时刻表把车从交路上解下（`timetable.max-delay-seconds` 晚点上限、换车）之后，原车再也过不了票据过滤，认领永远不会被重试，
+  却一直挡着票据作废、上面的回收与滞留销毁——车占着终点站台，后车全堵在进站前，只能人工删车。
+  所以票据到期（`ticket-expiry`，或 `pending-layover-max-age-seconds` 的 `hard-expiry`）时，若按交路归属（车辆交路闸 / 回库闸 +
+  `SimpleTicketAssigner#setTicketOwnership`，按表运行时接 `TimetableSpawnManager#acceptsCandidate`）这张票已不归原车，
+  就释放认领、按作废结掉票据，WARN `[FTA] 折返票据已作废且原车不能再接，放弃交接`；车回到普通待命，由回收带走
+  （被换下的车立即回收，无回库线路的车站当场销毁）。交接做到一半留下的保守占用不动，车停着直到回收处理。
+  驾乘接车、联挂这类暂时扣车不算失去归属，照旧保留认领，等同一张票重试；不按表运行时从不放弃。
 
 ## 配置项
 在 `config.yml` 的 `reclaim` 段落：

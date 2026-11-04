@@ -72,6 +72,8 @@ class HeldAuthorityBrakingSignalTickTest {
   private static final OccupancyResource EDGE_BC =
       OccupancyResource.forEdge(EdgeId.undirected(B, C));
   private static final OccupancyResource NODE_C = OccupancyResource.forNode(C);
+  private static final OccupancyResource EDGE_CD =
+      OccupancyResource.forEdge(EdgeId.undirected(C, D));
 
   /** 被拒后继续刹车、下一拍仍能证明授权在手；停稳以后照旧收缩到当前位置，停因明细去掉刹车后缀。 */
   @Test
@@ -193,6 +195,53 @@ class HeldAuthorityBrakingSignalTickTest {
     assertTrue(scenario.manager.getClaim(EDGE_BC).isEmpty(), "本拍新拿到的照旧随回滚放掉");
   }
 
+  /** 沿已持有授权刹车时显示减速，控车灯仍是 STOP；剩余距离按当前车速刹不住、或停稳以后显示停车。 */
+  @Test
+  void brakingWithinTheHeldAuthorityIsDisplayedAsCaution() {
+    Scenario scenario = new Scenario();
+    scenario.grantWindowToC(ResourceIntent.MOVEMENT_REQUIRED);
+
+    scenario.tick(95.0, true);
+
+    assertEquals(SignalAspect.STOP, scenario.signal());
+    assertEquals(SignalAspect.CAUTION, scenario.displaySignal(), "10 bps 刹 50 格，离停车点 53 格");
+
+    scenario.tick(99.0, true);
+
+    assertEquals(SignalAspect.STOP, scenario.displaySignal(), "离停车点 49 格，10 bps 刹不住：显示停车");
+
+    scenario.tick(99.0, false);
+
+    assertEquals(SignalAspect.STOP, scenario.displaySignal(), "停稳以后显示停车");
+  }
+
+  /**
+   * 刹车途中前车往前挪（放掉 D、改占 C→D）：按此刻车速窗口只到 C，本拍能放行；按被挡时的车速窗口仍伸到 C→D，再提速就又被挡。 这时只给注意信号跟着慢行，C→D 也放掉以后才给绿灯。
+   */
+  @Test
+  void aTrainRecoveringFromBrakingIsHeldAtCautionUntilItsFormerSpeedWindowIsClear() {
+    Scenario scenario = new Scenario();
+    scenario.grantWindowToC(ResourceIntent.MOVEMENT_REQUIRED);
+    scenario.tick(95.0, true);
+    assertEquals(SignalAspect.STOP, scenario.signal());
+    scenario.manager.releaseResource(OccupancyResource.forNode(D), Optional.of(BLOCKER));
+    scenario.occupyByBlocker(EDGE_CD, ResourceIntent.MOVEMENT_REQUIRED);
+
+    scenario.tick(99.0, true, 0.3);
+
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, scenario.signal());
+    assertTrue(scenario.service.getActiveStopState(TRAIN).isEmpty(), "本拍照常放行，只是不给绿灯");
+
+    scenario.tick(99.5, true, 0.3);
+
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, scenario.signal(), "C→D 仍被占：保持注意");
+
+    scenario.manager.releaseResource(EDGE_CD, Optional.of(BLOCKER));
+    scenario.tick(99.8, true, 0.3);
+
+    assertEquals(SignalAspect.PROCEED, scenario.signal(), "按被挡时车速的窗口也清了才给绿灯");
+  }
+
   private static void assertHeldByTrain(
       SimpleOccupancyManager manager, OccupancyResource resource) {
     OccupancyClaim claim =
@@ -229,6 +278,10 @@ class HeldAuthorityBrakingSignalTickTest {
       tick(70.0, true);
       assertEquals(SignalAspect.PROCEED, signal());
       assertHeldByTrain(manager, NODE_C);
+      occupyByBlocker(OccupancyResource.forNode(D), blockerIntent);
+    }
+
+    private void occupyByBlocker(OccupancyResource resource, ResourceIntent intent) {
       assertTrue(
           manager
               .acquire(
@@ -236,13 +289,13 @@ class HeldAuthorityBrakingSignalTickTest {
                       BLOCKER,
                       Optional.empty(),
                       Instant.now(),
-                      List.of(OccupancyResource.forNode(D)),
+                      List.of(resource),
                       Map.of(),
                       Map.of(),
                       0,
                       AuthorizationPurpose.RUNTIME_MOVE,
                       Map.of(),
-                      Map.of(OccupancyResource.forNode(D), blockerIntent)))
+                      Map.of(resource, intent)))
               .allowed());
     }
 
@@ -261,6 +314,10 @@ class HeldAuthorityBrakingSignalTickTest {
 
     private SignalAspect signal() {
       return registry.get(TRAIN).orElseThrow().lastSignal();
+    }
+
+    private SignalAspect displaySignal() {
+      return registry.displaySignal(TRAIN).orElseThrow();
     }
 
     private ControlDiagnostics diagnostics() {

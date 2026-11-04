@@ -25,6 +25,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.RearGuardWindo
  * <ul>
  *   <li>后车要不减速，得在车头前方"制动距离 + 授权余量"之内都拿到资源；朝停车站开时只要到停车点为止，起步时才往停车点之后要。
  *   <li>前车身后的资源，要等车头走过下一个能记进度的节点（交路节点、路径点或道岔）、那段资源落到车身与尾部保护之外，下一个调度 tick 才释放。
+ *   <li>授权按整条边要：窗口一伸进某条边，这条边连同它两端的节点一起要。边的终点节点与下一条边一起放出， 所以后车伸进一条边，实际要等前车把下一条边也放出来。
+ *   <li>停站发车前先要拿到前方若干条边（发车门控），不在下一停车点截止。
+ *   <li>后车被挡之后不随前车释放立即放行，要等自己的下一个调度 tick 重新申请。
  * </ul>
  *
  * 两车之间真正需要的间隔因此随地点变，一个全网通用的裕量要么在这里不够、要么在那里白占。这里把同一套规则搬过来逐个资源算， 两条交路 A 在前、B 在后时，B 至少要比 A 晚发 {@code
@@ -142,40 +145,39 @@ final class BlockingTimes {
         length.isPresent() ? releaseTimes(path, types, rules, length.getAsLong()) : null;
     Map<String, Integer> needOut = new HashMap<>();
     Map<String, Integer> releaseOut = new HashMap<>();
+    // 后车被挡后要等自己的下一个 tick 才重新申请：要用的时刻提前一个 tick，与放出一侧的 tick 对称。
+    double tick = rules.tickSeconds();
     for (int k = 0; k + 1 < points; k++) {
-      // 边 k 从点 k 到点 k+1：前沿越过它的起点、伸进这条边时才要用（停在点 k 的车要到起步才要）；
-      // 尾部保护按整条边往回量，边 k 与点 k 同时落到保护之外。
+      // 边 k 从点 k 到点 k+1：前沿越过它的起点、伸进这条边时才要用（停在点 k 的车要到起步才要）。
+      // 尾部保护按整条边往回量，边 k 与点 k 同时落到保护之外；可它的终点 k+1 是下一条边的起点，要随边 k+1 才放出，
+      // 而后车伸进边 k 时连 k+1 一起要——路径点不单独登记，这一截算在边上。
       String key = TimetableConflictChecker.edgeKey(path.edges.get(k));
-      put(needOut, releaseOut, key, front.edges[k], release, k);
+      put(needOut, releaseOut, key, front.edges[k] - tick, release, k + 1);
     }
     for (int k = 0; k < points; k++) {
       NodeId node = path.nodes.get(k);
       NodeType type = types.get(node);
+      // 点 k 在前沿伸进驶入它的那条边时就要用，不等前沿走到它。
+      double need = (k == 0 ? front.points[0] : front.edges[k - 1]) - tick;
       if (type == NodeType.SWITCHER) {
-        put(
-            needOut,
-            releaseOut,
-            TimetableConflictChecker.junctionKey(node),
-            front.points[k],
-            release,
-            k);
+        put(needOut, releaseOut, TimetableConflictChecker.junctionKey(node), need, release, k);
       } else if (type == NodeType.STATION) {
-        put(needOut, releaseOut, "platform:" + node.value(), front.points[k], release, k);
+        put(needOut, releaseOut, "platform:" + node.value(), need, release, k);
       }
     }
     return new BlockingTimes(needOut, releaseOut);
   }
 
-  /** 同一个资源路过两次时取第一次。 */
+  /** 同一个资源路过两次时取第一次；放出取点 {@code releaseAt} 的放出时刻。 */
   private static void put(
       Map<String, Integer> needOut,
       Map<String, Integer> releaseOut,
       String key,
       double need,
       double[] release,
-      int k) {
+      int releaseAt) {
     if (needOut.putIfAbsent(key, (int) Math.floor(need)) == null && release != null) {
-      releaseOut.put(key, (int) Math.ceil(release[k]));
+      releaseOut.put(key, (int) Math.ceil(release[releaseAt]));
     }
   }
 
@@ -194,6 +196,10 @@ final class BlockingTimes {
     for (int to = 1; to < points; to++) {
       if (!path.stop[to] && to < points - 1) {
         continue;
+      }
+      if (path.stop[from]) {
+        front.hold(path.departure[from]);
+        front.advance(path.departure[from], departureGate(path, from, rules));
       }
       Optional<RunTimeModel.Trajectory> trajectory =
           trajectories.of(
@@ -331,6 +337,23 @@ final class BlockingTimes {
             ? path.x[k + 1]
             : Math.min(cap, Math.max(path.x[after], path.x[k + 1] + reach(speed, rules)));
     front.advance(path.arrival[k + 1], end);
+  }
+
+  /**
+   * 从停车点 {@code from} 发车前要先拿到的前沿：至少 {@code departureGateEdges} 条边，不足授权余量时继续往前，不在下一停车点截止；
+   * 没有发车门控时只到停车点本身（起步后由制动距离加余量往前要）。
+   */
+  private static double departureGate(Path path, int from, TimetableBuildOptions.Following rules) {
+    int last = path.nodes.size() - 1;
+    int gate = rules.departureGateEdges();
+    if (gate <= 0) {
+      return path.x[from];
+    }
+    int to = Math.min(last, from + gate);
+    while (to < last && path.x[to] - path.x[from] < rules.marginBlocks()) {
+      to++;
+    }
+    return path.x[to];
   }
 
   /** 制动距离加授权余量。 */

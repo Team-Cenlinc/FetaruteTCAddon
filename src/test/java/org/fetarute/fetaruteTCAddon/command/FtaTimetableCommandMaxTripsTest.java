@@ -10,7 +10,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDutyPla
 import org.junit.jupiter.api.Test;
 
 /**
- * 交路上限的优先级链：{@code --max-trips} > 交路组的 {@code maxOperationTrips} > 默认。
+ * 交路上限的优先级链：{@code --max-trips}（整次覆盖）> 各交路组自己的 {@code maxOperationTrips}（按组生效）> 默认。
  *
  * <p>此前这个值只认 flag，在组上配了 {@code maxOperationTrips} 也白配。它一旦偏小，症状是「大交路的班次被 大量取消、报
  * NO_CREATE_ACCESS」——交路接不下去，车只好提前回库，后面从中途站始发的班次就没车可用了， 离病因很远。实测 WS 配 180/360 时非得 8
@@ -33,19 +33,19 @@ class FtaTimetableCommandMaxTripsTest {
   }
 
   /**
-   * 没给 flag 就读组配置，多个组取<b>最大值</b>。
+   * 没给 flag 就按组生效：报告里逐组列出各自的上限，没按组配置的 route 用默认值，不借别组的最大值。
    *
-   * <p>一条交路可以跨组接班（小交路进城、接大交路跑全程），按某一个组的上限卡它没有道理，取最大才不会把 长交路误伤。
+   * <p>此前多个组取最大值统一卡，短交路线借到长交路线的上限，跑一个多小时就回库换车，换车走行满线跑，排表排不开。 跨组接班的交路取它跑过的各组中最大的（见派车器）。
    */
   @Test
-  void groupConfigurationIsUsedAndTakesTheLargest() {
+  void groupConfigurationIsAppliedPerGroup() {
     FtaTimetableCommand.MaxTripsChoice choice =
         FtaTimetableCommand.resolveMaxTrips(null, List.of(group("Short", 4), group("Full", 8)));
 
-    assertEquals(8, choice.trips());
-    assertTrue(choice.description().contains("Full"), choice.description());
-    assertTrue(choice.description().contains("maxOperationTrips"), choice.description());
-    assertEquals(Optional.of("Full"), choice.group(), "面板的 [改] 要指向值真正来源的那个组，不是第一个组");
+    assertEquals(VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS, choice.trips(), "没按组配置的 route 用默认值");
+    assertTrue(choice.description().contains("Short 4"), choice.description());
+    assertTrue(choice.description().contains("Full 8"), choice.description());
+    assertTrue(choice.description().contains("按组"), choice.description());
   }
 
   /** 组 metadata 认到 1000，编表这边的 flag 只认到 64：从组配置走进来时受同一个上界。 */
@@ -54,28 +54,38 @@ class FtaTimetableCommandMaxTripsTest {
     FtaTimetableCommand.MaxTripsChoice choice =
         FtaTimetableCommand.resolveMaxTrips(null, List.of(group("Full", 1000)));
 
-    assertEquals(FtaTimetableCommand.MAX_TRIPS_CEILING, choice.trips());
+    assertTrue(
+        choice.description().contains("Full " + FtaTimetableCommand.MAX_TRIPS_CEILING),
+        choice.description());
     assertTrue(choice.description().contains("收到上限"), choice.description());
   }
 
-  /** 各组配得不一样时给出提醒：编表取最大，运行时按组各自的 FTA_OP_MAX 回收，配得小的那个组排出来的 交路比车跑得完的长，后面几班到点没车。 */
+  /** 只有 --max-trips 覆盖得比某组的配置大时才提醒：运行时按组各自的 FTA_OP_MAX 回收，那个组排出来的交路比车跑得完的长。 */
   @Test
-  void mismatchedGroupsAreWarnedAbout() {
+  void overrideLargerThanAGroupIsWarnedAbout() {
+    String warning =
+        FtaTimetableCommand.maxTripsOverrideWarning(
+                10, List.of(group("Short", 4), group("Full", 8)))
+            .orElse("");
+    assertTrue(warning.contains("Short 4") && warning.contains("Full 8"), warning);
     assertTrue(
-        FtaTimetableCommand.maxTripsMismatchWarning(List.of(group("Short", 4), group("Full", 8)))
+        FtaTimetableCommand.maxTripsOverrideWarning(
+                null, List.of(group("Short", 4), group("Full", 8)))
             .orElse("")
             .contains("Short"),
-        "要点名配得小的那个组");
+        "不带 flag、各组配得不一样：跨组接班按最大的排，要点名配得小的组");
     assertTrue(
-        FtaTimetableCommand.maxTripsMismatchWarning(List.of(group("Short", 8), group("Full", 8)))
+        FtaTimetableCommand.maxTripsOverrideWarning(
+                null, List.of(group("Short", 8), group("Full", 8)))
             .isEmpty(),
         "配成一样就不该提醒");
     assertTrue(
-        FtaTimetableCommand.maxTripsMismatchWarning(List.of(group("Short", null))).isEmpty(),
-        "一个都没配也不该提醒");
+        FtaTimetableCommand.maxTripsOverrideWarning(4, List.of(group("Short", 4), group("Full", 8)))
+            .isEmpty(),
+        "覆盖值不大于任何组的配置，不该提醒");
   }
 
-  /** 组上没配的不参与比较；一个都没配就回落到默认。 */
+  /** 组上没配的用默认值；一个都没配就整张表用默认。 */
   @Test
   void fallsBackToTheDefaultWhenNoGroupConfiguresIt() {
     FtaTimetableCommand.MaxTripsChoice none =
@@ -89,6 +99,7 @@ class FtaTimetableCommandMaxTripsTest {
 
     FtaTimetableCommand.MaxTripsChoice partial =
         FtaTimetableCommand.resolveMaxTrips(null, List.of(group("Short", null), group("Full", 6)));
-    assertEquals(6, partial.trips());
+    assertEquals(VehicleDutyPlanner.Limits.DEFAULT_MAX_TRIPS, partial.trips());
+    assertTrue(partial.description().contains("Full 6"), partial.description());
   }
 }

@@ -66,6 +66,8 @@ public record TimetableBuildOptions(
    *     following-stop-margin-blocks + movement-authority-caution-margin-blocks)}
    * @param rearGuardEdges 车尾之后多保留的边数（{@code rear-guard-edges}）
    * @param tickSeconds 调度 tick 的秒数（{@code dispatch-tick-interval-ticks} / 20）
+   * @param departureGateEdges 停站发车前要先拿到的前方边数（{@code max(lookahead-edges, min-clear-edges)}），
+   *     不足授权余量时继续往前要，不在下一停车点截止；零表示发车只按制动距离加余量要
    * @param trainLengthBlocks 各交路的保守车长（格），按出车编组算，与运行时尾部保护量车身的口径一致；没有的交路车长未知
    */
   public record Following(
@@ -73,10 +75,21 @@ public record TimetableBuildOptions(
       double marginBlocks,
       int rearGuardEdges,
       double tickSeconds,
+      int departureGateEdges,
       Map<UUID, Long> trainLengthBlocks) {
 
     /** 不按闭塞时间算。 */
     public static final Following NONE = new Following(0.0D, 0.0D, 0, 0.0D, Map.of());
+
+    /** 发车只按制动距离加余量要（不另设发车门控）。 */
+    public Following(
+        double decelBps2,
+        double marginBlocks,
+        int rearGuardEdges,
+        double tickSeconds,
+        Map<UUID, Long> trainLengthBlocks) {
+      this(decelBps2, marginBlocks, rearGuardEdges, tickSeconds, 0, trainLengthBlocks);
+    }
 
     public Following {
       boolean valid =
@@ -93,6 +106,7 @@ public record TimetableBuildOptions(
         rearGuardEdges = 0;
         tickSeconds = 0.0D;
       }
+      departureGateEdges = valid ? Math.max(0, departureGateEdges) : 0;
       Map<UUID, Long> lengths = new HashMap<>();
       if (valid && trainLengthBlocks != null) {
         trainLengthBlocks.forEach(
@@ -118,7 +132,8 @@ public record TimetableBuildOptions(
 
     /** 换一组车长，其它规则不变。 */
     public Following withTrainLengths(Map<UUID, Long> lengths) {
-      return new Following(decelBps2, marginBlocks, rearGuardEdges, tickSeconds, lengths);
+      return new Following(
+          decelBps2, marginBlocks, rearGuardEdges, tickSeconds, departureGateEdges, lengths);
     }
   }
 
@@ -676,12 +691,8 @@ public record TimetableBuildOptions(
         serviceEndSecondOfDay,
         headway,
         defaultDwell,
-        // 闲置上限必须原样带过去：三参构造会把它重置成默认值，--max-idle 与服务器配置就白传了。
-        new VehicleDutyPlanner.Limits(
-            dutyLimits.maxTripsPerDuty(),
-            dutyLimits.maxDutyDurationSeconds(),
-            turnarounds,
-            dutyLimits.maxIdleSeconds()),
+        // 闲置上限与按组的班次上限必须原样带过去：三参构造会把它们重置成默认值，--max-idle 与组配置就白传了。
+        dutyLimits.withTurnaround(turnarounds),
         tripCodePrefix,
         zoneId,
         separation,
